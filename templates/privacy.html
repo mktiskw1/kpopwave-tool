@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>プライバシーポリシー | KpopWave Daily</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Sans", sans-serif;
+      background: #f8f9fa;
+      color: #212529;
+      line-height: 1.8;
+    }
+    header {
+      background: #fff;
+      border-bottom: 1px solid #dee2e6;
+      padding: 1.25rem 0;
+    }
+    header .inner {
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 0 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    header .logo { font-size: 1.25rem; font-weight: 700; color: #111; text-decoration: none; }
+    header .badge-pp {
+      font-size: .72rem;
+      background: #e9ecef;
+      color: #495057;
+      padding: .2rem .55rem;
+      border-radius: 20px;
+    }
+    main {
+      max-width: 780px;
+      margin: 2.5rem auto 4rem;
+      padding: 0 1.5rem;
+    }
+    h1 { font-size: 1.6rem; font-weight: 700; margin-bottom: .4rem; }
+    .meta { font-size: .85rem; color: #6c757d; margin-bottom: 2.5rem; }
+    h2 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin: 2.2rem 0 .75rem;
+      padding-left: .75rem;
+      border-left: 3px solid #6f42c1;
+      color: #111;
+    }
+    p { margin-bottom: .9rem; font-size: .95rem; color: #343a40; }
+    ul { padding-left: 1.4rem; margin-bottom: .9rem; }
+    li { font-size: .95rem; color: #343a40; margin-bottom: .35rem; }
+    .box {
+      background: #fff;
+      border: 1px solid #dee2e6;
+      border-radius: 8px;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1rem;
+    }
+    .box p:last-child { margin-bottom: 0; }
+    .highlight {
+      background: #f0ebff;
+      border: 1px solid #d4c5f9;
+      border-radius: 6px;
+      padding: .75rem 1rem;
+      font-size: .88rem;
+      color: #4c2fa0;
+      margin-bottom: 1rem;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; margin-bottom: 1rem; }
+    th {
+      background: #f1f3f5;
+      border: 1px solid #dee2e6;
+      padding: .55rem .85rem;
+      text-align: left;
+      font-weight: 600;
+      color: #495057;
+    }
+    td { border: 1px solid #dee2e6; padding: .55rem .85rem; color: #343a40; vertical-align: top; }
+    a { color: #6f42c1; }
+    footer {
+      text-align: center;
+      font-size: .8rem;
+      color: #adb5bd;
+      padding: 2rem 0;
+      border-top: 1px solid #dee2e6;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="inner">
+    <span class="logo">KpopWave Daily</span>
+    <span class="badge-pp">Privacy Policy</span>
+  </div>
+</header>
+
+<main>
+  <h1>プライバシーポリシー</h1>
+  <p class="meta">最終更新日: 2026年5月16日 &nbsp;|&nbsp; Privacy Policy (Last updated: May 16, 2026)</p>
+
+  <div class="highlight">
+    本ポリシーは、KpopWave Daily（以下「本サービス」）が Meta Platforms の Threads API を使用して
+    K-POP 女性アイドルに関するニュースを自動投稿するにあたり、取り扱う情報と利用目的を説明するものです。
+  </div>
+
+  <!-- 1 -->
+  <h2>1. サービス概要</h2>
+  <div class="box">
+    <p>
+      本サービスは、公開されている K-POP ニュースサイトの RSS フィードから記事を収集し、
+      要約した内容を Threads アカウント（<strong>@kpopwave.daily</strong>）へ自動投稿する
+      個人運営のツールです。一般ユーザーのアカウントデータを収集・処理する機能はありません。
+    </p>
+  </div>
+
+  <!-- 2 -->
+  <h2>2. 収集する情報</h2>
+  <div class="box">
+    <p>本サービスが取り扱う情報は、運営者自身の Threads アカウントに関するものに限られます。</p>
+    <table>
+      <tr><th>情報の種類</th><th>内容</th><th>取得方法</th></tr>
+      <tr>
+        <td>Threads ユーザー ID</td>
+        <td>投稿先アカウントの識別子</td>
+        <td>Meta OAuth 認証フローにより取得</td>
+      </tr>
+      <tr>
+        <td>Threads アクセストークン</td>
+        <td>API 呼び出しに使用する認証情報</td>
+        <td>Meta OAuth 認証フローにより取得</td>
+      </tr>
+      <tr>
+        <td>RSS 記事データ</td>
+        <td>公開ニュースサイトの記事タイトル・本文・URL</td>
+        <td>公開 RSS フィードから自動取得</td>
+      </tr>
+    </table>
+    <p>
+      <strong>一般ユーザーの個人情報は一切収集しません。</strong>
+      本サービスは単一の Threads アカウント（運営者のもの）のみを管理します。
+    </p>
+  </div>
+
+  <!-- 3 -->
+  <h2>3. 情報の利用目的</h2>
+  <div class="box">
+    <ul>
+      <li>Threads API を通じた自動投稿の実行</li>
+      <li>アクセストークンの有効性確認および更新</li>
+      <li>投稿履歴・ステータスの管理（ローカルデータベースへの記録）</li>
+    </ul>
+    <p>収集した情報を上記以外の目的に使用することはありません。</p>
+  </div>
+
+  <!-- 4 -->
+  <h2>4. 第三者への情報提供</h2>
+  <div class="box">
+    <p>
+      本サービスは、取得した情報を第三者（広告事業者・データブローカー等）に販売・提供・貸与しません。
+      情報は運営者のローカル環境にのみ保存され、外部サーバーへ転送されません。
+    </p>
+    <p>
+      ただし、投稿処理のために以下のサービスへ情報が送信されます。
+    </p>
+    <ul>
+      <li><strong>Meta Platforms（Threads API）</strong> — 投稿内容およびアクセストークン</li>
+      <li><strong>Anthropic（Claude API）</strong> — 要約生成のための記事テキスト（個人情報を含まない公開情報のみ）</li>
+    </ul>
+  </div>
+
+  <!-- 5 -->
+  <h2>5. データの保存・削除</h2>
+  <div class="box">
+    <p>
+      収集したデータは運営者のローカル環境（SQLite データベース）に保存されます。
+      アクセストークンは Meta のポリシーに従い最長 60 日で失効します。
+    </p>
+    <p>
+      データの削除を希望する場合、または本サービスによる Threads アカウントとの連携解除を希望する場合は、
+      下記の連絡先までご連絡ください。速やかに対応いたします。
+    </p>
+    <p>
+      また、Threads アプリの設定画面からもアプリ連携を直接解除できます：
+      <br>Threads アプリ → プロフィール → 設定 → アカウント → アプリとウェブサイト
+    </p>
+  </div>
+
+  <!-- 6 -->
+  <h2>6. Meta Platform ポリシーへの準拠</h2>
+  <div class="box">
+    <p>本サービスは以下の Meta ポリシーに準拠して運営されます。</p>
+    <ul>
+      <li><a href="https://developers.facebook.com/terms/" target="_blank" rel="noopener">Meta Platform Terms</a></li>
+      <li><a href="https://developers.facebook.com/devpolicy/" target="_blank" rel="noopener">Meta Developer Policies</a></li>
+      <li><a href="https://help.instagram.com/155833707900388" target="_blank" rel="noopener">Threads Supplemental Terms</a></li>
+    </ul>
+    <p>
+      本サービスが使用する Threads API の権限は以下のとおりです。
+    </p>
+    <ul>
+      <li><code>threads_basic</code> — プロフィール情報の読み取り</li>
+      <li><code>threads_content_publish</code> — テキスト投稿の公開</li>
+    </ul>
+  </div>
+
+  <!-- 7 -->
+  <h2>7. Cookie・トラッキングについて</h2>
+  <div class="box">
+    <p>
+      本サービスはアナリティクスや広告目的の Cookie を使用しません。
+      OAuth 認証フロー中にセッション管理のための一時的な Cookie を使用しますが、
+      認証完了後には削除されます。
+    </p>
+  </div>
+
+  <!-- 8 -->
+  <h2>8. ポリシーの変更</h2>
+  <div class="box">
+    <p>
+      本ポリシーは必要に応じて更新することがあります。
+      重要な変更がある場合は、このページの「最終更新日」を変更してお知らせします。
+    </p>
+  </div>
+
+  <!-- 9 -->
+  <h2>9. お問い合わせ・データ削除リクエスト</h2>
+  <div class="box">
+    <p>本ポリシーに関するお問い合わせ、またはデータ削除のご要望は以下までご連絡ください。</p>
+    <p>
+      Threads: <a href="https://www.threads.com/@kpopwave.daily" target="_blank" rel="noopener">@kpopwave.daily</a><br>
+      Email: <a href="mailto:mktiskw1@gmail.com">mktiskw1@gmail.com</a>
+    </p>
+    <p style="font-size:.85rem;color:#6c757d">
+      ご連絡から 72 時間以内に対応いたします。
+    </p>
+  </div>
+
+  <hr style="margin: 2.5rem 0; border-color: #dee2e6;">
+
+  <!-- English summary for Meta review -->
+  <h2>Summary in English (for Meta Platform Review)</h2>
+  <div class="box">
+    <p>
+      <strong>KpopWave Daily</strong> is a personal, single-account automated posting tool
+      that collects publicly available K-POP news via RSS feeds, summarizes them using the
+      Claude API (Anthropic), and publishes the summaries to a single Threads account
+      (<strong>@kpopwave.daily</strong>) operated by the developer.
+    </p>
+    <p><strong>Data collected:</strong> Threads User ID and Access Token of the operator's
+    own account only. No end-user data is collected.</p>
+    <p><strong>Data use:</strong> Solely for authenticating and publishing posts to the
+    operator's Threads account via the Threads API.</p>
+    <p><strong>Data sharing:</strong> No user data is sold, shared, or transferred to any
+    third party. Data is stored locally on the operator's machine.</p>
+    <p><strong>Data deletion:</strong> Users can disconnect the app from within the Threads
+    app settings at any time. Deletion requests can also be sent to
+    <a href="mailto:mktiskw1@gmail.com">mktiskw1@gmail.com</a>.</p>
+    <p><strong>Permissions used:</strong> <code>threads_basic</code>,
+    <code>threads_content_publish</code></p>
+  </div>
+</main>
+
+<footer>
+  &copy; 2026 KpopWave Daily &nbsp;|&nbsp;
+  <a href="https://www.threads.com/@kpopwave.daily" target="_blank" rel="noopener">@kpopwave.daily</a>
+</footer>
+
+</body>
+</html>

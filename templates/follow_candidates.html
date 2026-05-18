@@ -1,0 +1,215 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0 fw-bold">フォロー候補</h4>
+  <div class="d-flex gap-2">
+    <button class="btn btn-sm" style="background:#222;border:1px solid #444;color:#ccc"
+            data-bs-toggle="collapse" data-bs-target="#addForm">
+      <i class="bi bi-person-plus"></i> 手動追加
+    </button>
+    <form action="/follow-candidates/refresh" method="post">
+      <button type="submit" class="btn btn-accent btn-sm">
+        <i class="bi bi-arrow-repeat"></i> 候補を更新
+      </button>
+    </form>
+  </div>
+</div>
+
+<!-- 手動追加フォーム -->
+<div class="collapse mb-3" id="addForm">
+  <div class="card p-3">
+    <form action="/follow-candidates/add" method="post" class="row g-2 align-items-end">
+      <div class="col-auto">
+        <label style="font-size:.78rem;color:#888;display:block;margin-bottom:2px">Threads ユーザー名</label>
+        <div class="input-group input-group-sm">
+          <span class="input-group-text" style="background:#222;border-color:#444;color:#888">@</span>
+          <input type="text" name="username" class="form-control form-control-sm" placeholder="username" required style="width:160px">
+        </div>
+      </div>
+      <div class="col-auto">
+        <label style="font-size:.78rem;color:#888;display:block;margin-bottom:2px">表示名（任意）</label>
+        <input type="text" name="display_name" class="form-control form-control-sm" placeholder="例: KpopFan Japan" style="width:160px">
+      </div>
+      <div class="col-auto">
+        <label style="font-size:.78rem;color:#888;display:block;margin-bottom:2px">フォロワー数（任意）</label>
+        <input type="number" name="followers_count" class="form-control form-control-sm" placeholder="例: 5000" min="0" style="width:120px">
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-sm btn-accent">追加</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- 自分のフォロワー数 & ターゲット範囲 -->
+<div class="row g-3 mb-4">
+  <div class="col-auto">
+    <div class="card px-4 py-3 text-center" style="min-width:140px">
+      <div style="font-size:.72rem;color:#888;margin-bottom:2px">自分のフォロワー数</div>
+      <div class="fw-bold" style="font-size:1.5rem">
+        {{ fmt_followers(my_followers) if my_followers is not none else "—" }}
+      </div>
+    </div>
+  </div>
+  <div class="col-auto d-flex align-items-center" style="color:#444;font-size:1.2rem">→</div>
+  <div class="col-auto">
+    <div class="card px-4 py-3 text-center" style="min-width:220px;border-color:#e03030">
+      <div style="font-size:.72rem;color:#888;margin-bottom:2px">ターゲット範囲（3〜15倍）</div>
+      <div class="fw-bold" style="font-size:1.3rem;color:#e03030">
+        {% if min_target is not none %}
+          {{ fmt_followers(min_target) }} 〜 {{ fmt_followers(max_target) }}
+          {% if fixed_range %}
+            <span style="font-size:.75rem;color:#888;font-weight:normal;display:block;margin-top:2px">固定範囲（フォロワー数 0 人時）</span>
+          {% endif %}
+        {% else %}
+          Threads 認証後に表示
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  <div class="col-auto ms-auto d-flex align-items-center">
+    <span style="font-size:.8rem;color:#555">候補総数: {{ total }} 件</span>
+  </div>
+</div>
+
+{% macro candidate_table(candidates) %}
+{% if candidates %}
+<div class="table-responsive">
+  <table class="table table-hover mb-0" style="font-size:.84rem">
+    <thead>
+      <tr style="color:#666">
+        <th style="width:54px">ソース</th>
+        <th>アカウント</th>
+        <th style="width:110px">フォロワー</th>
+        <th>概要</th>
+        <th style="width:160px"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in candidates %}
+      <tr>
+        <td>
+          {% if c.source == 'manual' %}
+            <span class="badge" style="background:#0d6efd;font-size:.65rem">手動</span>
+          {% elif c.source == 'reddit' %}
+            <span class="badge" style="background:#ff4500;font-size:.65rem">Reddit</span>
+          {% else %}
+            <span class="badge" style="background:#475569;font-size:.65rem">他</span>
+          {% endif %}
+        </td>
+        <td>
+          <span class="fw-semibold">@{{ c.username }}</span>
+          {% if c.display_name %}
+            <span style="color:#666;font-size:.78rem;margin-left:4px">{{ c.display_name }}</span>
+          {% endif %}
+        </td>
+        <td>
+          <!-- フォロワー数インライン編集 -->
+          <span id="fc-display-{{ c.id }}" style="color:#aaa">
+            {{ fmt_followers(c.followers_count) }}
+            <button type="button" onclick="startEditFc({{ c.id }}, {{ c.followers_count or 'null' }})"
+                    class="btn btn-link p-0 ms-1" style="color:#555;font-size:.75rem;vertical-align:baseline">
+              <i class="bi bi-pencil-fill"></i>
+            </button>
+          </span>
+          <span id="fc-edit-{{ c.id }}" style="display:none">
+            <form action="/follow-candidates/{{ c.id }}/followers" method="post"
+                  class="d-inline-flex gap-1 align-items-center">
+              <input type="number" name="followers_count" id="fc-input-{{ c.id }}"
+                     class="form-control form-control-sm" min="0" style="width:80px;height:24px;font-size:.78rem">
+              <button type="submit" class="btn btn-sm py-0 px-1" style="background:#22c55e;color:#fff;font-size:.75rem;height:24px">✓</button>
+              <button type="button" onclick="cancelEditFc({{ c.id }})"
+                      class="btn btn-sm py-0 px-1" style="background:#444;color:#aaa;font-size:.75rem;height:24px">✕</button>
+            </form>
+          </span>
+        </td>
+        <td style="color:#777;font-size:.79rem;max-width:240px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
+          {{ c.bio or "—" }}
+        </td>
+        <td class="text-end">
+          <a href="https://www.threads.net/@{{ c.username }}"
+             target="_blank" rel="noopener"
+             class="btn btn-sm me-1"
+             style="background:#1a1a1a;border:1px solid #333;color:#ccc;font-size:.75rem">
+            <i class="bi bi-box-arrow-up-right"></i> 開く
+          </a>
+          <form action="/follow-candidates/{{ c.id }}/delete" method="post" class="d-inline"
+                onsubmit="return confirm('@{{ c.username }} を削除しますか？')">
+            <button type="submit" class="btn btn-sm"
+                    style="background:#1a1a1a;border:1px solid #333;color:#666;font-size:.75rem">
+              <i class="bi bi-trash3"></i>
+            </button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="text-center py-4" style="color:#555;font-size:.85rem">該当なし</div>
+{% endif %}
+{% endmacro %}
+
+
+<!-- ターゲット範囲内 -->
+<div class="card mb-3">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span>
+      <i class="bi bi-person-check-fill me-2" style="color:#22c55e"></i>
+      ターゲット範囲内
+      <span class="badge ms-2" style="background:#16a34a">{{ in_range|length }}</span>
+    </span>
+    {% if min_target is not none %}
+    <small style="color:#555">{{ fmt_followers(min_target) }} 〜 {{ fmt_followers(max_target) }}{% if fixed_range %} <span style="color:#666">（固定）</span>{% endif %}</small>
+    {% endif %}
+  </div>
+  {{ candidate_table(in_range) }}
+</div>
+
+<!-- フォロワー数不明 -->
+{% if unknown_fc %}
+<div class="card mb-3">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span>
+      <i class="bi bi-question-circle me-2" style="color:#777"></i>
+      フォロワー数不明
+      <span class="badge ms-2" style="background:#475569">{{ unknown_fc|length }}</span>
+    </span>
+    <small style="color:#555">手動追加後は鉛筆アイコンでフォロワー数を入力 / 「候補を更新」で自動取得</small>
+  </div>
+  {{ candidate_table(unknown_fc) }}
+</div>
+{% endif %}
+
+<!-- 範囲外（フォロワー数判明・範囲外） -->
+{% if out_range %}
+<div class="card mb-3">
+  <div class="card-header">
+    <i class="bi bi-person-dash me-2" style="color:#555"></i>
+    範囲外
+    <span class="badge ms-2" style="background:#334155">{{ out_range|length }}</span>
+    <small class="ms-2" style="color:#555;font-weight:normal">自分のフォロワー 3〜15倍の範囲外</small>
+  </div>
+  {{ candidate_table(out_range) }}
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+function startEditFc(id, current) {
+  document.getElementById("fc-display-" + id).style.display = "none";
+  document.getElementById("fc-edit-" + id).style.display = "inline";
+  var input = document.getElementById("fc-input-" + id);
+  if (current !== null) input.value = current;
+  input.focus();
+}
+function cancelEditFc(id) {
+  document.getElementById("fc-edit-" + id).style.display = "none";
+  document.getElementById("fc-display-" + id).style.display = "";
+}
+</script>
+{% endblock %}

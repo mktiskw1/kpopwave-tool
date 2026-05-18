@@ -1,0 +1,27 @@
+# 環境変数・秘密情報
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+
+# データベース
+instance/
+*.db
+*.sqlite3
+
+# ログファイル
+*.log
+
+# バイナリ
+cloudflared.exe
+
+# Claude Code設定
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

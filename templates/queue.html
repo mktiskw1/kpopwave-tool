@@ -1,0 +1,169 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<h4 class="mb-4 fw-bold">投稿キュー</h4>
+
+<!-- キュー中 -->
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between">
+    <span><i class="bi bi-collection-fill me-2"></i>待機中</span>
+    <span class="badge badge-queued">{{ queued|length }}</span>
+  </div>
+
+  {% if not queued %}
+  <div class="card-body text-center py-4" style="color:#555">
+    <i class="bi bi-inbox" style="font-size:2rem;display:block;margin-bottom:.4rem"></i>
+    キューは空です。承認待ち画面で記事を承認してください。
+  </div>
+  {% endif %}
+
+  {% for a in queued %}
+  <div class="card-body border-bottom" style="border-color:var(--border)!important" id="qcard-{{ a.id }}">
+    <div class="d-flex justify-content-between align-items-start gap-3">
+
+      <!-- 記事情報 -->
+      <div style="min-width:0;flex:1">
+        <div class="mb-1">
+          <span class="badge bg-secondary me-1" style="font-size:.72rem">{{ a.feed_source }}</span>
+          {% if a.scheduled_at %}
+          <span class="badge badge-queued" style="font-size:.72rem">
+            <i class="bi bi-clock"></i>
+            {{ (a.scheduled_at.strftime('%m/%d %H:%M')) }} JST 予定
+          </span>
+          {% else %}
+          <span class="badge bg-secondary" style="font-size:.72rem;opacity:.6">時間未設定</span>
+          {% endif %}
+        </div>
+        <div style="font-size:.88rem;font-weight:600">
+          <a href="{{ a.url }}" target="_blank" class="text-decoration-none text-light">
+            {{ a.title[:70] }}{% if a.title|length > 70 %}…{% endif %}
+          </a>
+        </div>
+        {% if a.summary %}
+        <div style="font-size:.78rem;color:#888;margin-top:.3rem">
+          {{ a.summary[:120] }}…
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- アクションボタン -->
+      <div class="d-flex flex-column gap-1 flex-shrink-0">
+        <form action="{{ url_for('post_now', id=a.id) }}" method="post"
+              onsubmit="return confirm('今すぐ投稿しますか？')">
+          <button type="submit" class="btn btn-accent btn-sm w-100">
+            <i class="bi bi-send-fill"></i> 今すぐ投稿
+          </button>
+        </form>
+        <button class="btn btn-outline-info btn-sm" style="font-size:.8rem"
+                onclick="toggleSchedule({{ a.id }})">
+          <i class="bi bi-calendar3"></i> 日時指定
+        </button>
+        <form action="{{ url_for('unqueue_article', id=a.id) }}" method="post">
+          <button type="submit" class="btn btn-outline-secondary btn-sm w-100" style="font-size:.8rem">
+            <i class="bi bi-arrow-counterclockwise"></i> 戻す
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <!-- 日時指定フォーム (非表示) -->
+    <div id="schedule-form-{{ a.id }}" class="d-none mt-2">
+      <div class="input-group input-group-sm" style="max-width:320px">
+        <input type="datetime-local" id="dt-{{ a.id }}"
+               class="form-control" style="font-size:.82rem"
+               {% if a.scheduled_at %}
+               value="{{ (a.scheduled_at.strftime('%Y-%m-%dT%H:%M')) }}"
+               {% endif %}>
+        <button class="btn btn-info btn-sm" onclick="setSchedule({{ a.id }})">設定 (JST)</button>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- 失敗 -->
+{% if failed %}
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between">
+    <span><i class="bi bi-exclamation-triangle-fill me-2 text-danger"></i>失敗</span>
+    <span class="badge badge-failed">{{ failed|length }}</span>
+  </div>
+  {% for a in failed %}
+  <div class="card-body border-bottom" style="border-color:var(--border)!important">
+    <div class="d-flex justify-content-between align-items-center">
+      <div>
+        <div style="font-size:.85rem">{{ a.title[:60] }}{% if a.title|length > 60 %}…{% endif %}</div>
+        {% if a.error_message %}
+        <div style="font-size:.75rem;color:#e57373;margin-top:.2rem">
+          <i class="bi bi-exclamation-circle"></i> {{ a.error_message[:120] }}
+        </div>
+        {% endif %}
+      </div>
+      <form action="{{ url_for('retry_article', id=a.id) }}" method="post">
+        <button type="submit" class="btn btn-sm btn-outline-warning">
+          <i class="bi bi-arrow-repeat"></i> 再試行
+        </button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- 投稿済み -->
+<div class="card">
+  <div class="card-header d-flex justify-content-between">
+    <span><i class="bi bi-check-circle-fill me-2 text-success"></i>投稿済み</span>
+    <span class="badge badge-posted">{{ posted|length }}</span>
+  </div>
+  {% if not posted %}
+  <div class="card-body py-4 text-center" style="color:#555">まだ投稿はありません</div>
+  {% endif %}
+  {% for a in posted %}
+  <div class="card-body border-bottom py-2" style="border-color:var(--border)!important">
+    <div class="d-flex justify-content-between align-items-center">
+      <div style="min-width:0">
+        <span style="font-size:.82rem">
+          <a href="{{ a.url }}" target="_blank" class="text-decoration-none" style="color:#aaa">
+            {{ a.title[:65] }}{% if a.title|length > 65 %}…{% endif %}
+          </a>
+        </span>
+        {% if a.threads_post_id and not a.threads_post_id.startswith('test_') %}
+        <span style="font-size:.72rem;color:#555;margin-left:.4rem">ID: {{ a.threads_post_id }}</span>
+        {% elif a.threads_post_id and a.threads_post_id.startswith('test_') %}
+        <span class="badge bg-secondary ms-1" style="font-size:.65rem">テスト</span>
+        {% endif %}
+      </div>
+      <span style="font-size:.75rem;color:#555;white-space:nowrap;margin-left:.5rem">
+        {{ a.posted_at.strftime('%m/%d %H:%M') if a.posted_at }}
+      </span>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+function toggleSchedule(id) {
+  document.getElementById('schedule-form-' + id).classList.toggle('d-none');
+}
+
+function setSchedule(id) {
+  const val = document.getElementById('dt-' + id).value;
+  if (!val) { alert('日時を選択してください'); return; }
+  fetch('/queue/' + id + '/schedule', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'scheduled_at=' + encodeURIComponent(val)
+  }).then(r => r.json()).then(d => {
+    if (d.success) {
+      location.reload();
+    } else {
+      alert('エラー: ' + d.error);
+    }
+  });
+}
+</script>
+{% endblock %}

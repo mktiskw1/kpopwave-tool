@@ -1,0 +1,88 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<h4 class="mb-1 fw-bold">Threads 手動認証</h4>
+<p class="text-muted mb-4" style="font-size:.85rem">
+  コールバック URL が登録されていない場合や自動リダイレクトが機能しない場合に使用してください。
+</p>
+
+<!-- エラー説明 -->
+<div class="alert" style="background:#1a1000;border:1px solid #5a3000;font-size:.83rem" role="alert">
+  <strong>error_code 1349187 について：</strong>
+  Meta Developer Portal の「リダイレクト URI」に以下の URL が登録されていないと発生します。<br>
+  <code class="user-select-all">{{ redirect_uri }}</code><br><br>
+  <strong>推奨：</strong> 上記URLを Meta Developer Portal → アプリ → Threads API → リダイレクト URI に追加すれば自動フローが使えます。<br>
+  <strong>今すぐ使う：</strong> 以下の手順で手動コード入力からトークンを取得できます。
+</div>
+
+<!-- Step 1 -->
+<div class="card mb-3">
+  <div class="card-header" style="font-size:.85rem">
+    <span class="badge bg-primary me-2">Step 1</span>
+    Meta Developer Portal でリダイレクト URI を登録する（推奨）
+  </div>
+  <div class="card-body" style="font-size:.82rem;line-height:1.9">
+    <ol class="mb-0">
+      <li><a href="https://developers.facebook.com/" target="_blank" rel="noopener">developers.facebook.com</a> を開く</li>
+      <li>対象アプリ → <strong>Threads API</strong> → <strong>設定</strong> を開く</li>
+      <li>「コールバック URL」または「リダイレクト URI」に以下を追加して保存：<br>
+        <code class="user-select-all">{{ redirect_uri }}</code>
+      </li>
+      <li>登録後は <a href="/auth/threads/start">自動認証フロー</a> を使えます</li>
+    </ol>
+  </div>
+</div>
+
+<!-- Step 2 -->
+<div class="card mb-3">
+  <div class="card-header" style="font-size:.85rem">
+    <span class="badge bg-warning text-dark me-2">Step 2</span>
+    以下の認可 URL をブラウザで開き、Threads アカウントで認証する
+  </div>
+  <div class="card-body">
+    <p style="font-size:.82rem;color:#aaa" class="mb-2">
+      以下のボタンをクリック（または URL をコピーしてブラウザで開いてください）
+    </p>
+    <a href="{{ auth_url }}" target="_blank" rel="noopener" class="btn btn-primary btn-sm mb-3">
+      <i class="bi bi-box-arrow-up-right me-1"></i> Threads 認証ページを開く
+    </a>
+    <details style="font-size:.78rem">
+      <summary class="text-muted" style="cursor:pointer">認可 URL を確認する</summary>
+      <textarea class="form-control mt-2" rows="4" readonly style="font-size:.72rem;word-break:break-all">{{ auth_url }}</textarea>
+    </details>
+  </div>
+</div>
+
+<!-- Step 3 -->
+<div class="card mb-4">
+  <div class="card-header" style="font-size:.85rem">
+    <span class="badge bg-success me-2">Step 3</span>
+    認証後にリダイレクトされた URL から <code>code</code> をコピーして貼り付ける
+  </div>
+  <div class="card-body">
+    <p style="font-size:.82rem;color:#aaa" class="mb-3">
+      認証が完了すると、ブラウザが以下のような URL にリダイレクトされます：<br>
+      <code style="font-size:.75rem;color:#aaa">{{ redirect_uri }}?code=<strong style="color:#ff9">ここの値をコピー</strong>&state=...</code><br>
+      ページが表示されなくてもブラウザの URL バーから <code>code=</code> の後の値をコピーできます。
+    </p>
+
+    <form method="post" action="/auth/threads/exchange">
+      <input type="hidden" name="state" value="{{ state }}">
+      <div class="mb-3">
+        <label class="form-label fw-semibold" style="font-size:.85rem">認証コード（code パラメータの値）</label>
+        <input type="text" class="form-control" name="code"
+               placeholder="AQC..." required autofocus
+               style="font-family:monospace;font-size:.85rem">
+        <div class="form-text" style="font-size:.75rem">
+          URL の <code>?code=</code> 以降、<code>&state=</code> より前の文字列を貼り付けてください
+        </div>
+      </div>
+      <button type="submit" class="btn btn-accent px-4">
+        <i class="bi bi-key-fill me-1"></i> トークンを取得する
+      </button>
+      <a href="/settings" class="btn btn-outline-secondary ms-2">キャンセル</a>
+    </form>
+  </div>
+</div>
+
+{% endblock %}

@@ -1,0 +1,250 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<!-- ヘッダー -->
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0 fw-bold">承認待ち記事
+    <span class="badge badge-pending ms-2" style="font-size:.7rem">{{ articles|length }}</span>
+  </h4>
+</div>
+
+{% if articles %}
+<!-- 一括操作ツールバー -->
+<form id="bulk-form" action="{{ url_for('bulk_delete_articles') }}" method="post">
+  <div class="d-flex align-items-center gap-2 mb-3 p-2 rounded" style="background:#1a1a1a;border:1px solid #2e2e2e">
+    <input type="checkbox" id="select-all" class="form-check-input mt-0" title="全選択/全解除">
+    <label for="select-all" class="text-muted mb-0" style="font-size:.82rem;cursor:pointer">全選択</label>
+    <span id="selected-count" class="text-muted ms-1" style="font-size:.8rem"></span>
+    <div class="ms-auto d-flex gap-2">
+      <button type="submit" id="btn-bulk-delete" class="btn btn-outline-danger btn-sm" disabled
+              onclick="return confirmBulk()">
+        <i class="bi bi-trash3 me-1"></i>選択削除
+      </button>
+      <button type="button" class="btn btn-danger btn-sm" onclick="deleteAll()">
+        <i class="bi bi-trash3-fill me-1"></i>全削除
+      </button>
+    </div>
+  </div>
+
+  <!-- 記事カード -->
+  {% for a in articles %}
+  <div class="card mb-3 article-card" id="card-{{ a.id }}">
+    <div class="card-body pb-2">
+
+      <!-- ヘッダー行 -->
+      <div class="d-flex justify-content-between align-items-start mb-2">
+        <div class="d-flex align-items-center gap-2 me-2" style="min-width:0">
+          <input type="checkbox" name="ids" value="{{ a.id }}"
+                 class="form-check-input article-cb mt-0 flex-shrink-0"
+                 onchange="updateSelection()">
+          <span class="badge bg-secondary" style="font-size:.72rem">{{ a.feed_source }}</span>
+          {% if a.published_at %}
+          <span style="font-size:.75rem;color:#666">{{ a.published_at.strftime('%Y/%m/%d') }}</span>
+          {% endif %}
+        </div>
+
+        <!-- アクションボタン -->
+        <div class="d-flex gap-1 flex-shrink-0">
+          <button type="button" class="btn btn-success btn-sm px-2" title="承認してキューへ"
+                  onclick="submitForm('{{ url_for('approve_article', id=a.id) }}')">
+            <i class="bi bi-check-lg"></i> 承認
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm px-2" title="却下"
+                  onclick="submitForm('{{ url_for('reject_article', id=a.id) }}')">
+            <i class="bi bi-x-lg"></i>
+          </button>
+          <button type="button" class="btn btn-outline-danger btn-sm px-2" title="削除"
+                  onclick="deleteSingle({{ a.id }})">
+            <i class="bi bi-trash3"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- タイトル -->
+      <h6 class="mb-2" style="font-size:.92rem;font-weight:600;line-height:1.4">
+        <a href="{{ a.url }}" target="_blank" rel="noopener" class="text-decoration-none text-light">
+          {{ a.title }}
+          <i class="bi bi-box-arrow-up-right" style="font-size:.7rem;opacity:.4"></i>
+        </a>
+      </h6>
+
+      <!-- 要約エリア -->
+      {% if a.summary %}
+      <div class="mt-2">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <span class="char-count {% if a.summary|length > 500 %}over{% else %}ok{% endif %}">
+            <i class="bi bi-chat-text"></i> {{ a.summary|length }} / 500 文字
+          </span>
+          <div class="d-flex gap-1">
+            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2"
+                    onclick="toggleEdit({{ a.id }})" style="font-size:.78rem">
+              <i class="bi bi-pencil"></i> 編集
+            </button>
+            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2"
+                    onclick="resummary({{ a.id }}, this)" style="font-size:.78rem">
+              <i class="bi bi-magic"></i> 再生成
+            </button>
+          </div>
+        </div>
+        <div id="display-{{ a.id }}" class="summary-box">{{ a.summary }}</div>
+        <div id="edit-{{ a.id }}" class="d-none mt-1">
+          <textarea id="textarea-{{ a.id }}" class="form-control" rows="5"
+                    oninput="updateCount({{ a.id }})">{{ a.summary }}</textarea>
+          <div class="d-flex justify-content-between align-items-center mt-1">
+            <span id="count-{{ a.id }}" class="char-count">{{ a.summary|length }} / 500 文字</span>
+            <div class="d-flex gap-1">
+              <button type="button" class="btn btn-sm btn-accent" onclick="saveSummary({{ a.id }})">保存</button>
+              <button type="button" class="btn btn-sm btn-secondary" onclick="toggleEdit({{ a.id }})">キャンセル</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      {% else %}
+      <div class="mt-2 d-flex align-items-center gap-2">
+        <span style="font-size:.82rem;color:#666"><i class="bi bi-dash-circle"></i> 要約未生成</span>
+        <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2"
+                onclick="resummary({{ a.id }}, this)" style="font-size:.78rem">
+          <i class="bi bi-magic"></i> 要約を生成
+        </button>
+        {% if a.error_message %}
+        <span class="text-danger" style="font-size:.75rem" title="{{ a.error_message }}">
+          <i class="bi bi-exclamation-circle"></i> エラー
+        </span>
+        {% endif %}
+      </div>
+      {% endif %}
+
+    </div>
+  </div>
+  {% endfor %}
+</form>
+
+<!-- 全削除用の隠しフォーム -->
+<form id="delete-all-form" action="{{ url_for('delete_all_pending') }}" method="post"></form>
+
+{% else %}
+<div class="card p-5 text-center" style="color:#555">
+  <i class="bi bi-inbox" style="font-size:2.5rem;display:block;margin-bottom:.5rem"></i>
+  承認待ちの記事はありません
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── 選択管理 ──────────────────────────────────────────────────────────────
+const selectAll   = document.getElementById('select-all');
+const btnBulk     = document.getElementById('btn-bulk-delete');
+const countLabel  = document.getElementById('selected-count');
+
+function updateSelection() {
+  const cbs = document.querySelectorAll('.article-cb');
+  const checked = [...cbs].filter(c => c.checked);
+  const total = cbs.length;
+  btnBulk.disabled = checked.length === 0;
+  countLabel.textContent = checked.length > 0 ? `${checked.length} 件選択中` : '';
+  selectAll.indeterminate = checked.length > 0 && checked.length < total;
+  selectAll.checked = checked.length === total;
+}
+
+selectAll.addEventListener('change', () => {
+  document.querySelectorAll('.article-cb').forEach(c => c.checked = selectAll.checked);
+  updateSelection();
+});
+
+// ── 確認ダイアログ ──────────────────────────────────────────────────────
+function confirmBulk() {
+  const n = document.querySelectorAll('.article-cb:checked').length;
+  return confirm(`選択した ${n} 件の記事を削除しますか？`);
+}
+
+function deleteAll() {
+  const n = document.querySelectorAll('.article-cb').length;
+  if (confirm(`承認待ち記事 ${n} 件をすべて削除しますか？`)) {
+    document.getElementById('delete-all-form').submit();
+  }
+}
+
+// ── 個別削除（bulk-form 内から独立したフォームとして送信） ───────────────
+function deleteSingle(id) {
+  if (!confirm('この記事を削除しますか？')) return;
+  const f = document.createElement('form');
+  f.method = 'post';
+  f.action = '/articles/' + id + '/delete';
+  document.body.appendChild(f);
+  f.submit();
+}
+
+// ── 承認・却下（bulk-form 内から独立したフォームとして送信） ─────────────
+function submitForm(action) {
+  const f = document.createElement('form');
+  f.method = 'post';
+  f.action = action;
+  document.body.appendChild(f);
+  f.submit();
+}
+
+// ── 要約編集 ──────────────────────────────────────────────────────────────
+function toggleEdit(id) {
+  document.getElementById('display-' + id).classList.toggle('d-none');
+  document.getElementById('edit-' + id).classList.toggle('d-none');
+}
+
+function updateCount(id) {
+  const len = document.getElementById('textarea-' + id).value.length;
+  const el = document.getElementById('count-' + id);
+  el.textContent = len + ' / 500 文字';
+  el.className = 'char-count ' + (len > 500 ? 'over' : 'ok');
+}
+
+function saveSummary(id) {
+  const text = document.getElementById('textarea-' + id).value;
+  fetch('/articles/' + id + '/edit', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'summary=' + encodeURIComponent(text)
+  }).then(r => r.json()).then(d => {
+    if (d.success) {
+      document.getElementById('display-' + id).textContent = d.summary;
+      toggleEdit(id);
+      const cc = document.querySelector('#card-' + id + ' .char-count');
+      if (cc) {
+        cc.textContent = d.length + ' / 500 文字';
+        cc.className = 'char-count ' + (d.length > 500 ? 'over' : 'ok');
+      }
+    } else {
+      alert('保存失敗: ' + d.error);
+    }
+  });
+}
+
+function resummary(id, btn) {
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  fetch('/articles/' + id + '/resummary', {method: 'POST'})
+    .then(r => r.json()).then(d => {
+      if (d.success) {
+        const disp = document.getElementById('display-' + id);
+        if (disp) {
+          disp.textContent = d.summary;
+          const ta = document.getElementById('textarea-' + id);
+          if (ta) ta.value = d.summary;
+          const cc = document.querySelector('#card-' + id + ' .char-count');
+          if (cc) {
+            cc.textContent = d.length + ' / 500 文字';
+            cc.className = 'char-count ' + (d.length > 500 ? 'over' : 'ok');
+          }
+        } else {
+          location.reload();
+        }
+      } else {
+        alert('要約生成失敗: ' + d.error);
+      }
+      btn.disabled = false;
+      btn.innerHTML = orig;
+    });
+}
+</script>
+{% endblock %}

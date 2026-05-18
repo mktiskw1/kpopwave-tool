@@ -1,0 +1,224 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<h4 class="mb-4 fw-bold">設定</h4>
+
+<form method="post" autocomplete="off">
+<div class="row g-4">
+
+  <!-- Threads API -->
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header"><i class="bi bi-threads me-2"></i>Threads API</div>
+      <div class="card-body">
+        <div class="row g-4">
+
+          <!-- OAuth 認証 -->
+          <div class="col-md-6">
+            <p class="fw-semibold mb-3" style="font-size:.85rem">Meta Developer 認証</p>
+            <div class="mb-3">
+              <label class="form-label" style="font-size:.85rem">App ID</label>
+              <input type="text" class="form-control" name="meta_app_id"
+                     value="{{ settings.meta_app_id }}" placeholder="1234567890">
+              <div class="form-text" style="font-size:.75rem">
+                Meta Developer Portal のアプリ ID
+              </div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label" style="font-size:.85rem">App Secret</label>
+              <input type="password" class="form-control" name="meta_app_secret"
+                     value="{{ settings.meta_app_secret }}" placeholder="abc123...">
+              <div class="form-text" style="font-size:.75rem">
+                Meta Developer Portal のアプリシークレット
+              </div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label" style="font-size:.85rem">アプリの URL（コールバック用）</label>
+              <input type="text" class="form-control" name="app_base_url"
+                     value="{{ settings.app_base_url }}" placeholder="http://localhost:5000">
+              <div class="form-text" style="font-size:.75rem">
+                Meta Developer Portal の「リダイレクト URI」に以下を登録してください:<br>
+                <code class="user-select-all">{{ settings.callback_url }}</code>
+              </div>
+            </div>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <a href="/auth/threads/start" class="btn btn-primary btn-sm">
+                <i class="bi bi-box-arrow-up-right me-1"></i> Threads で認証する
+              </a>
+              <a href="/auth/threads/manual" class="btn btn-outline-warning btn-sm">
+                <i class="bi bi-keyboard me-1"></i> 手動で認証する
+              </a>
+            </div>
+            <p class="text-muted mt-2 mb-0" style="font-size:.75rem">
+              先に設定を保存してから認証してください。<br>
+              error_code 1349187 が出る場合は「手動で認証する」を使用してください。
+            </p>
+          </div>
+
+          <!-- 現在の認証状態 + 手動入力 -->
+          <div class="col-md-6">
+            <p class="fw-semibold mb-3" style="font-size:.85rem">現在の認証状態</p>
+            <div class="mb-3 p-3 rounded" style="background:#1a1a1a;font-size:.82rem">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <span class="text-muted">アクセストークン</span>
+                {% if settings.threads_access_token %}
+                  <span class="badge bg-success">取得済み</span>
+                {% else %}
+                  <span class="badge bg-secondary">未設定</span>
+                {% endif %}
+              </div>
+              <div class="d-flex justify-content-between align-items-center">
+                <span class="text-muted">ユーザー ID</span>
+                {% if settings.threads_user_id %}
+                  <span class="badge bg-success">{{ settings.threads_user_id }}</span>
+                {% else %}
+                  <span class="badge bg-secondary">未設定</span>
+                {% endif %}
+              </div>
+            </div>
+            <p class="text-muted mb-2" style="font-size:.78rem">手動で上書きする場合は以下に入力してください</p>
+            <div class="mb-3">
+              <label class="form-label" style="font-size:.85rem">ユーザー ID</label>
+              <input type="text" class="form-control" name="threads_user_id"
+                     value="{{ settings.threads_user_id }}" placeholder="数字の ID">
+            </div>
+            <div class="mb-3">
+              <label class="form-label" style="font-size:.85rem">アクセストークン</label>
+              <input type="password" class="form-control" name="threads_access_token"
+                     value="{{ settings.threads_access_token }}" placeholder="THR...">
+              <div class="form-text" style="font-size:.75rem">
+                threads_basic + threads_content_publish 権限が必要（有効期限: 60日）
+              </div>
+            </div>
+            <div class="form-check">
+              <input type="checkbox" class="form-check-input" name="test_mode" id="test_mode"
+                     {% if settings.test_mode %}checked{% endif %}>
+              <label class="form-check-label" for="test_mode" style="font-size:.85rem">
+                テストモード（実際には Threads に投稿しない）
+              </label>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Anthropic API -->
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header"><i class="bi bi-cpu me-2"></i>Anthropic (Claude) API</div>
+      <div class="card-body">
+        <div class="mb-3">
+          <label class="form-label" style="font-size:.85rem">API キー</label>
+          <input type="password" class="form-control" name="anthropic_api_key"
+                 value="{{ settings.anthropic_api_key }}" placeholder="sk-ant-...">
+          <div class="form-text" style="font-size:.75rem">
+            要約生成に使用。Claude Haiku モデルを利用します。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 投稿スケジュール -->
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header"><i class="bi bi-clock-fill me-2"></i>投稿スケジュール</div>
+      <div class="card-body">
+        <div class="mb-3">
+          <label class="form-label" style="font-size:.85rem">自動投稿時刻（JST・カンマ区切り）</label>
+          <input type="text" class="form-control" name="post_times"
+                 value="{{ settings.post_times }}" placeholder="09:00,15:00,21:00">
+          <div class="form-text" style="font-size:.75rem">
+            例: 09:00,12:00,18:00,21:00 — 設定した時刻にキューの先頭から1件投稿します
+          </div>
+        </div>
+        <div class="mb-0">
+          <label class="form-label" style="font-size:.85rem">RSS 収集間隔（時間）</label>
+          <input type="number" class="form-control" name="collect_interval_hours"
+                 value="{{ settings.collect_interval_hours }}" min="1" max="24" style="max-width:100px">
+          <div class="form-text" style="font-size:.75rem">
+            定期収集の間隔（時間単位）。変更は次回起動時に反映されます。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RSS フィード -->
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-rss-fill me-2"></i>RSS フィード</span>
+        <button type="button" class="btn btn-sm btn-outline-success py-0 px-2" onclick="addFeed()">
+          <i class="bi bi-plus-lg"></i> 追加
+        </button>
+      </div>
+      <div class="card-body">
+        <div id="feeds-container">
+          {% for feed in settings.rss_feeds %}
+          <div class="input-group mb-2 feed-row">
+            <input type="text" class="form-control" name="feed_name"
+                   placeholder="名前" value="{{ feed.name }}" style="max-width:130px;font-size:.82rem">
+            <input type="text" class="form-control" name="feed_url"
+                   placeholder="RSS URL" value="{{ feed.url }}" style="font-size:.82rem">
+            <button type="button" class="btn btn-outline-danger btn-sm px-2"
+                    onclick="this.closest('.feed-row').remove()">
+              <i class="bi bi-trash3"></i>
+            </button>
+          </div>
+          {% endfor %}
+        </div>
+        <div class="form-text" style="font-size:.72rem">
+          フィードは起動時または手動収集時に取得されます
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12">
+    <button type="submit" class="btn btn-accent px-4">
+      <i class="bi bi-save-fill me-1"></i> 設定を保存
+    </button>
+  </div>
+
+</div>
+</form>
+
+<!-- Threads API セットアップ手順 -->
+<div class="card mt-4" style="border-color:#333">
+  <div class="card-header" style="background:transparent;font-size:.85rem;color:#888">
+    <i class="bi bi-info-circle me-1"></i> Threads API セットアップ手順
+  </div>
+  <div class="card-body" style="font-size:.82rem;color:#888;line-height:1.8">
+    <ol class="mb-0">
+      <li>Meta Developer Portal (developers.facebook.com) でアプリを作成</li>
+      <li>アプリに「Threads」製品を追加</li>
+      <li>テストユーザーを追加し、<code>threads_basic</code> + <code>threads_content_publish</code> 権限を付与</li>
+      <li>アプリの「リダイレクト URI」に <code>{{ settings.callback_url }}</code> を登録</li>
+      <li>上の設定に App ID・App Secret・アプリの URL を入力して保存</li>
+      <li>「Threads で認証する」ボタンをクリック → ブラウザで認証 → 自動でトークンが保存されます</li>
+    </ol>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+function addFeed() {
+  const c = document.getElementById('feeds-container');
+  const div = document.createElement('div');
+  div.className = 'input-group mb-2 feed-row';
+  div.innerHTML = `
+    <input type="text" class="form-control" name="feed_name" placeholder="名前" style="max-width:130px;font-size:.82rem">
+    <input type="text" class="form-control" name="feed_url" placeholder="RSS URL" style="font-size:.82rem">
+    <button type="button" class="btn btn-outline-danger btn-sm px-2" onclick="this.closest('.feed-row').remove()">
+      <i class="bi bi-trash3"></i>
+    </button>`;
+  c.appendChild(div);
+  div.querySelector('input[name=feed_name]').focus();
+}
+</script>
+{% endblock %}

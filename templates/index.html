@@ -1,0 +1,72 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0 fw-bold">ダッシュボード</h4>
+</div>
+
+<!-- 統計カード -->
+<div class="row g-3 mb-4">
+  {% set card_data = [
+    ('pending',  '承認待ち',  'bi-inbox-fill',       stats.pending),
+    ('queued',   'キュー中',  'bi-collection-fill',  stats.queued),
+    ('posted',   '投稿済み',  'bi-check-circle-fill',stats.posted),
+    ('rejected', '却下済み',  'bi-x-circle-fill',    stats.rejected),
+    ('failed',   '失敗',      'bi-exclamation-triangle-fill', stats.failed),
+  ] %}
+  {% for status, label, icon, count in card_data %}
+  <div class="col-6 col-md-2">
+    <div class="card stat-card {{ status }} text-center p-3">
+      <i class="bi {{ icon }} mb-1" style="font-size:1.4rem;opacity:.7"></i>
+      <div class="fw-bold" style="font-size:1.6rem">{{ count }}</div>
+      <div style="font-size:.78rem;color:#999">{{ label }}</div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- 最近のアクティビティ -->
+<div class="card">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span><i class="bi bi-clock-history me-2"></i>最近のアクティビティ</span>
+    <small style="color:#666">直近15件</small>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover mb-0" style="font-size:.85rem">
+      <thead>
+        <tr style="color:#777">
+          <th>タイトル</th>
+          <th>ソース</th>
+          <th>ステータス</th>
+          <th>日時</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in recent %}
+        <tr>
+          <td>
+            <a href="{{ a.url }}" target="_blank" rel="noopener"
+               class="text-decoration-none text-light">
+              {{ a.title[:65] }}{% if a.title|length > 65 %}…{% endif %}
+            </a>
+          </td>
+          <td><span style="color:#888;font-size:.8rem">{{ a.feed_source }}</span></td>
+          <td>
+            {% if a.status == 'pending' %}<span class="badge badge-pending">承認待ち</span>
+            {% elif a.status == 'queued' %}<span class="badge badge-queued">キュー</span>
+            {% elif a.status == 'posted' %}<span class="badge badge-posted">投稿済み</span>
+            {% elif a.status == 'rejected' %}<span class="badge badge-rejected">却下</span>
+            {% elif a.status == 'failed' %}<span class="badge badge-failed">失敗</span>
+            {% endif %}
+          </td>
+          <td style="color:#666;white-space:nowrap">{{ a.created_at.strftime('%m/%d %H:%M') }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="text-center py-4" style="color:#555">まだ記事がありません。RSS 収集ボタンで取得してください。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% endblock %}
