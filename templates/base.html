@@ -102,8 +102,18 @@
           </a>
         </li>
         <li class="nav-item">
+          <a class="nav-link {% if request.endpoint=='schedule' %}active{% endif %}" href="{{ url_for('schedule') }}">
+            <i class="bi bi-calendar-week-fill"></i> スケジュール
+          </a>
+        </li>
+        <li class="nav-item">
           <a class="nav-link {% if request.endpoint=='follow_candidates' %}active{% endif %}" href="{{ url_for('follow_candidates') }}">
             <i class="bi bi-person-plus-fill"></i> フォロー候補
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link {% if request.endpoint=='learning' %}active{% endif %}" href="{{ url_for('learning') }}">
+            <i class="bi bi-lightning-charge-fill"></i> 学習
           </a>
         </li>
         <li class="nav-item">
@@ -115,9 +125,16 @@
 
       <hr style="border-color:var(--border)">
 
-      <form action="{{ url_for('collect') }}" method="post">
+      <form action="{{ url_for('collect') }}" method="post" class="mb-2">
         <button type="submit" class="btn btn-accent btn-sm w-100">
           <i class="bi bi-arrow-repeat"></i> RSS 収集
+        </button>
+      </form>
+
+      <form action="{{ url_for('collect_youtube') }}" method="post">
+        <button type="submit" class="btn btn-sm w-100"
+                style="background:#ff0000;border-color:#ff0000;color:#fff">
+          <i class="bi bi-youtube"></i> YouTube 収集
         </button>
       </form>
 

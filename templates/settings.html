@@ -121,6 +121,31 @@
     </div>
   </div>
 
+  <!-- YouTube Data API -->
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header"><i class="bi bi-youtube me-2" style="color:#ff0000"></i>YouTube Data API v3</div>
+      <div class="card-body">
+        <div class="mb-3">
+          <label class="form-label" style="font-size:.85rem">API キー</label>
+          <input type="password" class="form-control" name="youtube_api_key"
+                 value="{{ settings.youtube_api_key }}" placeholder="AIza...">
+          <div class="form-text" style="font-size:.75rem">
+            Google Cloud Console で取得。KPOP女性アイドル MV を自動収集します。
+          </div>
+        </div>
+        <div class="mb-0">
+          <label class="form-label" style="font-size:.85rem">YouTube 収集間隔（時間）</label>
+          <input type="number" class="form-control" name="youtube_collect_interval_hours"
+                 value="{{ settings.youtube_collect_interval_hours }}" min="1" max="24" style="max-width:100px">
+          <div class="form-text" style="font-size:.75rem">
+            推奨: 6時間以上（16クエリ × 100ユニット = 1,600ユニット/回、上限10,000/日）。変更は次回起動時に反映。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- 投稿スケジュール -->
   <div class="col-md-6">
     <div class="card">

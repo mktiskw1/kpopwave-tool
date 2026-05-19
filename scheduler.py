@@ -1,9 +1,12 @@
+import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from sqlalchemy import or_
 
 from database import Article, Setting
 
@@ -11,12 +14,78 @@ logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler(timezone="Asia/Tokyo")
 
+_JITTER_SECONDS = 1800  # ±30分
+_JST = ZoneInfo("Asia/Tokyo")
+_UTC = ZoneInfo("UTC")
+_DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+_DEFAULT_TIMES = ["09:00", "15:00", "21:00"]
+
+
+# ── ユーティリティ ─────────────────────────────────────────────────────────────
+
+def get_weekly_schedule(app) -> dict:
+    """DB から週間スケジュールを取得。未設定なら post_times 設定で全曜日を埋めて返す。"""
+    with app.app_context():
+        raw = Setting.get("weekly_schedule", "")
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    # フォールバック: 既存の post_times を全曜日に適用
+    with app.app_context():
+        times_str = Setting.get("post_times", ",".join(_DEFAULT_TIMES))
+    times = [t.strip() for t in times_str.split(",") if t.strip()]
+    return {day: times for day in _DAY_KEYS}
+
+
+def next_post_slot(app) -> datetime | None:
+    """週間スケジュールから次の投稿スロット（UTC naive）を返す。
+    既に同スロットにキュー済み記事がある場合は次のスロットを探す。"""
+    schedule = get_weekly_schedule(app)
+    now_jst = datetime.now(_JST)
+
+    with app.app_context():
+        occupied = {
+            a.scheduled_at
+            for a in Article.query.filter_by(status="queued").all()
+            if a.scheduled_at is not None
+        }
+
+    for offset in range(14):
+        check_date = now_jst.date() + timedelta(days=offset)
+        day_key = _DAY_KEYS[check_date.weekday()]
+        for t in sorted(schedule.get(day_key, [])):
+            try:
+                h, m = map(int, t.strip().split(":"))
+                slot_jst = datetime(
+                    check_date.year, check_date.month, check_date.day,
+                    h, m, tzinfo=_JST,
+                )
+                if slot_jst <= now_jst:
+                    continue
+                slot_utc = slot_jst.astimezone(_UTC).replace(tzinfo=None)
+                # 同じスロットに記事が入っていなければ採用
+                if slot_utc not in occupied:
+                    return slot_utc
+            except Exception:
+                pass
+
+    return None
+
+
+# ── ジョブ関数 ─────────────────────────────────────────────────────────────────
 
 def _collect_job(app):
     from rss_collector import collect_articles
-
     logger.info("Running scheduled RSS collection")
     collect_articles(app)
+
+
+def _collect_youtube_job(app):
+    from youtube_collector import collect_youtube_videos
+    logger.info("Running scheduled YouTube collection")
+    collect_youtube_videos(app)
 
 
 def _post_job(app):
@@ -28,7 +97,7 @@ def _post_job(app):
         article = (
             Article.query.filter_by(status="queued")
             .filter(
-                db.or_(
+                or_(
                     Article.scheduled_at.is_(None),
                     Article.scheduled_at <= now,
                 )
@@ -44,35 +113,49 @@ def _post_job(app):
         logger.info("Post result: %s - %s", success, msg)
 
 
-def _setup_post_jobs(app):
-    """設定された投稿時刻に基づいて CronJob を再設定する。"""
+# ── スケジューラーセットアップ ─────────────────────────────────────────────────
+
+def _setup_weekly_post_jobs(app):
+    """週間スケジュールから CronJob を再設定する（±30分ゆらぎ付き）。"""
     for job in scheduler.get_jobs():
         if job.id.startswith("post_"):
             scheduler.remove_job(job.id)
 
-    with app.app_context():
-        times_str = Setting.get("post_times", "09:00,15:00,21:00")
+    schedule = get_weekly_schedule(app)
+    job_count = 0
 
-    for i, t in enumerate(times_str.split(",")):
-        t = t.strip()
-        try:
-            hour, minute = t.split(":")
-            scheduler.add_job(
-                _post_job,
-                CronTrigger(hour=int(hour), minute=int(minute), timezone="Asia/Tokyo"),
-                args=[app],
-                id=f"post_{i}",
-                replace_existing=True,
-            )
-            logger.info("Scheduled post job at %s JST", t)
-        except Exception as exc:
-            logger.error("Invalid post time '%s': %s", t, exc)
+    for day, times in schedule.items():
+        for i, t in enumerate(times or []):
+            t = t.strip()
+            if not t:
+                continue
+            try:
+                hour, minute = t.split(":")
+                scheduler.add_job(
+                    _post_job,
+                    CronTrigger(
+                        day_of_week=day,
+                        hour=int(hour),
+                        minute=int(minute),
+                        timezone="Asia/Tokyo",
+                        jitter=_JITTER_SECONDS,
+                    ),
+                    args=[app],
+                    id=f"post_{day}_{i}",
+                    replace_existing=True,
+                )
+                job_count += 1
+            except Exception as exc:
+                logger.error("Invalid schedule '%s %s': %s", day, t, exc)
+
+    logger.info("投稿ジョブ設定完了: %d件", job_count)
 
 
 def setup_scheduler(app):
     """スケジューラを初期化して起動する。"""
     with app.app_context():
         interval_h = int(Setting.get("collect_interval_hours", "2"))
+        yt_interval_h = int(Setting.get("youtube_collect_interval_hours", "6"))
 
     scheduler.add_job(
         _collect_job,
@@ -82,11 +165,21 @@ def setup_scheduler(app):
         replace_existing=True,
     )
 
-    _setup_post_jobs(app)
+    scheduler.add_job(
+        _collect_youtube_job,
+        IntervalTrigger(hours=yt_interval_h),
+        args=[app],
+        id="collect_youtube",
+        replace_existing=True,
+    )
 
-    # 設定変更後に呼び出せるよう app に参照を持たせる
-    app.reschedule_post_jobs = lambda: _setup_post_jobs(app)
+    _setup_weekly_post_jobs(app)
+
+    app.reschedule_post_jobs = lambda: _setup_weekly_post_jobs(app)
 
     scheduler.start()
-    logger.info("Scheduler started (collect every %dh)", interval_h)
+    logger.info(
+        "Scheduler started (RSS every %dh, YouTube every %dh)",
+        interval_h, yt_interval_h,
+    )
     return scheduler

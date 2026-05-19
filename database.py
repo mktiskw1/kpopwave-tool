@@ -19,12 +19,20 @@ class Article(db.Model):
     # pending → queued → posted
     # pending → rejected
     # queued  → failed
+    thumbnail_url = db.Column(db.String(500), nullable=True)
     scheduled_at = db.Column(db.DateTime, nullable=True)
     posted_at = db.Column(db.DateTime, nullable=True)
     threads_post_id = db.Column(db.String(200), nullable=True)
     error_message = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # エンゲージメント指標
+    like_count = db.Column(db.Integer, nullable=True)
+    reply_count = db.Column(db.Integer, nullable=True)
+    repost_count = db.Column(db.Integer, nullable=True)
+    quote_count = db.Column(db.Integer, nullable=True)
+    engagement_fetched_at = db.Column(db.DateTime, nullable=True)
+    post_style = db.Column(db.String(20), nullable=True)
 
     def to_dict(self):
         return {

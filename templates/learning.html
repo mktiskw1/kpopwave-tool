@@ -1,0 +1,208 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0 fw-bold">学習 <span style="font-size:.7rem;color:#777;font-weight:400">— 投稿パフォーマンス分析</span></h4>
+  <div class="d-flex gap-2">
+    <form action="{{ url_for('learning_refresh_engagement') }}" method="post">
+      <button type="submit" class="btn btn-sm btn-outline-secondary">
+        <i class="bi bi-arrow-repeat"></i> エンゲージメント取得
+      </button>
+    </form>
+    <form action="{{ url_for('learning_update_hints') }}" method="post">
+      <button type="submit" class="btn btn-sm btn-accent"
+              {% if not analysis.enough_data %}disabled title="データが5件以上必要です"{% endif %}>
+        <i class="bi bi-lightning-charge-fill"></i> 学習してプロンプトに反映
+      </button>
+    </form>
+  </div>
+</div>
+
+<!-- サマリーカード -->
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-3">
+    <div class="card p-3 text-center">
+      <div style="font-size:1.6rem;font-weight:700;color:#e0e0e0">{{ analysis.total_posted }}</div>
+      <div style="font-size:.75rem;color:#666">投稿済み総数</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card p-3 text-center">
+      <div style="font-size:1.6rem;font-weight:700;color:{% if analysis.with_data >= 5 %}#22c55e{% else %}#d97706{% endif %}">
+        {{ analysis.with_data }}
+      </div>
+      <div style="font-size:.75rem;color:#666">データあり</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card p-3 text-center">
+      <div style="font-size:1.6rem;font-weight:700;color:#e0e0e0">{{ analysis.all_avg_score or '—' }}</div>
+      <div style="font-size:.75rem;color:#666">平均スコア</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card p-3 text-center">
+      <div style="font-size:1.6rem;font-weight:700;color:{% if hints %}#e03030{% else %}#555{% endif %}">
+        {% if hints %}適用中{% else %}未学習{% endif %}
+      </div>
+      <div style="font-size:.75rem;color:#666">プロンプト学習</div>
+    </div>
+  </div>
+</div>
+
+{% if not analysis.with_data %}
+<div class="card p-5 text-center" style="color:#555">
+  <i class="bi bi-bar-chart" style="font-size:2.5rem;display:block;margin-bottom:.5rem"></i>
+  <div>エンゲージメントデータがありません</div>
+  <div style="font-size:.82rem;margin-top:.3rem">「エンゲージメント取得」ボタンで Threads からいいね数・リプライ数を取得してください</div>
+</div>
+
+{% else %}
+
+<div class="row g-3">
+
+  <!-- 左カラム -->
+  <div class="col-lg-7">
+
+    <!-- トップ投稿 -->
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-trophy-fill text-warning me-1"></i> 高エンゲージメント投稿 TOP{{ analysis.top_posts|length }}</span>
+        <span style="font-size:.72rem;color:#666">スコア = いいね×1 + リプライ×2 + リポスト×3 + 引用×2</span>
+      </div>
+      <div class="card-body p-0">
+        {% set max_score = analysis.top_posts[0].score if analysis.top_posts else 1 %}
+        {% for p in analysis.top_posts %}
+        <div class="p-3 {% if not loop.last %}border-bottom{% endif %}" style="border-color:var(--border)!important">
+          <div class="d-flex justify-content-between align-items-start mb-1">
+            <span style="font-size:.78rem;color:#888">#{{ loop.index }} &nbsp;
+              {% if p.style != '不明' %}<span class="badge" style="background:#2a2a2a;color:#aaa;font-size:.68rem">{{ p.style }}</span>{% endif %}
+              &nbsp; {{ p.length }}字
+            </span>
+            <div class="d-flex gap-2" style="font-size:.78rem;color:#aaa">
+              <span title="いいね"><i class="bi bi-heart-fill" style="color:#e03030"></i> {{ p.like_count }}</span>
+              <span title="リプライ"><i class="bi bi-chat-fill" style="color:#0891b2"></i> {{ p.reply_count }}</span>
+              <span title="リポスト"><i class="bi bi-arrow-repeat" style="color:#16a34a"></i> {{ p.repost_count }}</span>
+              <span title="引用"><i class="bi bi-quote" style="color:#d97706"></i> {{ p.quote_count }}</span>
+              <strong style="color:#e0e0e0">{{ p.score }}pt</strong>
+            </div>
+          </div>
+          <!-- スコアバー -->
+          <div style="background:#1a1a1a;border-radius:3px;height:4px;margin-bottom:.5rem">
+            <div style="background:var(--accent);height:4px;border-radius:3px;width:{{ [(p.score / max_score * 100)|int, 100]|min }}%"></div>
+          </div>
+          <div style="font-size:.8rem;color:#ccc;white-space:pre-wrap;word-break:break-word;max-height:80px;overflow:hidden">{{ p.summary_body }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+  </div>
+
+  <!-- 右カラム -->
+  <div class="col-lg-5">
+
+    <!-- スタイル別 -->
+    {% if analysis.style_stats %}
+    <div class="card mb-3">
+      <div class="card-header"><i class="bi bi-palette me-1"></i> スタイル別パフォーマンス</div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0" style="font-size:.82rem">
+          <thead><tr style="color:#666">
+            <th class="ps-3">スタイル</th><th class="text-center">件数</th>
+            <th class="text-center">avg</th><th class="text-end pe-3">max</th>
+          </tr></thead>
+          <tbody>
+          {% set max_avg = (analysis.style_stats.values()|map(attribute='avg')|max) or 1 %}
+          {% for style, s in analysis.style_stats|dictsort(by='value', attribute='avg')|reverse %}
+          <tr>
+            <td class="ps-3">
+              <div style="background:#2a2a2a;border-radius:3px;height:3px;width:100%;margin-bottom:3px">
+                <div style="background:var(--accent2);height:3px;border-radius:3px;width:{{ [(s.avg / max_avg * 100)|int, 100]|min }}%"></div>
+              </div>
+              {{ style }}
+            </td>
+            <td class="text-center text-muted">{{ s.count }}</td>
+            <td class="text-center"><strong>{{ s.avg }}</strong></td>
+            <td class="text-end pe-3 text-muted">{{ s.max }}</td>
+          </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- 文字数別 -->
+    <div class="card mb-3">
+      <div class="card-header"><i class="bi bi-text-left me-1"></i> 文字数帯別パフォーマンス</div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0" style="font-size:.82rem">
+          <thead><tr style="color:#666">
+            <th class="ps-3">文字数</th><th class="text-center">件数</th><th class="text-end pe-3">avg</th>
+          </tr></thead>
+          <tbody>
+          {% set max_lavg = (analysis.length_stats.values()|map(attribute='avg')|max) or 1 %}
+          {% for bucket, s in analysis.length_stats.items() %}
+          <tr>
+            <td class="ps-3">
+              <div style="background:#2a2a2a;border-radius:3px;height:3px;width:100%;margin-bottom:3px">
+                <div style="background:#0891b2;height:3px;border-radius:3px;width:{{ [(s.avg / max_lavg * 100)|int, 100]|min if s.avg else 0 }}%"></div>
+              </div>
+              {{ bucket }}
+            </td>
+            <td class="text-center text-muted">{{ s.count }}</td>
+            <td class="text-end pe-3"><strong>{{ s.avg }}</strong></td>
+          </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 絵文字・問いかけ -->
+    <div class="card mb-3">
+      <div class="card-header"><i class="bi bi-emoji-smile me-1"></i> 絵文字 / 問いかけ</div>
+      <div class="card-body" style="font-size:.82rem">
+        <div class="row g-2">
+          <div class="col-6">
+            <div style="color:#666;font-size:.72rem;margin-bottom:.3rem">絵文字</div>
+            {% for label, s in analysis.emoji_stats.items() %}
+            <div class="d-flex justify-content-between">
+              <span>{{ label }} ({{ s.count }}件)</span>
+              <strong>{{ s.avg }}pt</strong>
+            </div>
+            {% endfor %}
+          </div>
+          <div class="col-6">
+            <div style="color:#666;font-size:.72rem;margin-bottom:.3rem">問いかけ</div>
+            {% for label, s in analysis.question_stats.items() %}
+            <div class="d-flex justify-content-between">
+              <span>{{ label }} ({{ s.count }}件)</span>
+              <strong>{{ s.avg }}pt</strong>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 学習済みヒント -->
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-lightning-charge-fill text-warning me-1"></i> 現在のプロンプト学習内容</span>
+      </div>
+      <div class="card-body">
+        {% if hints %}
+        <pre style="font-size:.78rem;color:#ccc;white-space:pre-wrap;margin:0;background:transparent;border:none">{{ hints }}</pre>
+        {% else %}
+        <span style="font-size:.82rem;color:#555">未適用（データが5件以上になったら「学習してプロンプトに反映」を実行）</span>
+        {% endif %}
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

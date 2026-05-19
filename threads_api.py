@@ -27,10 +27,12 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
         if not article.summary:
             return False, "要約がありません。先に要約を生成してください"
         post_text = article.summary
+        thumbnail_url = article.thumbnail_url or ""
 
     # ---- テストモード ----
     if test_mode:
         logger.info("[TEST] Would post to Threads:\n%s", post_text)
+        logger.info("[TEST] thumbnail_url: %s", thumbnail_url or "(none)")
         with app.app_context():
             art = Article.query.get(article_id)
             if art:
@@ -46,10 +48,23 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
         return False, "Threads の認証情報が設定されていません"
 
     try:
-        # Step 1: メディアコンテナ作成
+        # Step 1: メディアコンテナ作成（サムネイルがあれば IMAGE、なければ TEXT）
+        if thumbnail_url:
+            container_data = {
+                "media_type": "IMAGE",
+                "image_url": thumbnail_url,
+                "text": post_text,
+                "access_token": token,
+            }
+        else:
+            container_data = {
+                "media_type": "TEXT",
+                "text": post_text,
+                "access_token": token,
+            }
         res = requests.post(
             f"{THREADS_API}/{user_id}/threads",
-            data={"media_type": "TEXT", "text": post_text, "access_token": token},
+            data=container_data,
             timeout=30,
         )
         data = res.json()

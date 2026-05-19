@@ -1,0 +1,216 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0 fw-bold">
+    <i class="bi bi-calendar-week-fill me-2" style="color:var(--accent)"></i>週間投稿スケジュール
+  </h4>
+  <span class="text-muted" style="font-size:.8rem">
+    <i class="bi bi-shuffle me-1"></i>±30分のランダムゆらぎが自動で適用されます
+  </span>
+</div>
+
+<!-- 説明バー -->
+<div class="alert alert-secondary py-2 mb-4" style="font-size:.82rem;background:#1c1c1c;border-color:#333">
+  <i class="bi bi-info-circle me-1"></i>
+  曜日ごとに投稿時刻を設定します。承認した記事は次の空きスロットに自動でスケジュールされます。
+  実際の投稿時刻は設定値から <strong>±30分</strong> ずれます（人間っぽい投稿タイミング）。
+</div>
+
+<form method="post" id="schedule-form">
+<div class="row g-3 mb-4">
+
+  {% set day_colors = {
+    "mon": "#6366f1", "tue": "#6366f1", "wed": "#6366f1",
+    "thu": "#6366f1", "fri": "#6366f1",
+    "sat": "#0891b2", "sun": "#e03030"
+  } %}
+
+  {% for day in day_keys %}
+  {% set label = day_labels[day] %}
+  {% set color = day_colors[day] %}
+  {% set times = schedule.get(day, []) %}
+
+  <div class="col-6 col-md-4 col-lg-3" id="day-col-{{ day }}">
+    <div class="card h-100" style="border-color:{{ color }}40">
+      <!-- 曜日ヘッダー -->
+      <div class="card-header d-flex justify-content-between align-items-center py-2"
+           style="background:{{ color }}18;border-bottom-color:{{ color }}40">
+        <span class="fw-bold" style="font-size:1.1rem;color:{{ color }}">{{ label }}曜日</span>
+        <span class="badge" style="background:{{ color }}33;color:{{ color }};font-size:.72rem">
+          <span class="slot-count-{{ day }}">{{ times|length }}</span>件
+        </span>
+      </div>
+
+      <div class="card-body p-2">
+        <!-- 時刻リスト -->
+        <div class="time-list-{{ day }} mb-2">
+          {% for t in times %}
+          <div class="d-flex align-items-center gap-1 mb-1 time-item">
+            <input type="text" name="times_{{ day }}" value="{{ t }}"
+                   class="form-control form-control-sm time-input text-center fw-bold"
+                   style="max-width:72px;font-size:.9rem;letter-spacing:1px"
+                   placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]"
+                   oninput="validateTime(this)">
+            <button type="button" class="btn btn-sm btn-outline-danger px-1 py-0"
+                    style="font-size:.75rem;line-height:1.6"
+                    onclick="removeTime(this, '{{ day }}')">
+              <i class="bi bi-x"></i>
+            </button>
+          </div>
+          {% endfor %}
+        </div>
+
+        <!-- 追加ボタン -->
+        <button type="button" class="btn btn-sm w-100 py-1"
+                style="background:{{ color }}18;border:1px dashed {{ color }}55;color:{{ color }};font-size:.8rem"
+                onclick="addTime('{{ day }}')">
+          <i class="bi bi-plus-lg me-1"></i>追加
+        </button>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+
+</div><!-- /row -->
+
+<!-- 保存ボタン -->
+<div class="d-flex align-items-center gap-3">
+  <button type="submit" class="btn btn-accent px-4">
+    <i class="bi bi-save-fill me-1"></i>スケジュールを保存
+  </button>
+  <button type="button" class="btn btn-outline-secondary btn-sm" onclick="applyAllDays()">
+    <i class="bi bi-arrow-repeat me-1"></i>平日すべてに現在の月曜設定を適用
+  </button>
+  <span class="text-muted" style="font-size:.78rem">保存後すぐに反映されます</span>
+</div>
+
+</form>
+
+<!-- 今週のプレビュー -->
+<div class="card mt-4">
+  <div class="card-header" style="font-size:.85rem">
+    <i class="bi bi-eye me-1"></i>今後のスケジュールプレビュー（ゆらぎ前）
+  </div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-sm mb-0" style="font-size:.82rem">
+        <thead>
+          <tr>
+            {% for day in day_keys %}
+            <th class="text-center py-2" style="min-width:80px">{{ day_labels[day] }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          <tr id="preview-row">
+            {% for day in day_keys %}
+            <td class="text-center align-top py-2" id="preview-{{ day }}">
+              {% for t in schedule.get(day, []) %}
+              <div class="badge mb-1" style="background:#222;color:#aaa;display:block;font-size:.75rem">{{ t }}</div>
+              {% else %}
+              <span class="text-muted" style="font-size:.75rem">—</span>
+              {% endfor %}
+            </td>
+            {% endfor %}
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const DAY_COLORS = {
+  mon:"#6366f1",tue:"#6366f1",wed:"#6366f1",thu:"#6366f1",fri:"#6366f1",
+  sat:"#0891b2",sun:"#e03030"
+};
+
+function addTime(day) {
+  const list = document.querySelector(`.time-list-${day}`);
+  const div = document.createElement('div');
+  div.className = 'd-flex align-items-center gap-1 mb-1 time-item';
+  const color = DAY_COLORS[day] || '#888';
+  div.innerHTML = `
+    <input type="text" name="times_${day}" value=""
+           class="form-control form-control-sm time-input text-center fw-bold"
+           style="max-width:72px;font-size:.9rem;letter-spacing:1px"
+           placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]"
+           oninput="validateTime(this)">
+    <button type="button" class="btn btn-sm btn-outline-danger px-1 py-0"
+            style="font-size:.75rem;line-height:1.6"
+            onclick="removeTime(this,'${day}')">
+      <i class="bi bi-x"></i>
+    </button>`;
+  list.appendChild(div);
+  div.querySelector('input').focus();
+  updateCount(day);
+}
+
+function removeTime(btn, day) {
+  btn.closest('.time-item').remove();
+  updateCount(day);
+  updatePreview(day);
+}
+
+function updateCount(day) {
+  const items = document.querySelectorAll(`.time-list-${day} .time-item`);
+  document.querySelector(`.slot-count-${day}`).textContent = items.length;
+}
+
+function validateTime(input) {
+  const v = input.value.trim();
+  const ok = /^\d{1,2}:\d{2}$/.test(v) && (() => {
+    const [h, m] = v.split(':').map(Number);
+    return h >= 0 && h <= 23 && m >= 0 && m <= 59;
+  })();
+  input.style.borderColor = v === '' ? '' : (ok ? '#22c55e' : '#ef4444');
+  if (ok) updatePreview(input.closest('[class*="col-"]').id.replace('day-col-', ''));
+}
+
+function updatePreview(day) {
+  const inputs = document.querySelectorAll(`input[name="times_${day}"]`);
+  const cell = document.getElementById(`preview-${day}`);
+  const times = Array.from(inputs)
+    .map(i => i.value.trim())
+    .filter(t => /^\d{1,2}:\d{2}$/.test(t))
+    .sort();
+  if (times.length === 0) {
+    cell.innerHTML = '<span class="text-muted" style="font-size:.75rem">—</span>';
+  } else {
+    cell.innerHTML = times.map(t =>
+      `<div class="badge mb-1" style="background:#222;color:#aaa;display:block;font-size:.75rem">${t}</div>`
+    ).join('');
+  }
+}
+
+function applyAllDays() {
+  const monInputs = document.querySelectorAll('input[name="times_mon"]');
+  const monTimes = Array.from(monInputs).map(i => i.value.trim()).filter(Boolean);
+  ['tue','wed','thu','fri'].forEach(day => {
+    // 既存の入力を全削除
+    document.querySelectorAll(`.time-list-${day} .time-item`).forEach(el => el.remove());
+    // 月曜の時刻をコピー
+    monTimes.forEach(t => {
+      addTime(day);
+      const list = document.querySelector(`.time-list-${day}`);
+      const last = list.querySelectorAll('.time-item');
+      last[last.length - 1].querySelector('input').value = t;
+    });
+    updateCount(day);
+    updatePreview(day);
+  });
+}
+
+// 入力変化時にリアルタイムでプレビューを更新
+document.getElementById('schedule-form').addEventListener('input', e => {
+  if (e.target.matches('.time-input')) {
+    const col = e.target.closest('[id^="day-col-"]');
+    if (col) updatePreview(col.id.replace('day-col-', ''));
+  }
+});
+</script>
+{% endblock %}

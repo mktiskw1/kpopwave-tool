@@ -178,6 +178,13 @@ def get_feed_list(app) -> list:
     return []
 
 
+def _is_japanese_feed(feed_info) -> bool:
+    """feedのlangフィールドが"ja"ならTrue（日本語フィードとして扱う）。"""
+    if isinstance(feed_info, dict):
+        return feed_info.get("lang", "").lower() == "ja"
+    return False
+
+
 def collect_articles(app) -> int:
     """全RSSフィードから新着記事を取得してDBに保存する。新記事数を返す。"""
     feeds = get_feed_list(app)
@@ -190,6 +197,7 @@ def collect_articles(app) -> int:
     for feed_info in feeds:
         url  = feed_info.get("url", "") if isinstance(feed_info, dict) else str(feed_info)
         name = feed_info.get("name", url) if isinstance(feed_info, dict) else url
+        is_ja = _is_japanese_feed(feed_info)
         if not url:
             continue
 
@@ -233,15 +241,18 @@ def collect_articles(app) -> int:
                 plain_content = _strip_html(content)
                 title = (entry.get("title") or "")
 
-                # ── フィルター2: 除外キーワード ────────────────────────────
-                if _check_excluded(title, plain_content):
-                    skipped_kw += 1
-                    continue
+                # 日本語フィードはキーワードフィルターをスキップしてAI判定に委ねる
+                # （日本語記事はカタカナ表記が多くキーワード一致しにくいため）
+                if not is_ja:
+                    # ── フィルター2: 除外キーワード ──────────────────────
+                    if _check_excluded(title, plain_content):
+                        skipped_kw += 1
+                        continue
 
-                # ── フィルター3: 女性KPOPキーワード ───────────────────────
-                if not _check_female_kpop(title, plain_content):
-                    skipped_kw += 1
-                    continue
+                    # ── フィルター3: 女性KPOPキーワード ──────────────────
+                    if not _check_female_kpop(title, plain_content):
+                        skipped_kw += 1
+                        continue
 
                 # ── 重複チェック（DB + 今回収集分） ───────────────────────
                 if article_url in seen_urls or Article.query.filter_by(url=article_url).first():
@@ -254,6 +265,7 @@ def collect_articles(app) -> int:
                     "published_at": published_at,
                     "raw_content":  plain_content[:5000],
                     "feed_source":  name,
+                    "lang":         "ja" if is_ja else "en",
                 })
 
         if not candidates:
@@ -286,8 +298,8 @@ def collect_articles(app) -> int:
             db.session.commit()
 
         logger.info(
-            "[%s] 追加:%d 除外(日付):%d 除外(KW):%d 除外(AI):%d 重複:%d",
-            name, added, skipped_date, skipped_kw, skipped_ai, skipped_dup,
+            "[%s][%s] 追加:%d 除外(日付):%d 除外(KW):%d 除外(AI):%d 重複:%d",
+            name, "ja" if is_ja else "en", added, skipped_date, skipped_kw, skipped_ai, skipped_dup,
         )
 
     logger.info("収集完了 — 新規追加合計: %d 件", new_count)

@@ -26,6 +26,10 @@ DEFAULT_FEEDS = [
     {"name": "TheBiasList", "url": "https://thebiaslist.com/feed/"},
     {"name": "KpopReviewed","url": "https://kpopreviewed.com/feed/"},
     {"name": "SeoulBeats",  "url": "https://seoulbeats.com/feed/"},
+    # 日本語KPOPサイト（lang:ja → キーワードフィルタースキップ、AI判定のみ）
+    {"name": "Kstyle",       "url": "https://news.google.com/rss/search?q=site:kstyle.com&hl=ja&gl=JP&ceid=JP:ja", "lang": "ja"},
+    {"name": "BARKS",        "url": "https://barks.jp/feed/", "lang": "ja"},
+    {"name": "Daebak Tokyo", "url": "https://daebak.tokyo/feed/", "lang": "ja"},
 ]
 
 
@@ -37,8 +41,31 @@ def create_app() -> Flask:
     with app.app_context():
         db.create_all()
         _init_default_settings()
+        _migrate_db()
 
     return app
+
+
+def _migrate_db():
+    """既存DBに新カラムを追加する（SQLite用）。"""
+    from sqlalchemy import inspect, text
+    inspector = inspect(db.engine)
+    existing = {c["name"] for c in inspector.get_columns("articles")}
+    new_cols = [
+        ("thumbnail_url", "VARCHAR(500)"),
+        ("like_count", "INTEGER"),
+        ("reply_count", "INTEGER"),
+        ("repost_count", "INTEGER"),
+        ("quote_count", "INTEGER"),
+        ("engagement_fetched_at", "DATETIME"),
+        ("post_style", "VARCHAR(20)"),
+    ]
+    with db.engine.connect() as conn:
+        for col, typedef in new_cols:
+            if col not in existing:
+                conn.execute(text(f"ALTER TABLE articles ADD COLUMN {col} {typedef}"))
+                conn.commit()
+                logger.info("DB migration: added %s column", col)
 
 
 def _init_default_settings():
@@ -46,7 +73,9 @@ def _init_default_settings():
         "rss_feeds": json.dumps(DEFAULT_FEEDS),
         "post_times": "09:00,15:00,21:00",
         "collect_interval_hours": "2",
-        "test_mode": "true",
+        "youtube_collect_interval_hours": "6",
+        "youtube_api_key": os.getenv("YOUTUBE_API_KEY", ""),
+        "test_mode": "false",
         "threads_user_id": os.getenv("THREADS_USER_ID", ""),
         "threads_access_token": os.getenv("THREADS_ACCESS_TOKEN", ""),
         "anthropic_api_key": os.getenv("ANTHROPIC_API_KEY", ""),
@@ -116,10 +145,22 @@ def delete_all_pending():
 
 @app.route("/articles/<int:id>/approve", methods=["POST"])
 def approve_article(id):
+    from scheduler import next_post_slot
+    from datetime import timedelta
+
     article = Article.query.get_or_404(id)
     article.status = "queued"
+
+    slot_utc = next_post_slot(app)
+    if slot_utc:
+        article.scheduled_at = slot_utc
+        slot_jst = slot_utc + timedelta(hours=9)
+        slot_label = f"（{slot_jst.strftime('%m/%d %H:%M')} JST 予定）"
+    else:
+        slot_label = ""
+
     db.session.commit()
-    flash(f"キューに追加しました: {article.title[:50]}", "success")
+    flash(f"キューに追加しました{slot_label}: {article.title[:50]}", "success")
     return redirect(request.referrer or url_for("pending"))
 
 
@@ -156,7 +197,8 @@ def edit_article(id):
 def resummary_article(id):
     from summarizer import summarize_article
 
-    success = summarize_article(app, id)
+    style = (request.form.get("style") or "つぶやき型").strip()
+    success = summarize_article(app, id, style=style)
     if success:
         article = Article.query.get(id)
         return jsonify({"success": True, "summary": article.summary, "length": len(article.summary or "")})
@@ -239,6 +281,7 @@ def settings():
     if request.method == "POST":
         for key in ("threads_user_id", "threads_access_token", "anthropic_api_key",
                     "post_times", "collect_interval_hours",
+                    "youtube_api_key", "youtube_collect_interval_hours",
                     "meta_app_id", "meta_app_secret", "app_base_url"):
             Setting.set(key, (request.form.get(key) or "").strip())
 
@@ -264,6 +307,8 @@ def settings():
         "anthropic_api_key": Setting.get("anthropic_api_key"),
         "post_times": Setting.get("post_times", "09:00,15:00,21:00"),
         "collect_interval_hours": Setting.get("collect_interval_hours", "2"),
+        "youtube_api_key": Setting.get("youtube_api_key"),
+        "youtube_collect_interval_hours": Setting.get("youtube_collect_interval_hours", "6"),
         "test_mode": Setting.get("test_mode", "true") == "true",
         "rss_feeds": json.loads(Setting.get("rss_feeds", "[]") or "[]"),
         "meta_app_id": Setting.get("meta_app_id"),
@@ -272,6 +317,52 @@ def settings():
         "callback_url": base_url + "/auth/threads/callback",
     }
     return render_template("settings.html", settings=current)
+
+
+# ── 週間スケジュール ──────────────────────────────────────────────────────────
+
+
+@app.route("/schedule", methods=["GET", "POST"])
+def schedule():
+    from scheduler import get_weekly_schedule, _setup_weekly_post_jobs, _DAY_KEYS
+
+    if request.method == "POST":
+        new_schedule = {}
+        for day in _DAY_KEYS:
+            raw_times = request.form.getlist(f"times_{day}")
+            valid = []
+            for t in raw_times:
+                t = t.strip()
+                if not t:
+                    continue
+                try:
+                    h, m = t.split(":")
+                    if 0 <= int(h) <= 23 and 0 <= int(m) <= 59:
+                        valid.append(f"{int(h):02d}:{int(m):02d}")
+                except Exception:
+                    pass
+            new_schedule[day] = sorted(set(valid))
+
+        Setting.set("weekly_schedule", json.dumps(new_schedule))
+
+        if hasattr(app, "reschedule_post_jobs"):
+            app.reschedule_post_jobs()
+
+        flash("週間スケジュールを保存しました", "success")
+        return redirect(url_for("schedule"))
+
+    from scheduler import get_weekly_schedule
+    _DAY_LABELS = {
+        "mon": "月", "tue": "火", "wed": "水", "thu": "木",
+        "fri": "金", "sat": "土", "sun": "日",
+    }
+    current = get_weekly_schedule(app)
+    return render_template(
+        "schedule.html",
+        schedule=current,
+        day_keys=_DAY_KEYS,
+        day_labels=_DAY_LABELS,
+    )
 
 
 # ── Threads OAuth 認証 ────────────────────────────────────────────────────
@@ -498,6 +589,53 @@ def collect():
     new = collect_articles(app)
     flash(f"RSS 収集完了: {new} 件の新記事を取得しました（承認待ち画面で要約を生成してください）", "success")
     return redirect(url_for("index"))
+
+
+@app.route("/collect-youtube", methods=["POST"])
+def collect_youtube():
+    from youtube_collector import collect_youtube_videos
+
+    new = collect_youtube_videos(app)
+    flash(f"YouTube 収集完了: {new} 件の新しい動画を取得しました（承認待ち画面で要約を生成してください）", "success")
+    return redirect(url_for("index"))
+
+
+@app.route("/learning")
+def learning():
+    from learning import analyze_performance
+    from database import Setting
+
+    analysis = analyze_performance(app)
+    hints = Setting.get("learned_style_hints", "")
+    return render_template("learning.html", analysis=analysis, hints=hints)
+
+
+@app.route("/learning/refresh-engagement", methods=["POST"])
+def learning_refresh_engagement():
+    from engagement_tracker import refresh_engagement
+
+    result = refresh_engagement(app)
+    if "error" in result:
+        flash(result["error"], "danger")
+    else:
+        flash(
+            f"エンゲージメント取得完了: {result['updated']}件更新 / "
+            f"{result['skipped']}件スキップ(テスト) / {result['errors']}件エラー",
+            "success" if result["errors"] == 0 else "warning",
+        )
+    return redirect(url_for("learning"))
+
+
+@app.route("/learning/update-hints", methods=["POST"])
+def learning_update_hints():
+    from learning import update_learned_hints
+
+    result = update_learned_hints(app)
+    if result.get("hints"):
+        flash("学習完了: プロンプトに反映しました", "success")
+    else:
+        flash("データ不足のため学習ヒントをクリアしました（5件以上必要）", "warning")
+    return redirect(url_for("learning"))
 
 
 @app.route("/follow-candidates")

@@ -60,6 +60,16 @@
         </div>
       </div>
 
+      <!-- サムネイル（YouTube動画） -->
+      {% if a.thumbnail_url %}
+      <div class="mb-2">
+        <a href="{{ a.url }}" target="_blank" rel="noopener">
+          <img src="{{ a.thumbnail_url }}" alt="thumbnail"
+               style="width:100%;max-width:400px;border-radius:6px;display:block">
+        </a>
+      </div>
+      {% endif %}
+
       <!-- タイトル -->
       <h6 class="mb-2" style="font-size:.92rem;font-weight:600;line-height:1.4">
         <a href="{{ a.url }}" target="_blank" rel="noopener" class="text-decoration-none text-light">
@@ -75,11 +85,18 @@
           <span class="char-count {% if a.summary|length > 500 %}over{% else %}ok{% endif %}">
             <i class="bi bi-chat-text"></i> {{ a.summary|length }} / 500 文字
           </span>
-          <div class="d-flex gap-1">
+          <div class="d-flex gap-1 align-items-center">
             <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2"
                     onclick="toggleEdit({{ a.id }})" style="font-size:.78rem">
               <i class="bi bi-pencil"></i> 編集
             </button>
+            <select id="style-{{ a.id }}"
+                    style="font-size:.74rem;padding:2px 4px;background:#1e1e1e;color:#aaa;border:1px solid #444;border-radius:4px;height:26px;cursor:pointer">
+              <option value="つぶやき型">つぶやき型</option>
+              <option value="情報型">情報型</option>
+              <option value="体験談型">体験談型</option>
+              <option value="バズり型">バズり型</option>
+            </select>
             <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2"
                     onclick="resummary({{ a.id }}, this)" style="font-size:.78rem">
               <i class="bi bi-magic"></i> 再生成
@@ -100,8 +117,15 @@
         </div>
       </div>
       {% else %}
-      <div class="mt-2 d-flex align-items-center gap-2">
+      <div class="mt-2 d-flex align-items-center gap-2 flex-wrap">
         <span style="font-size:.82rem;color:#666"><i class="bi bi-dash-circle"></i> 要約未生成</span>
+        <select id="style-{{ a.id }}"
+                style="font-size:.74rem;padding:2px 4px;background:#1e1e1e;color:#aaa;border:1px solid #444;border-radius:4px;height:26px;cursor:pointer">
+          <option value="つぶやき型">つぶやき型</option>
+          <option value="情報型">情報型</option>
+          <option value="体験談型">体験談型</option>
+          <option value="バズり型">バズり型</option>
+        </select>
         <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2"
                 onclick="resummary({{ a.id }}, this)" style="font-size:.78rem">
           <i class="bi bi-magic"></i> 要約を生成
@@ -220,10 +244,15 @@ function saveSummary(id) {
 }
 
 function resummary(id, btn) {
+  const style = document.getElementById('style-' + id)?.value || 'つぶやき型';
   const orig = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
-  fetch('/articles/' + id + '/resummary', {method: 'POST'})
+  fetch('/articles/' + id + '/resummary', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'style=' + encodeURIComponent(style)
+  })
     .then(r => r.json()).then(d => {
       if (d.success) {
         const disp = document.getElementById('display-' + id);
