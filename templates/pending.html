@@ -11,7 +11,7 @@
 {% if articles %}
 <!-- 一括操作ツールバー -->
 <form id="bulk-form" action="{{ url_for('bulk_delete_articles') }}" method="post">
-  <div class="d-flex align-items-center gap-2 mb-3 p-2 rounded" style="background:#1a1a1a;border:1px solid #2e2e2e">
+  <div class="d-flex align-items-center gap-2 mb-3 p-2 rounded" style="background:var(--surface2);border:1.5px solid var(--border);border-radius:14px!important">
     <input type="checkbox" id="select-all" class="form-check-input mt-0" title="全選択/全解除">
     <label for="select-all" class="text-muted mb-0" style="font-size:.82rem;cursor:pointer">全選択</label>
     <span id="selected-count" class="text-muted ms-1" style="font-size:.8rem"></span>
@@ -72,7 +72,7 @@
 
       <!-- タイトル -->
       <h6 class="mb-2" style="font-size:.92rem;font-weight:600;line-height:1.4">
-        <a href="{{ a.url }}" target="_blank" rel="noopener" class="text-decoration-none text-light">
+        <a href="{{ a.url }}" target="_blank" rel="noopener" class="text-decoration-none" style="color:var(--text)">
           {{ a.title }}
           <i class="bi bi-box-arrow-up-right" style="font-size:.7rem;opacity:.4"></i>
         </a>
@@ -91,7 +91,7 @@
               <i class="bi bi-pencil"></i> 編集
             </button>
             <select id="style-{{ a.id }}"
-                    style="font-size:.74rem;padding:2px 4px;background:#1e1e1e;color:#aaa;border:1px solid #444;border-radius:4px;height:26px;cursor:pointer">
+                    style="font-size:.74rem;padding:2px 4px;background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);border-radius:8px;height:26px;cursor:pointer">
               <option value="つぶやき型">つぶやき型</option>
               <option value="情報型">情報型</option>
               <option value="体験談型">体験談型</option>
@@ -118,9 +118,9 @@
       </div>
       {% else %}
       <div class="mt-2 d-flex align-items-center gap-2 flex-wrap">
-        <span style="font-size:.82rem;color:#666"><i class="bi bi-dash-circle"></i> 要約未生成</span>
+        <span style="font-size:.82rem;color:var(--text-muted)"><i class="bi bi-dash-circle"></i> 要約未生成</span>
         <select id="style-{{ a.id }}"
-                style="font-size:.74rem;padding:2px 4px;background:#1e1e1e;color:#aaa;border:1px solid #444;border-radius:4px;height:26px;cursor:pointer">
+                style="font-size:.74rem;padding:2px 4px;background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);border-radius:8px;height:26px;cursor:pointer">
           <option value="つぶやき型">つぶやき型</option>
           <option value="情報型">情報型</option>
           <option value="体験談型">体験談型</option>
@@ -147,7 +147,7 @@
 <form id="delete-all-form" action="{{ url_for('delete_all_pending') }}" method="post"></form>
 
 {% else %}
-<div class="card p-5 text-center" style="color:#555">
+<div class="card p-5 text-center" style="color:var(--text-muted)">
   <i class="bi bi-inbox" style="font-size:2.5rem;display:block;margin-bottom:.5rem"></i>
   承認待ちの記事はありません
 </div>

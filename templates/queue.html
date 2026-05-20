@@ -11,15 +11,22 @@
   </div>
 
   {% if not queued %}
-  <div class="card-body text-center py-4" style="color:#555">
+  <div class="card-body text-center py-4" style="color:var(--text-muted)">
     <i class="bi bi-inbox" style="font-size:2rem;display:block;margin-bottom:.4rem"></i>
     キューは空です。承認待ち画面で記事を承認してください。
   </div>
   {% endif %}
 
+  <div id="queue-list">
   {% for a in queued %}
-  <div class="card-body border-bottom" style="border-color:var(--border)!important" id="qcard-{{ a.id }}">
+  <div class="card-body border-bottom" style="border-color:var(--border)!important" id="qcard-{{ a.id }}" data-id="{{ a.id }}">
     <div class="d-flex justify-content-between align-items-start gap-3">
+
+      <!-- ドラッグハンドル -->
+      <div class="drag-handle d-flex align-items-center flex-shrink-0"
+           style="cursor:grab;color:var(--text-muted);padding-top:.1rem;opacity:.5">
+        <i class="bi bi-grip-vertical" style="font-size:1.1rem"></i>
+      </div>
 
       <!-- 記事情報 -->
       <div style="min-width:0;flex:1">
@@ -35,12 +42,12 @@
           {% endif %}
         </div>
         <div style="font-size:.88rem;font-weight:600">
-          <a href="{{ a.url }}" target="_blank" class="text-decoration-none text-light">
+          <a href="{{ a.url }}" target="_blank" class="text-decoration-none" style="color:var(--text);font-weight:700">
             {{ a.title[:70] }}{% if a.title|length > 70 %}…{% endif %}
           </a>
         </div>
         {% if a.summary %}
-        <div style="font-size:.78rem;color:#888;margin-top:.3rem">
+        <div style="font-size:.78rem;color:var(--text-muted);margin-top:.3rem">
           {{ a.summary[:120] }}…
         </div>
         {% endif %}
@@ -79,6 +86,7 @@
     </div>
   </div>
   {% endfor %}
+  </div>
 </div>
 
 <!-- 失敗 -->
@@ -94,7 +102,7 @@
       <div>
         <div style="font-size:.85rem">{{ a.title[:60] }}{% if a.title|length > 60 %}…{% endif %}</div>
         {% if a.error_message %}
-        <div style="font-size:.75rem;color:#e57373;margin-top:.2rem">
+        <div style="font-size:.75rem;color:var(--accent);margin-top:.2rem">
           <i class="bi bi-exclamation-circle"></i> {{ a.error_message[:120] }}
         </div>
         {% endif %}
@@ -117,24 +125,24 @@
     <span class="badge badge-posted">{{ posted|length }}</span>
   </div>
   {% if not posted %}
-  <div class="card-body py-4 text-center" style="color:#555">まだ投稿はありません</div>
+  <div class="card-body py-4 text-center" style="color:var(--text-muted)">まだ投稿はありません</div>
   {% endif %}
   {% for a in posted %}
   <div class="card-body border-bottom py-2" style="border-color:var(--border)!important">
     <div class="d-flex justify-content-between align-items-center">
       <div style="min-width:0">
         <span style="font-size:.82rem">
-          <a href="{{ a.url }}" target="_blank" class="text-decoration-none" style="color:#aaa">
+          <a href="{{ a.url }}" target="_blank" class="text-decoration-none" style="color:var(--text-muted)">
             {{ a.title[:65] }}{% if a.title|length > 65 %}…{% endif %}
           </a>
         </span>
         {% if a.threads_post_id and not a.threads_post_id.startswith('test_') %}
-        <span style="font-size:.72rem;color:#555;margin-left:.4rem">ID: {{ a.threads_post_id }}</span>
+        <span style="font-size:.72rem;color:var(--text-muted);margin-left:.4rem">ID: {{ a.threads_post_id }}</span>
         {% elif a.threads_post_id and a.threads_post_id.startswith('test_') %}
         <span class="badge bg-secondary ms-1" style="font-size:.65rem">テスト</span>
         {% endif %}
       </div>
-      <span style="font-size:.75rem;color:#555;white-space:nowrap;margin-left:.5rem">
+      <span style="font-size:.75rem;color:var(--text-muted);white-space:nowrap;margin-left:.5rem">
         {{ a.posted_at.strftime('%m/%d %H:%M') if a.posted_at }}
       </span>
     </div>
@@ -145,6 +153,12 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+<style>
+  .sortable-ghost { opacity: .4; background: var(--surface2); border-radius: 10px; }
+  .sortable-drag  { box-shadow: 0 6px 24px rgba(233,30,140,.18); border-radius: 10px; }
+  .drag-handle:active { cursor: grabbing; }
+</style>
 <script>
 function toggleSchedule(id) {
   document.getElementById('schedule-form-' + id).classList.toggle('d-none');
@@ -158,10 +172,39 @@ function setSchedule(id) {
     headers: {'Content-Type': 'application/x-www-form-urlencoded'},
     body: 'scheduled_at=' + encodeURIComponent(val)
   }).then(r => r.json()).then(d => {
-    if (d.success) {
-      location.reload();
-    } else {
-      alert('エラー: ' + d.error);
+    if (d.success) { location.reload(); }
+    else { alert('エラー: ' + d.error); }
+  });
+}
+
+// ── ドラッグ&ドロップ並び替え ──────────────────────────────────────────────
+const queueList = document.getElementById('queue-list');
+if (queueList) {
+  Sortable.create(queueList, {
+    animation: 180,
+    handle: '.drag-handle',
+    ghostClass: 'sortable-ghost',
+    dragClass: 'sortable-drag',
+    onEnd: function () {
+      const ids = [...queueList.querySelectorAll('[data-id]')].map(el => parseInt(el.dataset.id));
+      fetch('/queue/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order: ids })
+      })
+      .then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(d => {
+        if (d.success) { location.reload(); }
+        else { alert('並び替えに失敗しました: ' + d.error); location.reload(); }
+      })
+      .catch(err => {
+        console.error('reorder error:', err);
+        alert('並び替えエラー: ' + err.message);
+        location.reload();
+      });
     }
   });
 }

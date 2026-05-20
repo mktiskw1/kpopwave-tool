@@ -11,7 +11,7 @@
 </div>
 
 <!-- 説明バー -->
-<div class="alert alert-secondary py-2 mb-4" style="font-size:.82rem;background:#1c1c1c;border-color:#333">
+<div class="alert alert-secondary py-2 mb-4" style="font-size:.82rem">
   <i class="bi bi-info-circle me-1"></i>
   曜日ごとに投稿時刻を設定します。承認した記事は次の空きスロットに自動でスケジュールされます。
   実際の投稿時刻は設定値から <strong>±30分</strong> ずれます（人間っぽい投稿タイミング）。
@@ -21,9 +21,9 @@
 <div class="row g-3 mb-4">
 
   {% set day_colors = {
-    "mon": "#6366f1", "tue": "#6366f1", "wed": "#6366f1",
-    "thu": "#6366f1", "fri": "#6366f1",
-    "sat": "#0891b2", "sun": "#e03030"
+    "mon": "#AB47BC", "tue": "#F06292", "wed": "#26A69A",
+    "thu": "#FFA726", "fri": "#CE93D8",
+    "sat": "#4FC3F7", "sun": "#E91E8C"
   } %}
 
   {% for day in day_keys %}
@@ -107,7 +107,7 @@
             {% for day in day_keys %}
             <td class="text-center align-top py-2" id="preview-{{ day }}">
               {% for t in schedule.get(day, []) %}
-              <div class="badge mb-1" style="background:#222;color:#aaa;display:block;font-size:.75rem">{{ t }}</div>
+              <div class="badge mb-1" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);display:block;font-size:.75rem">{{ t }}</div>
               {% else %}
               <span class="text-muted" style="font-size:.75rem">—</span>
               {% endfor %}
@@ -125,8 +125,8 @@
 {% block scripts %}
 <script>
 const DAY_COLORS = {
-  mon:"#6366f1",tue:"#6366f1",wed:"#6366f1",thu:"#6366f1",fri:"#6366f1",
-  sat:"#0891b2",sun:"#e03030"
+  mon:"#AB47BC",tue:"#F06292",wed:"#26A69A",thu:"#FFA726",fri:"#CE93D8",
+  sat:"#4FC3F7",sun:"#E91E8C"
 };
 
 function addTime(day) {
@@ -167,7 +167,7 @@ function validateTime(input) {
     const [h, m] = v.split(':').map(Number);
     return h >= 0 && h <= 23 && m >= 0 && m <= 59;
   })();
-  input.style.borderColor = v === '' ? '' : (ok ? '#22c55e' : '#ef4444');
+  input.style.borderColor = v === '' ? '' : (ok ? '#26A69A' : '#E91E8C');
   if (ok) updatePreview(input.closest('[class*="col-"]').id.replace('day-col-', ''));
 }
 
@@ -182,7 +182,7 @@ function updatePreview(day) {
     cell.innerHTML = '<span class="text-muted" style="font-size:.75rem">—</span>';
   } else {
     cell.innerHTML = times.map(t =>
-      `<div class="badge mb-1" style="background:#222;color:#aaa;display:block;font-size:.75rem">${t}</div>`
+      `<div class="badge mb-1" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);display:block;font-size:.75rem">${t}</div>`
     ).join('');
   }
 }

@@ -59,6 +59,7 @@ def _migrate_db():
         ("quote_count", "INTEGER"),
         ("engagement_fetched_at", "DATETIME"),
         ("post_style", "VARCHAR(20)"),
+        ("image_urls", "TEXT"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in new_cols:
@@ -271,6 +272,76 @@ def retry_article(id):
     db.session.commit()
     flash("再キューに追加しました", "info")
     return redirect(url_for("queue"))
+
+
+@app.route("/queue/reorder", methods=["POST"])
+def reorder_queue():
+    """ドラッグ&ドロップ並び替え後に未来スロットを新順序で割り当てる。"""
+    from datetime import timedelta
+    from scheduler import get_weekly_schedule, _JST, _UTC, _DAY_KEYS
+
+    data = request.get_json(silent=True) or {}
+    ids = data.get("order", [])
+    if not ids:
+        return jsonify({"success": False, "error": "no ids"})
+
+    try:
+        id_to_art = {a.id: a for a in Article.query.filter(Article.id.in_(ids)).all()}
+        ordered = [id_to_art[i] for i in ids if i in id_to_art]
+        if not ordered:
+            return jsonify({"success": False, "error": "articles not found"})
+
+        # 並び替え対象以外のキュー済みスロットを占有セットに入れる
+        occupied = {
+            a.scheduled_at
+            for a in Article.query.filter_by(status="queued")
+                                  .filter(~Article.id.in_(ids))
+                                  .all()
+            if a.scheduled_at is not None
+        }
+
+        schedule = get_weekly_schedule(app)
+        now_jst = datetime.now(_JST)
+
+        def _next_future_slot():
+            """次の空き未来スロット (UTC naive) を返す。"""
+            for offset in range(14):
+                check_date = now_jst.date() + timedelta(days=offset)
+                day_key = _DAY_KEYS[check_date.weekday()]
+                for t in sorted(schedule.get(day_key, [])):
+                    try:
+                        h, m = map(int, t.strip().split(":"))
+                        slot_jst = datetime(
+                            check_date.year, check_date.month, check_date.day,
+                            h, m, tzinfo=_JST,
+                        )
+                        if slot_jst <= now_jst:
+                            continue
+                        slot_utc = slot_jst.astimezone(_UTC).replace(tzinfo=None)
+                        if slot_utc not in occupied:
+                            return slot_utc
+                    except Exception:
+                        pass
+            return None
+
+        # 新しい順序で未来スロットを順番に割り当て
+        for art in ordered:
+            slot = _next_future_slot()
+            art.scheduled_at = slot
+            if slot:
+                occupied.add(slot)
+
+        db.session.commit()
+        logger.info(
+            "Queue reordered: %s",
+            [(a.id, str(a.scheduled_at)) for a in ordered],
+        )
+        return jsonify({"success": True})
+
+    except Exception as exc:
+        db.session.rollback()
+        logger.error("Queue reorder error: %s", exc)
+        return jsonify({"success": False, "error": str(exc)})
 
 
 # ── 設定 ───────────────────────────────────────────────────────────────────

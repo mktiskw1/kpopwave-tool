@@ -58,7 +58,7 @@
           <!-- 現在の認証状態 + 手動入力 -->
           <div class="col-md-6">
             <p class="fw-semibold mb-3" style="font-size:.85rem">現在の認証状態</p>
-            <div class="mb-3 p-3 rounded" style="background:#1a1a1a;font-size:.82rem">
+            <div class="mb-3 p-3 rounded" style="background:var(--surface2);border:1.5px solid var(--border);border-radius:12px!important;font-size:.82rem">
               <div class="d-flex justify-content-between align-items-center mb-2">
                 <span class="text-muted">アクセストークン</span>
                 {% if settings.threads_access_token %}
@@ -212,11 +212,11 @@
 </form>
 
 <!-- Threads API セットアップ手順 -->
-<div class="card mt-4" style="border-color:#333">
-  <div class="card-header" style="background:transparent;font-size:.85rem;color:#888">
+<div class="card mt-4">
+  <div class="card-header" style="font-size:.85rem;color:var(--text-muted)">
     <i class="bi bi-info-circle me-1"></i> Threads API セットアップ手順
   </div>
-  <div class="card-body" style="font-size:.82rem;color:#888;line-height:1.8">
+  <div class="card-body" style="font-size:.82rem;color:var(--text-muted);line-height:1.8">
     <ol class="mb-0">
       <li>Meta Developer Portal (developers.facebook.com) でアプリを作成</li>
       <li>アプリに「Threads」製品を追加</li>

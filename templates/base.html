@@ -1,75 +1,333 @@
 <!DOCTYPE html>
-<html lang="ja" data-bs-theme="dark">
+<html lang="ja">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KpopWave Daily</title>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,600;0,700;0,800;0,900;1,400&display=swap" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
   <style>
     :root {
-      --accent: #e03030;
-      --accent2: #ff7b00;
-      --bg: #0c0c0c;
-      --surface: #181818;
-      --surface2: #222;
-      --border: #2e2e2e;
-      --text-muted: #777;
+      --accent:        #E91E8C;
+      --accent-hover:  #C0176D;
+      --accent-light:  #F48FB1;
+      --accent-soft:   #FCE4EC;
+      --accent2:       #AB47BC;
+      --accent2-light: #CE93D8;
+      --accent3:       #26A69A;
+      --accent3-light: #80CBC4;
+      --peach:         #FFA726;
+      --bg:            #FDF4FF;
+      --surface:       #FFFFFF;
+      --surface2:      #FFF0F9;
+      --border:        #F0C5DE;
+      --text:          #3B1A4A;
+      --text-muted:    #9B6EA8;
     }
-    body { background: var(--bg); color: #e0e0e0; }
+
+    /* ─── Base ─────────────────────────────────────────────────── */
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Nunito', 'Hiragino Maru Gothic ProN', 'Yu Gothic UI', 'Meiryo UI', sans-serif;
+    }
+    h1,h2,h3,h4,h5,h6 { font-weight: 800; color: var(--text); }
+
+    /* ─── Sidebar ──────────────────────────────────────────────── */
     .sidebar {
-      background: var(--surface);
+      background: linear-gradient(175deg, #FFF0F8 0%, #F6EEFF 55%, #EDFFF8 100%);
+      border-right: 2px solid var(--border);
       min-height: 100vh;
-      border-right: 1px solid var(--border);
       position: sticky;
       top: 0;
       height: 100vh;
       overflow-y: auto;
     }
-    .brand { color: var(--accent); font-weight: 900; letter-spacing: -0.5px; line-height: 1.2; }
-    .nav-link { color: #aaa; border-radius: 6px; margin-bottom: 2px; }
-    .nav-link:hover { color: #fff; background: var(--surface2); }
-    .nav-link.active { color: var(--accent); background: rgba(224,48,48,.12); }
-    .nav-link i { width: 20px; }
-    .card { background: var(--surface); border: 1px solid var(--border); }
-    .card-header { background: var(--surface2); border-bottom: 1px solid var(--border); font-weight: 600; }
-    .table { --bs-table-bg: transparent; --bs-table-border-color: var(--border); }
-    .table-hover > tbody > tr:hover { background: rgba(255,255,255,.03); }
-    .badge-pending  { background: #d97706; }
-    .badge-queued   { background: #0891b2; }
-    .badge-posted   { background: #16a34a; }
-    .badge-rejected { background: #555; }
-    .badge-failed   { background: #b91c1c; }
-    .article-card { border-left: 3px solid var(--border); transition: border-color .15s; }
-    .article-card:hover { border-left-color: var(--accent); }
+
+    .brand {
+      background: linear-gradient(135deg, var(--accent) 0%, var(--accent2) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      font-weight: 900;
+      font-size: 1.2rem;
+      letter-spacing: -0.5px;
+      line-height: 1.3;
+    }
+
+    .nav-link {
+      color: var(--text-muted);
+      border-radius: 12px;
+      margin-bottom: 3px;
+      font-weight: 700;
+      font-size: 0.88rem;
+      padding: 0.45rem 0.75rem;
+      transition: all 0.2s ease;
+    }
+    .nav-link:hover {
+      color: var(--accent);
+      background: rgba(233, 30, 140, 0.08);
+    }
+    .nav-link.active {
+      color: var(--accent);
+      background: linear-gradient(135deg, rgba(233,30,140,.13), rgba(171,71,188,.13));
+      box-shadow: inset 2px 0 0 var(--accent);
+    }
+    .nav-link i { width: 20px; display: inline-block; text-align: center; }
+
+    /* ─── Cards ────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: 18px;
+      box-shadow: 0 3px 18px rgba(233, 30, 140, 0.06);
+    }
+    .card-header {
+      background: linear-gradient(135deg, #FFF6FC 0%, #F8F0FF 100%);
+      border-bottom: 1.5px solid var(--border);
+      border-radius: 17px 17px 0 0 !important;
+      font-weight: 700;
+      color: var(--text);
+      padding: 0.7rem 1rem;
+    }
+    .card-body { color: var(--text); }
+
+    /* ─── Tables ───────────────────────────────────────────────── */
+    .table {
+      --bs-table-bg: transparent;
+      --bs-table-border-color: var(--border);
+      --bs-table-color: var(--text);
+      --bs-table-striped-color: var(--text);
+      --bs-table-hover-color: var(--text);
+    }
+    .table > :not(caption) > * > * { color: var(--text); }
+    .table thead th { color: var(--text-muted); font-weight: 700; font-size: 0.82rem; }
+    .table-hover > tbody > tr:hover {
+      background: rgba(233, 30, 140, 0.03);
+      --bs-table-bg-state: rgba(233, 30, 140, 0.03);
+    }
+
+    /* ─── Badges ───────────────────────────────────────────────── */
+    .badge {
+      border-radius: 10px;
+      font-weight: 700;
+      font-size: 0.75rem;
+      padding: 0.3em 0.65em;
+    }
+    .badge-pending  { background: linear-gradient(135deg, #FFB74D, #FF9800); color: #fff; }
+    .badge-queued   { background: linear-gradient(135deg, var(--accent2-light), var(--accent2)); color: #fff; }
+    .badge-posted   { background: linear-gradient(135deg, var(--accent3-light), var(--accent3)); color: #fff; }
+    .badge-rejected { background: linear-gradient(135deg, #D7B4DE, #B58CC2); color: #fff; }
+    .badge-failed   { background: linear-gradient(135deg, var(--accent-light), var(--accent)); color: #fff; }
+    .badge.bg-secondary { background: linear-gradient(135deg, #D7B4DE, #B58CC2) !important; color: #fff !important; }
+    .badge.bg-success   { background: linear-gradient(135deg, var(--accent3-light), var(--accent3)) !important; color: #fff !important; }
+    .badge.bg-danger    { background: linear-gradient(135deg, var(--accent-light), var(--accent)) !important; color: #fff !important; }
+    .badge.bg-warning   { background: linear-gradient(135deg, #FFD54F, #FFA726) !important; color: #fff !important; }
+
+    /* ─── Stat cards ───────────────────────────────────────────── */
+    .stat-card { border-top: 3px solid; }
+    .stat-card.pending  { border-top-color: #FF9800; }
+    .stat-card.queued   { border-top-color: var(--accent2); }
+    .stat-card.posted   { border-top-color: var(--accent3); }
+    .stat-card.rejected { border-top-color: #CE93D8; }
+    .stat-card.failed   { border-top-color: var(--accent-light); }
+
+    /* ─── Article card ─────────────────────────────────────────── */
+    .article-card {
+      border-left: 3px solid var(--border);
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .article-card:hover {
+      border-left-color: var(--accent);
+      box-shadow: 0 4px 20px rgba(233, 30, 140, 0.1);
+    }
+
+    /* ─── Summary box ──────────────────────────────────────────── */
     .summary-box {
       background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: 6px;
+      border: 1.5px solid var(--border);
+      border-radius: 12px;
       padding: .6rem .8rem;
       font-size: .85rem;
       white-space: pre-wrap;
       word-break: break-word;
-      color: #ccc;
+      color: var(--text);
     }
-    .char-count { font-size: .75rem; }
+    .char-count { font-size: .75rem; color: var(--text-muted); }
     .char-count.over { color: var(--accent); }
-    .char-count.ok   { color: #22c55e; }
-    .stat-card { border-top: 3px solid; }
-    .stat-card.pending  { border-color: #d97706; }
-    .stat-card.queued   { border-color: #0891b2; }
-    .stat-card.posted   { border-color: #16a34a; }
-    .stat-card.rejected { border-color: #555; }
-    .stat-card.failed   { border-color: #b91c1c; }
-    .btn-accent { background: var(--accent); border-color: var(--accent); color: #fff; }
-    .btn-accent:hover { background: #c02020; border-color: #c02020; color: #fff; }
-    input[type=text], input[type=password], input[type=number],
-    input[type=datetime-local], textarea, select {
-      background: var(--surface2) !important;
-      color: #e0e0e0 !important;
-      border-color: var(--border) !important;
+    .char-count.ok { color: var(--accent3); }
+
+    /* ─── Buttons ──────────────────────────────────────────────── */
+    .btn {
+      border-radius: 20px;
+      font-weight: 700;
+      font-size: 0.875rem;
+      transition: all 0.2s ease;
     }
-    input:focus, textarea:focus { border-color: var(--accent) !important; box-shadow: 0 0 0 2px rgba(224,48,48,.2) !important; }
+    .btn-sm { border-radius: 16px; font-size: 0.8rem; }
+
+    .btn-accent {
+      background: linear-gradient(135deg, var(--accent) 0%, var(--accent2) 100%);
+      border: none;
+      color: #fff;
+      box-shadow: 0 3px 14px rgba(233, 30, 140, 0.28);
+    }
+    .btn-accent:hover {
+      background: linear-gradient(135deg, var(--accent-hover) 0%, #8E24AA 100%);
+      color: #fff;
+      box-shadow: 0 5px 18px rgba(233, 30, 140, 0.4);
+      transform: translateY(-1px);
+    }
+
+    .btn-success {
+      background: linear-gradient(135deg, var(--accent3-light), var(--accent3));
+      border: none; color: #fff;
+    }
+    .btn-success:hover {
+      background: linear-gradient(135deg, var(--accent3), #1A837A);
+      border: none; color: #fff;
+    }
+
+    .btn-danger {
+      background: linear-gradient(135deg, var(--accent-light), var(--accent));
+      border: none; color: #fff;
+    }
+    .btn-danger:hover {
+      background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+      border: none; color: #fff;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent2-light), var(--accent2));
+      border: none; color: #fff;
+    }
+    .btn-primary:hover {
+      background: linear-gradient(135deg, var(--accent2), #8E24AA);
+      border: none; color: #fff;
+    }
+
+    .btn-secondary {
+      background: linear-gradient(135deg, #D7B4DE, #B58CC2);
+      border: none; color: #fff;
+    }
+    .btn-secondary:hover {
+      background: linear-gradient(135deg, #B58CC2, #9C4DB4);
+      border: none; color: #fff;
+    }
+
+    .btn-outline-secondary {
+      color: var(--text-muted);
+      border-color: var(--border);
+      background: transparent;
+    }
+    .btn-outline-secondary:hover {
+      background: var(--surface2);
+      color: var(--accent2);
+      border-color: var(--accent2-light);
+    }
+
+    .btn-outline-danger {
+      color: var(--accent);
+      border-color: var(--accent-light);
+      background: transparent;
+    }
+    .btn-outline-danger:hover {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .btn-outline-warning {
+      color: #E65100;
+      border-color: #FFB74D;
+      background: transparent;
+    }
+    .btn-outline-warning:hover {
+      background: #FFF3E0;
+      color: #E65100;
+      border-color: #FFA726;
+    }
+
+    .btn-outline-info, .btn-info {
+      color: var(--accent2);
+      border-color: var(--accent2-light);
+      background: transparent;
+    }
+    .btn-outline-info:hover, .btn-info:hover {
+      background: #F3E5F5;
+      color: var(--accent2);
+      border-color: var(--accent2);
+    }
+
+    .btn-outline-success {
+      color: var(--accent3);
+      border-color: var(--accent3-light);
+      background: transparent;
+    }
+    .btn-outline-success:hover {
+      background: #E0F2F1;
+      color: var(--accent3);
+      border-color: var(--accent3);
+    }
+
+    /* ─── Form inputs ──────────────────────────────────────────── */
+    input[type=text], input[type=password], input[type=number],
+    input[type=datetime-local], textarea, select,
+    .form-control, .form-select {
+      background: #FFFBFE !important;
+      color: var(--text) !important;
+      border-color: var(--border) !important;
+      border-radius: 12px !important;
+    }
+    input:focus, textarea:focus,
+    .form-control:focus, .form-select:focus {
+      border-color: var(--accent-light) !important;
+      box-shadow: 0 0 0 3px rgba(233, 30, 140, 0.12) !important;
+    }
+    .form-text { color: var(--text-muted); font-size: 0.78rem; }
+    .form-label { color: var(--text); font-weight: 700; font-size: 0.85rem; }
+    .form-check-input:checked { background-color: var(--accent); border-color: var(--accent); }
+    .input-group-text {
+      background: var(--surface2) !important;
+      border-color: var(--border) !important;
+      color: var(--text-muted) !important;
+      border-radius: 12px !important;
+    }
+
+    /* ─── Alerts ───────────────────────────────────────────────── */
+    .alert { border-radius: 14px; font-weight: 600; }
+    .alert-success { background: #E8F5E9; border-color: var(--accent3-light); color: #2E7D32; }
+    .alert-danger  { background: var(--accent-soft); border-color: var(--accent-light); color: #880E4F; }
+    .alert-warning { background: #FFF8E1; border-color: #FFD54F; color: #E65100; }
+    .alert-info    { background: #F3E5F5; border-color: var(--accent2-light); color: #6A1B9A; }
+    .alert-secondary { background: var(--surface2); border-color: var(--border); color: var(--text); }
+
+    /* ─── Typography ───────────────────────────────────────────── */
+    .text-muted   { color: var(--text-muted) !important; }
+    .text-success { color: var(--accent3) !important; }
+    .text-danger  { color: var(--accent) !important; }
+    .text-warning { color: #E65100 !important; }
+    .text-light   { color: var(--text) !important; }
+    a             { color: var(--accent); text-decoration: none; }
+    a:hover       { color: var(--accent2); }
+    hr  { border-color: var(--border); opacity: 1; }
+    code {
+      color: var(--accent2);
+      background: #F3E5F5;
+      padding: 1px 6px;
+      border-radius: 8px;
+      font-size: 0.85em;
+    }
+
+    /* ─── Scrollbar ────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--accent-light); }
+
+    /* ─── Spinner ──────────────────────────────────────────────── */
+    .spinner-border { color: var(--accent); }
   </style>
 </head>
 <body>
@@ -77,8 +335,10 @@
   <div class="row g-0">
 
     <!-- サイドバー -->
-    <div class="col-auto sidebar p-3" style="width:220px">
-      <div class="brand mb-4 ps-1">KpopWave<br>Daily</div>
+    <div class="col-auto sidebar p-3" style="width:225px">
+      <div class="brand mb-4 ps-1">
+        <i class="bi bi-music-note-beamed me-1" style="-webkit-text-fill-color:var(--accent);background:none;background-clip:unset"></i>KpopWave<br><span style="font-size:1rem">Daily</span>
+      </div>
       <ul class="nav flex-column mb-3">
         <li class="nav-item">
           <a class="nav-link {% if request.endpoint=='index' %}active{% endif %}" href="{{ url_for('index') }}">
@@ -123,7 +383,7 @@
         </li>
       </ul>
 
-      <hr style="border-color:var(--border)">
+      <hr>
 
       <form action="{{ url_for('collect') }}" method="post" class="mb-2">
         <button type="submit" class="btn btn-accent btn-sm w-100">
@@ -133,7 +393,7 @@
 
       <form action="{{ url_for('collect_youtube') }}" method="post">
         <button type="submit" class="btn btn-sm w-100"
-                style="background:#ff0000;border-color:#ff0000;color:#fff">
+                style="background:linear-gradient(135deg,#FF5252,#FF1744);border:none;color:#fff;border-radius:16px;font-weight:700;box-shadow:0 2px 10px rgba(255,23,68,.25)">
           <i class="bi bi-youtube"></i> YouTube 収集
         </button>
       </form>
@@ -151,7 +411,7 @@
         {% for cat, msg in messages %}
         <div class="alert alert-{{ cat }} alert-dismissible fade show py-2" role="alert">
           {{ msg }}
-          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="alert"></button>
+          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
         </div>
         {% endfor %}
       {% endif %}

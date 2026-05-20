@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -15,7 +16,17 @@ YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 DAYS_LIMIT = 60
 MAX_RESULTS_PER_QUERY = 10
 # 再生数フィルタ: 0=無効。通常運用時は 10_000 以上を推奨
-MIN_VIEW_COUNT = 10000
+MIN_VIEW_COUNT = 5000000
+
+# KPOPアーティスト以外の洋楽アーティスト明示ブロックリスト（チャンネル名・タイトル小文字一致）
+# 検索クエリのアーティスト名と部分一致してしまうケースを手動で除外する
+NON_KPOP_BLOCKLIST = frozenset([
+    "tyla",
+    "allison russell",
+    "kara leona",
+    "kara kay",
+    "kara winger",
+])
 
 # タイトルに含まれていたら除外（リアクション・カバー・ファンメイド・ショート）
 EXCLUDE_TITLE_KEYWORDS = frozenset([
@@ -72,6 +83,35 @@ SEARCH_QUERIES = [
     "MEOVV MV",
     "NiziU MV",
 ]
+
+
+def _extract_artist_from_query(query: str) -> str:
+    """検索クエリからアーティスト名部分を抽出する。
+    例: 'IVE kpop MV' → 'IVE' / 'LE SSERAFIM MV' → 'LE SSERAFIM'
+    """
+    stop_suffixes = {"mv", "m/v", "kpop", "k-pop"}
+    tokens = query.strip().split()
+    while tokens and tokens[-1].lower() in stop_suffixes:
+        tokens.pop()
+    return " ".join(tokens)
+
+
+def _matches_target_artist(title: str, channel_title: str, artist_name: str) -> bool:
+    """タイトルまたはチャンネル名に指定アーティスト名が含まれるか確認。
+    単語境界マッチングにより 'IVE' が 'live' に誤検出されるのを防ぐ。
+    NON_KPOP_BLOCKLIST に一致する場合は False を返す。
+    """
+    combined = (title + " " + channel_title).lower()
+
+    # 明示ブロックリスト: KPOPと誤検出しやすい洋楽アーティストを先に除外
+    for blocked in NON_KPOP_BLOCKLIST:
+        if blocked in combined:
+            return False
+
+    # アーティスト名が title または channel_title に（単語として）含まれるか確認
+    name_lower = artist_name.lower()
+    pattern = r'(?<![a-zA-Z0-9_])' + re.escape(name_lower) + r'(?![a-zA-Z0-9_])'
+    return bool(re.search(pattern, combined))
 
 
 def _best_thumbnail(thumbnails: dict) -> str:
@@ -193,10 +233,12 @@ def collect_youtube_videos(app) -> int:
     seen_ids: set = existing_video_ids  # DB既存IDで初期化して重複収集を防止
     excluded_count = 0
     non_target_count = 0
+    non_kpop_count = 0
     already_seen_count = 0
     first_query = True
 
     for query in SEARCH_QUERIES:
+        artist_name = _extract_artist_from_query(query)
         try:
             resp = requests.get(
                 YOUTUBE_SEARCH_URL,
@@ -249,6 +291,7 @@ def collect_youtube_videos(app) -> int:
 
             snippet = item.get("snippet", {})
             title = (snippet.get("title") or "").strip()
+            channel_title = (snippet.get("channelTitle") or "").strip()
 
             if _is_excluded(title):
                 logger.info("  除外(リアクション/カバー等): %s", title[:70])
@@ -260,6 +303,16 @@ def collect_youtube_videos(app) -> int:
                 non_target_count += 1
                 continue
 
+            # KPOPアーティスト名チェック: クエリのアーティスト名がタイトルまたは
+            # チャンネル名に含まれない動画は除外（洋楽アーティストの混入を防止）
+            if not _matches_target_artist(title, channel_title, artist_name):
+                logger.info(
+                    "  除外(KPOPアーティスト外): query='%s' / ch='%s' / %s",
+                    artist_name, channel_title, title[:60],
+                )
+                non_kpop_count += 1
+                continue
+
             seen_ids.add(video_id)
             query_added += 1
             candidates.append({
@@ -267,7 +320,7 @@ def collect_youtube_videos(app) -> int:
                 "title": title,
                 "description": (snippet.get("description") or "").strip(),
                 "channel_id": snippet.get("channelId", ""),
-                "channel_title": (snippet.get("channelTitle") or "").strip(),
+                "channel_title": channel_title,
                 "published_at_str": snippet.get("publishedAt", ""),
                 "thumbnail_url": _best_thumbnail(snippet.get("thumbnails", {})),
             })
@@ -278,8 +331,9 @@ def collect_youtube_videos(app) -> int:
         )
 
     logger.info(
-        "YouTube検索完了 — 候補: %d件 / DB既存スキップ: %d件 / 除外(リアクション等): %d件 / 除外(対象外タイプ): %d件",
-        len(candidates), already_seen_count, excluded_count, non_target_count,
+        "YouTube検索完了 — 候補: %d件 / DB既存スキップ: %d件 / 除外(リアクション等): %d件"
+        " / 除外(対象外タイプ): %d件 / 除外(KPOP外アーティスト): %d件",
+        len(candidates), already_seen_count, excluded_count, non_target_count, non_kpop_count,
     )
 
     if not candidates:

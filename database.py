@@ -33,6 +33,8 @@ class Article(db.Model):
     quote_count = db.Column(db.Integer, nullable=True)
     engagement_fetched_at = db.Column(db.DateTime, nullable=True)
     post_style = db.Column(db.String(20), nullable=True)
+    # 複数画像URL（JSON配列テキスト）
+    image_urls = db.Column(db.Text, nullable=True)
 
     def to_dict(self):
         return {

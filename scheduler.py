@@ -8,7 +8,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import or_
 
-from database import Article, Setting
+from database import Article, Setting, db
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,64 @@ def _post_job(app):
         logger.info("Post result: %s - %s", success, msg)
 
 
+def _rollover_overdue_job(app):
+    """予定時刻を過ぎたキュー済み記事を次の空きスロットに自動繰り越す。"""
+    with app.app_context():
+        now_utc = datetime.utcnow()
+        overdue = (
+            Article.query.filter_by(status="queued")
+            .filter(Article.scheduled_at.isnot(None))
+            .filter(Article.scheduled_at < now_utc)
+            .order_by(Article.scheduled_at.asc())
+            .all()
+        )
+        if not overdue:
+            return
+
+        logger.info("繰り越し対象: %d件", len(overdue))
+
+        # 未来スロットの使用済みセットを構築
+        occupied = {
+            a.scheduled_at
+            for a in Article.query.filter_by(status="queued").all()
+            if a.scheduled_at is not None and a.scheduled_at > now_utc
+        }
+
+        schedule = get_weekly_schedule(app)
+        now_jst = datetime.now(_JST)
+
+        def _next_free_slot():
+            for offset in range(14):
+                check_date = now_jst.date() + timedelta(days=offset)
+                day_key = _DAY_KEYS[check_date.weekday()]
+                for t in sorted(schedule.get(day_key, [])):
+                    try:
+                        h, m = map(int, t.strip().split(":"))
+                        slot_jst = datetime(
+                            check_date.year, check_date.month, check_date.day,
+                            h, m, tzinfo=_JST,
+                        )
+                        if slot_jst <= now_jst:
+                            continue
+                        slot_utc = slot_jst.astimezone(_UTC).replace(tzinfo=None)
+                        if slot_utc not in occupied:
+                            return slot_utc
+                    except Exception:
+                        pass
+            return None
+
+        for article in overdue:
+            new_slot = _next_free_slot()
+            if new_slot:
+                logger.info("繰り越し: article %d %s → %s UTC", article.id, article.scheduled_at, new_slot)
+                article.scheduled_at = new_slot
+                occupied.add(new_slot)
+            else:
+                logger.warning("繰り越し先スロットなし: article %d", article.id)
+
+        db.session.commit()
+
+
 # ── スケジューラーセットアップ ─────────────────────────────────────────────────
 
 def _setup_weekly_post_jobs(app):
@@ -174,6 +232,14 @@ def setup_scheduler(app):
     )
 
     _setup_weekly_post_jobs(app)
+
+    scheduler.add_job(
+        _rollover_overdue_job,
+        IntervalTrigger(minutes=30),
+        args=[app],
+        id="rollover_overdue",
+        replace_existing=True,
+    )
 
     app.reschedule_post_jobs = lambda: _setup_weekly_post_jobs(app)
 
