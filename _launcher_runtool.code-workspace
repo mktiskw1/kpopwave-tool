@@ -1,0 +1,27 @@
+{
+  "folders": [{ "path": "." }],
+  "settings": {
+    "task.allowAutomaticTasks": "on"
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "kpopwave-run-tool",
+        "type": "shell",
+        "command": "\"${workspaceFolder}\\venv\\Scripts\\python.exe\" run.py",
+        "options": {
+          "shell": { "executable": "cmd.exe", "args": ["/d", "/c"] },
+          "cwd": "${workspaceFolder}"
+        },
+        "presentation": {
+          "reveal": "always",
+          "panel": "new",
+          "focus": true,
+          "title": "KPOPwave Tool"
+        },
+        "runOptions": { "runOn": "folderOpen" }
+      }
+    ]
+  }
+}

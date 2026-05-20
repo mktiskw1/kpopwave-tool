@@ -1,0 +1,27 @@
+{
+  "folders": [{ "path": "." }],
+  "settings": {
+    "task.allowAutomaticTasks": "on"
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "kpopwave-claude",
+        "type": "shell",
+        "command": "claude",
+        "options": {
+          "shell": { "executable": "cmd.exe", "args": ["/k"] },
+          "cwd": "${workspaceFolder}"
+        },
+        "presentation": {
+          "reveal": "always",
+          "panel": "new",
+          "focus": true,
+          "title": "Claude Code"
+        },
+        "runOptions": { "runOn": "folderOpen" }
+      }
+    ]
+  }
+}

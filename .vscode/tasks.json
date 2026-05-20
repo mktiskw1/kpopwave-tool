@@ -1,0 +1,34 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "kpopwave-run-tool",
+      "type": "shell",
+      "command": "${workspaceFolder}\\venv\\Scripts\\python.exe",
+      "args": ["run.py"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "focus": true,
+        "title": "KPOPwave Tool"
+      }
+    },
+    {
+      "label": "kpopwave-claude",
+      "type": "shell",
+      "command": "claude",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "focus": true,
+        "title": "Claude Code"
+      }
+    }
+  ]
+}
