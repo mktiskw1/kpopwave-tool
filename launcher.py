@@ -1,81 +1,134 @@
 """
-KPOPwave Tool Launcher — デスクトップランチャー GUI
+KPOPwave Tool Launcher
 起動方法: launcher.bat をダブルクリック
 """
 
 import tkinter as tk
 from tkinter import messagebox
 import subprocess
-import shutil
 import os
 import webbrowser
 import sys
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 VENV_PYTHON = os.path.join(PROJECT_DIR, "venv", "Scripts", "python.exe")
-
 if not os.path.exists(VENV_PYTHON):
     VENV_PYTHON = sys.executable
 
 
-def _find_code():
-    """code.cmd のフルパスを返す（CLI フラグを処理するバッチラッパー）"""
-    candidates = [
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\bin\code.cmd"),
-        r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
-        r"C:\Program Files (x86)\Microsoft VS Code\bin\code.cmd",
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            return p
-    return shutil.which("code")
-
-
-VSCODE_CODE = _find_code()
-
-
-def _open_vscode_with_profile(profile: str):
-    """
-    VS Code でプロジェクトを開き、ターミナルプロファイルを起動する。
-
-    1回の code.cmd 呼び出しで folder + --command を同時指定することで、
-    コマンドが必ず同じウィンドウ（プロジェクトウィンドウ）に届く。
-    ターミナルプロファイル側でコマンドが自動実行されるため sendSequence 不要。
-    """
-    subprocess.Popen(
-        ["cmd.exe", "/c", VSCODE_CODE,
-         PROJECT_DIR,
-         "--command", "workbench.action.terminal.newWithProfile",
-         profile]
-    )
-
-
 def run_tool():
-    """VS Code のターミナルプロファイル kpopwave-run で run.py を起動"""
-    if not VSCODE_CODE:
-        messagebox.showerror(
-            "VS Code が見つかりません",
-            "%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\bin\\ を確認してください。",
+    try:
+        subprocess.Popen(
+            f'cmd.exe /k "{VENV_PYTHON}" run.py',
+            cwd=PROJECT_DIR,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
-        return
-    _open_vscode_with_profile("kpopwave-run")
-    set_status("VS Code でツールを起動しました")
+        set_status("ツールを起動しました")
+    except Exception as e:
+        messagebox.showerror("エラー", f"起動に失敗しました:\n{e}")
+
+
+CHROME_PATHS = [
+    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+]
 
 
 def run_claude():
-    """VS Code のターミナルプロファイル kpopwave-claude で claude を起動"""
-    if not VSCODE_CODE:
-        messagebox.showerror(
-            "VS Code が見つかりません",
-            "%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\bin\\ を確認してください。",
+    """VS Code をプロジェクトフォルダで開き、手順ポップアップを表示する"""
+    try:
+        subprocess.Popen(["cmd.exe", "/c", "code", PROJECT_DIR])
+    except Exception:
+        pass  # VS Code が PATH にない場合は無視してポップアップだけ表示
+
+    # ── ポップアップ ──────────────────────────────────────────
+    popup = tk.Toplevel(root)
+    popup.title("Claude Code 起動手順")
+    popup.resizable(False, False)
+    popup.configure(bg=BG)
+    popup.grab_set()  # モーダル
+
+    tk.Label(
+        popup,
+        text="VSCode のターミナルで順番に入力してください",
+        font=("Segoe UI", 11, "bold"),
+        bg=BG, fg=FG,
+        padx=20, pady=14,
+    ).pack()
+
+    STEPS = [
+        ("① ディレクトリ移動", r"cd C:\Users\mktis\kpopwave-tool"),
+        ("② Claude Code 起動", "claude"),
+    ]
+
+    def copy_to_clipboard(text, lbl):
+        popup.clipboard_clear()
+        popup.clipboard_append(text)
+        lbl.config(text="コピーしました ✓")
+        popup.after(1500, lambda: lbl.config(text="📋 コピー"))
+
+    for step_title, cmd_text in STEPS:
+        row = tk.Frame(popup, bg=PANEL, padx=16, pady=10)
+        row.pack(fill="x", padx=20, pady=4)
+
+        tk.Label(
+            row, text=step_title,
+            font=("Segoe UI", 9),
+            bg=PANEL, fg=STATUS_FG,
+            anchor="w",
+        ).pack(anchor="w")
+
+        cmd_row = tk.Frame(row, bg=PANEL)
+        cmd_row.pack(fill="x", pady=(4, 0))
+
+        tk.Label(
+            cmd_row, text=cmd_text,
+            font=("Consolas", 12, "bold"),
+            bg=PANEL, fg="#7ec8e3",
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+
+        copy_lbl = tk.Label(
+            cmd_row, text="📋 コピー",
+            font=("Segoe UI", 9),
+            bg="#0f3460", fg=FG,
+            padx=8, pady=2,
+            cursor="hand2",
         )
-        return
-    _open_vscode_with_profile("kpopwave-claude")
-    set_status("VS Code で Claude Code を起動しました")
+        copy_lbl.pack(side="right")
+        copy_lbl.bind("<Button-1>", lambda e, t=cmd_text, l=copy_lbl: copy_to_clipboard(t, l))
+
+    tk.Button(
+        popup,
+        text="閉じる",
+        font=("Segoe UI", 10),
+        bg=ACCENT, fg=FG,
+        activebackground="#c73652", activeforeground=FG,
+        relief="flat", padx=20, pady=6,
+        cursor="hand2",
+        command=popup.destroy,
+    ).pack(pady=14)
+
+    # ポップアップを画面中央に配置
+    popup.update_idletasks()
+    x = root.winfo_x() + (root.winfo_width() - popup.winfo_width()) // 2
+    y = root.winfo_y() + (root.winfo_height() - popup.winfo_height()) // 2
+    popup.geometry(f"+{x}+{y}")
+
+    set_status("VS Code を開きました")
+
+
+def open_admin():
+    chrome = next((p for p in CHROME_PATHS if os.path.exists(p)), None)
+    if chrome:
+        subprocess.Popen([chrome, "http://localhost:5000"])
+    else:
+        webbrowser.open("http://localhost:5000")
+    set_status("管理画面を開きました")
 
 
 def git_push():
-    """変更を GitHub に保存 (add → commit → push)"""
     try:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -85,7 +138,6 @@ def git_push():
             messagebox.showinfo("GitHub に保存", "変更はありません。")
             set_status("変更なし")
             return
-
         subprocess.run(["git", "add", "-A"], cwd=PROJECT_DIR, check=True)
         subprocess.run(
             ["git", "commit", "-m", "chore: auto-save from launcher"],
@@ -100,7 +152,6 @@ def git_push():
 
 
 def git_pull():
-    """GitHub から最新版を取得"""
     try:
         result = subprocess.run(
             ["git", "pull"],
@@ -114,17 +165,11 @@ def git_pull():
         set_status("Git pull エラー")
 
 
-def open_admin():
-    """ブラウザで管理画面 (localhost:5000) を開く"""
-    webbrowser.open("http://localhost:5000")
-    set_status("管理画面をブラウザで開きました")
-
-
 def set_status(msg):
     status_var.set(msg)
 
 
-# ── ウィンドウ設定 ──────────────────────────────────────────
+# ── GUI ────────────────────────────────────────────────────
 root = tk.Tk()
 root.title("KPOPwave ランチャー")
 root.resizable(False, False)
@@ -137,56 +182,44 @@ STATUS_FG = "#a0a0c0"
 
 root.configure(bg=BG)
 
-# ── ヘッダー ────────────────────────────────────────────────
-header = tk.Frame(root, bg=ACCENT, pady=8)
-header.pack(fill="x")
+tk.Frame(root, bg=ACCENT, pady=8).pack(fill="x")
 tk.Label(
-    header, text="🌊  KPOPwave Tool",
+    root.winfo_children()[-1],
+    text="🌊  KPOPwave Tool",
     font=("Segoe UI", 18, "bold"),
     bg=ACCENT, fg=FG,
 ).pack()
 
-# ── ボタン定義 ──────────────────────────────────────────────
 BUTTONS = [
-    ("① ツール起動",            "▶  VS Code ターミナルで run.py を起動",  run_tool,   "#0f3460"),
-    ("② Claude Code 起動",     "🤖  VS Code ターミナルで claude を起動",  run_claude, "#0f3460"),
-    ("③ GitHub に保存",         "⬆  add → commit → push",               git_push,   "#1a472a"),
-    ("④ GitHub から最新版取得",  "⬇  git pull",                           git_pull,   "#1a472a"),
-    ("⑤ 管理画面を開く",        "🌐  localhost:5000",                     open_admin, "#2d1b69"),
+    ("① ツール起動",            "▶  コマンドプロンプトで run.py を実行",  run_tool,   "#0f3460"),
+    ("② Claude Code 起動",     "🤖  VS Code を開いて手順を表示",         run_claude, "#0f3460"),
+    ("③ 管理画面を開く",        "🌐  localhost:5000",                    open_admin, "#2d1b69"),
+    ("④ GitHub に保存",         "⬆  add → commit → push",              git_push,   "#1a472a"),
+    ("⑤ GitHub から最新版取得",  "⬇  git pull",                          git_pull,   "#1a472a"),
 ]
 
 frame = tk.Frame(root, bg=BG, padx=20, pady=15)
 frame.pack(fill="both")
 
 for title, subtitle, cmd, color in BUTTONS:
-    btn_frame = tk.Frame(frame, bg=color)
-    btn_frame.pack(fill="x", pady=5)
-
+    outer = tk.Frame(frame, bg=color)
+    outer.pack(fill="x", pady=5)
     btn = tk.Button(
-        btn_frame,
+        outer,
         text=f"  {title}\n  {subtitle}  ",
         font=("Segoe UI", 11),
-        anchor="w",
-        justify="left",
-        bg=color,
-        fg=FG,
-        activebackground="#3a3a5c",
-        activeforeground=FG,
-        relief="flat",
-        bd=0,
-        padx=16,
-        pady=10,
+        anchor="w", justify="left",
+        bg=color, fg=FG,
+        activebackground="#3a3a5c", activeforeground=FG,
+        relief="flat", bd=0,
+        padx=16, pady=10,
         cursor="hand2",
         command=cmd,
     )
     btn.pack(fill="x")
+    btn.bind("<Enter>", lambda e, b=btn, c=color: b.configure(bg="#3a3a5c"))
+    btn.bind("<Leave>", lambda e, b=btn, c=color: b.configure(bg=c))
 
-    def _on_enter(e, b=btn, c=color): b.configure(bg="#3a3a5c")
-    def _on_leave(e, b=btn, c=color): b.configure(bg=c)
-    btn.bind("<Enter>", _on_enter)
-    btn.bind("<Leave>", _on_leave)
-
-# ── ステータスバー ──────────────────────────────────────────
 status_var = tk.StringVar(value="準備完了")
 tk.Label(
     root,
