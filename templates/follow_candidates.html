@@ -3,11 +3,16 @@
 
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h4 class="mb-0 fw-bold">フォロー候補</h4>
-  <div class="d-flex gap-2">
+  <div class="d-flex gap-2 flex-wrap">
     <button class="btn btn-sm btn-outline-secondary"
             data-bs-toggle="collapse" data-bs-target="#addForm">
       <i class="bi bi-person-plus"></i> 手動追加
     </button>
+    <form action="/follow-candidates/fetch-engagers" method="post">
+      <button type="submit" class="btn btn-sm btn-outline-info">
+        <i class="bi bi-heart-fill"></i> エンゲージメント取得
+      </button>
+    </form>
     <form action="/follow-candidates/refresh" method="post">
       <button type="submit" class="btn btn-accent btn-sm">
         <i class="bi bi-arrow-repeat"></i> 候補を更新
@@ -21,18 +26,18 @@
   <div class="card p-3">
     <form action="/follow-candidates/add" method="post" class="row g-2 align-items-end">
       <div class="col-auto">
-        <label style="font-size:.78rem;color:#888;display:block;margin-bottom:2px">Threads ユーザー名</label>
+        <label style="font-size:.78rem;color:var(--text-muted);display:block;margin-bottom:2px">Threads ユーザー名</label>
         <div class="input-group input-group-sm">
           <span class="input-group-text">@</span>
           <input type="text" name="username" class="form-control form-control-sm" placeholder="username" required style="width:160px">
         </div>
       </div>
       <div class="col-auto">
-        <label style="font-size:.78rem;color:#888;display:block;margin-bottom:2px">表示名（任意）</label>
+        <label style="font-size:.78rem;color:var(--text-muted);display:block;margin-bottom:2px">表示名（任意）</label>
         <input type="text" name="display_name" class="form-control form-control-sm" placeholder="例: KpopFan Japan" style="width:160px">
       </div>
       <div class="col-auto">
-        <label style="font-size:.78rem;color:#888;display:block;margin-bottom:2px">フォロワー数（任意）</label>
+        <label style="font-size:.78rem;color:var(--text-muted);display:block;margin-bottom:2px">フォロワー数（任意）</label>
         <input type="number" name="followers_count" class="form-control form-control-sm" placeholder="例: 5000" min="0" style="width:120px">
       </div>
       <div class="col-auto">
@@ -42,8 +47,8 @@
   </div>
 </div>
 
-<!-- 自分のフォロワー数 & ターゲット範囲 -->
-<div class="row g-3 mb-4">
+<!-- 統計カード -->
+<div class="row g-3 mb-3">
   <div class="col-auto">
     <div class="card px-4 py-3 text-center" style="min-width:140px">
       <div style="font-size:.72rem;color:var(--text-muted);margin-bottom:2px">自分のフォロワー数</div>
@@ -73,17 +78,46 @@
   </div>
 </div>
 
+<!-- フィルタバー -->
+<div class="card mb-3 p-2 px-3">
+  <div class="d-flex gap-2 align-items-center flex-wrap">
+    <span style="font-size:.78rem;color:var(--text-muted);font-weight:700"><i class="bi bi-funnel-fill me-1"></i>絞り込み</span>
+    <select id="filter-status" class="form-select form-select-sm" style="width:150px;font-size:.8rem"
+            onchange="applyFilters()">
+      <option value="">フォロー状態: 全て</option>
+      <option value="unfollowed" {% if filter_status=='unfollowed' %}selected{% endif %}>未フォロー</option>
+      <option value="followed"   {% if filter_status=='followed'   %}selected{% endif %}>フォロー済み</option>
+      <option value="none"       {% if filter_status=='none'       %}selected{% endif %}>未設定</option>
+    </select>
+    <select id="filter-priority" class="form-select form-select-sm" style="width:140px;font-size:.8rem"
+            onchange="applyFilters()">
+      <option value="">優先度: 全て</option>
+      <option value="high"   {% if filter_priority=='high'   %}selected{% endif %}>🔴 高</option>
+      <option value="medium" {% if filter_priority=='medium' %}selected{% endif %}>🟡 中</option>
+      <option value="low"    {% if filter_priority=='low'    %}selected{% endif %}>🟢 低</option>
+      <option value="none"   {% if filter_priority=='none'   %}selected{% endif %}>未設定</option>
+    </select>
+    {% if filter_status or filter_priority %}
+    <a href="/follow-candidates" class="btn btn-sm btn-outline-secondary" style="font-size:.78rem">
+      <i class="bi bi-x-circle"></i> クリア
+    </a>
+    {% endif %}
+  </div>
+</div>
+
 {% macro candidate_table(candidates) %}
 {% if candidates %}
 <div class="table-responsive">
-  <table class="table table-hover mb-0" style="font-size:.84rem">
+  <table class="table table-hover mb-0" style="font-size:.82rem">
     <thead>
       <tr>
         <th style="width:54px">ソース</th>
         <th>アカウント</th>
-        <th style="width:110px">フォロワー</th>
+        <th style="width:100px">フォロワー</th>
+        <th style="width:130px">フォロー状態</th>
+        <th style="width:110px">優先度</th>
         <th>概要</th>
-        <th style="width:160px"></th>
+        <th style="width:100px"></th>
       </tr>
     </thead>
     <tbody>
@@ -91,25 +125,26 @@
       <tr>
         <td>
           {% if c.source == 'manual' %}
-            <span class="badge" style="background:#0d6efd;font-size:.65rem">手動</span>
+            <span class="badge" style="background:#E91E8C;font-size:.63rem">手動</span>
+          {% elif c.source == 'engagement' %}
+            <span class="badge" style="background:#26A69A;font-size:.63rem"><i class="bi bi-heart-fill"></i> ENG</span>
           {% elif c.source == 'reddit' %}
-            <span class="badge" style="background:#ff4500;font-size:.65rem">Reddit</span>
+            <span class="badge" style="background:#ff4500;font-size:.63rem">Reddit</span>
           {% else %}
-            <span class="badge" style="background:#475569;font-size:.65rem">他</span>
+            <span class="badge" style="background:#475569;font-size:.63rem">他</span>
           {% endif %}
         </td>
         <td>
           <span class="fw-semibold">@{{ c.username }}</span>
           {% if c.display_name %}
-            <span style="color:#666;font-size:.78rem;margin-left:4px">{{ c.display_name }}</span>
+            <span style="color:var(--text-muted);font-size:.76rem;margin-left:4px">{{ c.display_name }}</span>
           {% endif %}
         </td>
         <td>
-          <!-- フォロワー数インライン編集 -->
           <span id="fc-display-{{ c.id }}" style="color:var(--text-muted)">
             {{ fmt_followers(c.followers_count) }}
             <button type="button" onclick="startEditFc({{ c.id }}, {{ c.followers_count or 'null' }})"
-                    class="btn btn-link p-0 ms-1" style="color:#555;font-size:.75rem;vertical-align:baseline">
+                    class="btn btn-link p-0 ms-1" style="color:var(--text-muted);font-size:.72rem;vertical-align:baseline">
               <i class="bi bi-pencil-fill"></i>
             </button>
           </span>
@@ -117,27 +152,50 @@
             <form action="/follow-candidates/{{ c.id }}/followers" method="post"
                   class="d-inline-flex gap-1 align-items-center">
               <input type="number" name="followers_count" id="fc-input-{{ c.id }}"
-                     class="form-control form-control-sm" min="0" style="width:80px;height:24px;font-size:.78rem">
-              <button type="submit" class="btn btn-sm py-0 px-1 btn-success" style="font-size:.75rem;height:24px">✓</button>
+                     class="form-control form-control-sm" min="0" style="width:76px;height:24px;font-size:.76rem">
+              <button type="submit" class="btn btn-sm py-0 px-1 btn-success" style="font-size:.72rem;height:24px">✓</button>
               <button type="button" onclick="cancelEditFc({{ c.id }})"
-                      class="btn btn-sm py-0 px-1 btn-outline-secondary" style="font-size:.75rem;height:24px">✕</button>
+                      class="btn btn-sm py-0 px-1 btn-outline-secondary" style="font-size:.72rem;height:24px">✕</button>
             </form>
           </span>
         </td>
-        <td style="color:var(--text-muted);font-size:.79rem;max-width:240px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
+
+        <!-- フォロー状態 -->
+        <td>
+          <select class="form-select form-select-sm status-select"
+                  data-id="{{ c.id }}" data-field="follow_status"
+                  style="font-size:.76rem;padding:2px 6px;height:26px;border-radius:8px">
+            <option value=""           {% if not c.follow_status %}selected{% endif %}>— 未設定 —</option>
+            <option value="unfollowed" {% if c.follow_status == 'unfollowed' %}selected{% endif %}>未フォロー</option>
+            <option value="followed"   {% if c.follow_status == 'followed'   %}selected{% endif %}>✅ フォロー済み</option>
+          </select>
+        </td>
+
+        <!-- 優先度 -->
+        <td>
+          <select class="form-select form-select-sm priority-select"
+                  data-id="{{ c.id }}" data-field="priority"
+                  style="font-size:.76rem;padding:2px 6px;height:26px;border-radius:8px">
+            <option value=""       {% if not c.priority %}selected{% endif %}>— 未設定 —</option>
+            <option value="high"   {% if c.priority == 'high'   %}selected{% endif %}>🔴 高</option>
+            <option value="medium" {% if c.priority == 'medium' %}selected{% endif %}>🟡 中</option>
+            <option value="low"    {% if c.priority == 'low'    %}selected{% endif %}>🟢 低</option>
+          </select>
+        </td>
+
+        <td style="color:var(--text-muted);font-size:.77rem;max-width:200px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
           {{ c.bio or "—" }}
         </td>
         <td class="text-end">
           <a href="https://www.threads.net/@{{ c.username }}"
              target="_blank" rel="noopener"
              class="btn btn-sm btn-outline-secondary me-1"
-             style="font-size:.75rem">
-            <i class="bi bi-box-arrow-up-right"></i> 開く
+             style="font-size:.72rem">
+            <i class="bi bi-box-arrow-up-right"></i>
           </a>
           <form action="/follow-candidates/{{ c.id }}/delete" method="post" class="d-inline"
                 onsubmit="return confirm('@{{ c.username }} を削除しますか？')">
-            <button type="submit" class="btn btn-sm btn-outline-danger"
-                    style="font-size:.75rem">
+            <button type="submit" class="btn btn-sm btn-outline-danger" style="font-size:.72rem">
               <i class="bi bi-trash3"></i>
             </button>
           </form>
@@ -162,7 +220,7 @@
       <span class="badge ms-2" style="background:#16a34a">{{ in_range|length }}</span>
     </span>
     {% if min_target is not none %}
-    <small style="color:#555">{{ fmt_followers(min_target) }} 〜 {{ fmt_followers(max_target) }}{% if fixed_range %} <span style="color:#666">（固定）</span>{% endif %}</small>
+    <small style="color:var(--text-muted)">{{ fmt_followers(min_target) }} 〜 {{ fmt_followers(max_target) }}{% if fixed_range %} （固定）{% endif %}</small>
     {% endif %}
   </div>
   {{ candidate_table(in_range) }}
@@ -173,21 +231,21 @@
 <div class="card mb-3">
   <div class="card-header d-flex justify-content-between align-items-center">
     <span>
-      <i class="bi bi-question-circle me-2" style="color:#777"></i>
+      <i class="bi bi-question-circle me-2" style="color:var(--text-muted)"></i>
       フォロワー数不明
       <span class="badge ms-2" style="background:#475569">{{ unknown_fc|length }}</span>
     </span>
-    <small style="color:#555">手動追加後は鉛筆アイコンでフォロワー数を入力 / 「候補を更新」で自動取得</small>
+    <small style="color:var(--text-muted)">「候補を更新」でフォロワー数を自動取得</small>
   </div>
   {{ candidate_table(unknown_fc) }}
 </div>
 {% endif %}
 
-<!-- 範囲外（フォロワー数判明・範囲外） -->
+<!-- 範囲外 -->
 {% if out_range %}
 <div class="card mb-3">
   <div class="card-header">
-    <i class="bi bi-person-dash me-2" style="color:#555"></i>
+    <i class="bi bi-person-dash me-2" style="color:var(--text-muted)"></i>
     範囲外
     <span class="badge ms-2" style="background:#334155">{{ out_range|length }}</span>
     <small class="ms-2" style="color:var(--text-muted);font-weight:normal">自分のフォロワー 3〜15倍の範囲外</small>
@@ -200,6 +258,7 @@
 
 {% block scripts %}
 <script>
+// ── フォロワー数インライン編集 ─────────────────────────────────────────────
 function startEditFc(id, current) {
   document.getElementById("fc-display-" + id).style.display = "none";
   document.getElementById("fc-edit-" + id).style.display = "inline";
@@ -210,6 +269,36 @@ function startEditFc(id, current) {
 function cancelEditFc(id) {
   document.getElementById("fc-edit-" + id).style.display = "none";
   document.getElementById("fc-display-" + id).style.display = "";
+}
+
+// ── フォロー状態・優先度のインライン更新 ────────────────────────────────────
+function saveStatus(id) {
+  const statusEl   = document.querySelector(`.status-select[data-id="${id}"]`);
+  const priorityEl = document.querySelector(`.priority-select[data-id="${id}"]`);
+  const body = new URLSearchParams({
+    follow_status: statusEl ? statusEl.value : "",
+    priority:      priorityEl ? priorityEl.value : "",
+  });
+  fetch(`/follow-candidates/${id}/status`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  }).catch(err => console.error("status save error:", err));
+}
+
+document.querySelectorAll(".status-select, .priority-select").forEach(sel => {
+  sel.addEventListener("change", () => saveStatus(sel.dataset.id));
+});
+
+// ── フィルタ（URL パラメータで遷移） ────────────────────────────────────────
+function applyFilters() {
+  const status   = document.getElementById("filter-status").value;
+  const priority = document.getElementById("filter-priority").value;
+  const params = new URLSearchParams();
+  if (status)   params.set("status",   status);
+  if (priority) params.set("priority", priority);
+  const qs = params.toString();
+  window.location.href = "/follow-candidates" + (qs ? "?" + qs : "");
 }
 </script>
 {% endblock %}

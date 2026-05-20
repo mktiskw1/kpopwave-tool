@@ -241,6 +241,81 @@ def _discover_reddit(limit: int = 50) -> list:
     return list(found)
 
 
+# ── Threads エンゲージメント取得 ─────────────────────────────────────────────
+
+def fetch_engagers_from_threads(app) -> dict:
+    """自分の投稿にリプライ・いいねしたユーザーをThreads APIから取得してフォロー候補に追加する。"""
+    with app.app_context():
+        user_id = Setting.get("threads_user_id") or os.getenv("THREADS_USER_ID", "")
+        token   = Setting.get("threads_access_token") or os.getenv("THREADS_ACCESS_TOKEN", "")
+
+    if not user_id or not token:
+        return {"error": "Threads APIの認証情報が設定されていません", "added": 0, "found": 0}
+
+    # 1. 最近の投稿IDを取得
+    try:
+        r = requests.get(
+            f"{THREADS_API}/{user_id}/threads",
+            params={"fields": "id,timestamp", "limit": 20, "access_token": token},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return {"error": f"投稿取得失敗: HTTP {r.status_code} {r.text[:100]}", "added": 0, "found": 0}
+        posts = r.json().get("data", [])
+    except Exception as exc:
+        return {"error": str(exc), "added": 0, "found": 0}
+
+    usernames: set = set()
+    own_lower = user_id.lower()
+
+    for post in posts[:15]:
+        post_id = post.get("id")
+        if not post_id:
+            continue
+
+        # リプライユーザーを取得（username フィールドが直接入っている）
+        try:
+            rr = requests.get(
+                f"{THREADS_API}/{post_id}/replies",
+                params={"fields": "id,username", "limit": 100, "access_token": token},
+                timeout=15,
+            )
+            if rr.status_code == 200:
+                for reply in rr.json().get("data", []):
+                    uname = (reply.get("username") or "").strip().lower()
+                    if uname and uname != own_lower:
+                        usernames.add(uname)
+        except Exception as exc:
+            logger.debug("リプライ取得失敗 post=%s: %s", post_id, exc)
+
+        # いいねユーザーを取得（username フィールドが返る場合のみ追加）
+        try:
+            lr = requests.get(
+                f"{THREADS_API}/{post_id}/likes",
+                params={"fields": "id,username", "limit": 100, "access_token": token},
+                timeout=15,
+            )
+            if lr.status_code == 200:
+                for like in lr.json().get("data", []):
+                    uname = (like.get("username") or "").strip().lower()
+                    if uname and uname != own_lower:
+                        usernames.add(uname)
+        except Exception as exc:
+            logger.debug("いいね取得失敗 post=%s: %s", post_id, exc)
+
+    # 2. 未登録ユーザーをフォロー候補に追加
+    added = 0
+    with app.app_context():
+        for uname in usernames:
+            if not FollowCandidate.query.filter_by(username=uname).first():
+                db.session.add(FollowCandidate(username=uname, source="engagement"))
+                added += 1
+        db.session.commit()
+
+    logger.info("エンゲージメント取得完了: %d名発見 %d名追加", len(usernames), added)
+    return {"added": added, "found": len(usernames)}
+
+
 # ── CRUD ヘルパー ───────────────────────────────────────────────────────────
 
 def add_candidate(app, username: str, display_name: str = "", bio: str = "") -> bool:
@@ -405,7 +480,23 @@ def refresh_candidates(app) -> dict:
 
 # ── ページデータ構築 ────────────────────────────────────────────────────────
 
-def get_page_data(app) -> dict:
+def _apply_filters(candidates: list, filter_status: str, filter_priority: str) -> list:
+    """フォロー状態・優先度でリストを絞り込む。空文字は全件。"""
+    result = candidates
+    if filter_status:
+        if filter_status == "none":
+            result = [c for c in result if not c.follow_status]
+        else:
+            result = [c for c in result if c.follow_status == filter_status]
+    if filter_priority:
+        if filter_priority == "none":
+            result = [c for c in result if not c.priority]
+        else:
+            result = [c for c in result if c.priority == filter_priority]
+    return result
+
+
+def get_page_data(app, filter_status: str = "", filter_priority: str = "") -> dict:
     with app.app_context():
         all_cands = FollowCandidate.query.order_by(
             FollowCandidate.followers_count.desc()
@@ -417,7 +508,6 @@ def get_page_data(app) -> dict:
         max_target  = None
         fixed_range = False
     elif my_fc == 0:
-        # フォロワー0人の場合は固定レンジで候補を表示
         min_target  = 100
         max_target  = 1000
         fixed_range = True
@@ -434,6 +524,11 @@ def get_page_data(app) -> dict:
             in_range.append(c)
         else:
             out_range.append(c)
+
+    # フィルタ適用
+    in_range   = _apply_filters(in_range,   filter_status, filter_priority)
+    out_range  = _apply_filters(out_range,  filter_status, filter_priority)
+    unknown_fc = _apply_filters(unknown_fc, filter_status, filter_priority)
 
     return {
         "my_followers":  my_fc,

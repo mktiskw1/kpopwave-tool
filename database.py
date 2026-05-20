@@ -79,5 +79,7 @@ class FollowCandidate(db.Model):
     display_name = db.Column(db.String(200))
     followers_count = db.Column(db.Integer)          # None = 未取得
     bio = db.Column(db.String(500))
-    source = db.Column(db.String(20), default="curated")  # curated / reddit
+    source = db.Column(db.String(20), default="curated")  # curated / reddit / engagement
+    follow_status = db.Column(db.String(20), nullable=True)   # unfollowed / followed
+    priority = db.Column(db.String(10), nullable=True)        # high / medium / low
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

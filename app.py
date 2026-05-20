@@ -50,8 +50,10 @@ def _migrate_db():
     """既存DBに新カラムを追加する（SQLite用）。"""
     from sqlalchemy import inspect, text
     inspector = inspect(db.engine)
-    existing = {c["name"] for c in inspector.get_columns("articles")}
-    new_cols = [
+
+    # articles テーブル
+    existing_articles = {c["name"] for c in inspector.get_columns("articles")}
+    article_cols = [
         ("thumbnail_url", "VARCHAR(500)"),
         ("like_count", "INTEGER"),
         ("reply_count", "INTEGER"),
@@ -62,11 +64,24 @@ def _migrate_db():
         ("image_urls", "TEXT"),
     ]
     with db.engine.connect() as conn:
-        for col, typedef in new_cols:
-            if col not in existing:
+        for col, typedef in article_cols:
+            if col not in existing_articles:
                 conn.execute(text(f"ALTER TABLE articles ADD COLUMN {col} {typedef}"))
                 conn.commit()
-                logger.info("DB migration: added %s column", col)
+                logger.info("DB migration: articles.%s added", col)
+
+    # follow_candidates テーブル
+    existing_fc = {c["name"] for c in inspector.get_columns("follow_candidates")}
+    fc_cols = [
+        ("follow_status", "VARCHAR(20)"),
+        ("priority",      "VARCHAR(10)"),
+    ]
+    with db.engine.connect() as conn:
+        for col, typedef in fc_cols:
+            if col not in existing_fc:
+                conn.execute(text(f"ALTER TABLE follow_candidates ADD COLUMN {col} {typedef}"))
+                conn.commit()
+                logger.info("DB migration: follow_candidates.%s added", col)
 
 
 def _init_default_settings():
@@ -712,8 +727,15 @@ def learning_update_hints():
 @app.route("/follow-candidates")
 def follow_candidates():
     from follow_candidates import get_page_data
-    data = get_page_data(app)
-    return render_template("follow_candidates.html", **data)
+    filter_status   = request.args.get("status", "")
+    filter_priority = request.args.get("priority", "")
+    data = get_page_data(app, filter_status=filter_status, filter_priority=filter_priority)
+    return render_template(
+        "follow_candidates.html",
+        filter_status=filter_status,
+        filter_priority=filter_priority,
+        **data,
+    )
 
 
 @app.route("/follow-candidates/refresh", methods=["POST"])
@@ -768,6 +790,30 @@ def update_follow_candidate_followers(id):
     count = int(fc_str) if fc_str.isdigit() else None
     set_follower_count(app, id, count)
     return redirect(url_for("follow_candidates"))
+
+
+@app.route("/follow-candidates/fetch-engagers", methods=["POST"])
+def fetch_engagers():
+    from follow_candidates import fetch_engagers_from_threads
+    result = fetch_engagers_from_threads(app)
+    if "error" in result:
+        flash(f"エラー: {result['error']}", "danger")
+    else:
+        flash(
+            f"エンゲージメント取得完了: {result['found']}名発見 / {result['added']}名追加",
+            "success",
+        )
+    return redirect(url_for("follow_candidates"))
+
+
+@app.route("/follow-candidates/<int:id>/status", methods=["POST"])
+def update_follow_candidate_status(id):
+    from database import FollowCandidate
+    fc = FollowCandidate.query.get_or_404(id)
+    fc.follow_status = request.form.get("follow_status") or None
+    fc.priority      = request.form.get("priority") or None
+    db.session.commit()
+    return jsonify({"success": True})
 
 
 @app.route("/api/stats")
