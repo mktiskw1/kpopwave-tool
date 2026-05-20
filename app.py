@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
 import requests
@@ -106,6 +106,14 @@ def _init_default_settings():
 
 
 app = create_app()
+
+
+@app.template_filter("utc_to_jst")
+def utc_to_jst_filter(dt):
+    """UTC naive datetime → JST naive datetime (+9h)"""
+    if dt is None:
+        return dt
+    return dt + timedelta(hours=9)
 
 
 @app.context_processor

@@ -35,7 +35,7 @@
           {% if a.scheduled_at %}
           <span class="badge badge-queued" style="font-size:.72rem">
             <i class="bi bi-clock"></i>
-            {{ (a.scheduled_at.strftime('%m/%d %H:%M')) }} JST 予定
+            {{ (a.scheduled_at | utc_to_jst).strftime('%m/%d %H:%M') }} JST 予定
           </span>
           {% else %}
           <span class="badge bg-secondary" style="font-size:.72rem;opacity:.6">時間未設定</span>
@@ -79,7 +79,7 @@
         <input type="datetime-local" id="dt-{{ a.id }}"
                class="form-control" style="font-size:.82rem"
                {% if a.scheduled_at %}
-               value="{{ (a.scheduled_at.strftime('%Y-%m-%dT%H:%M')) }}"
+               value="{{ (a.scheduled_at | utc_to_jst).strftime('%Y-%m-%dT%H:%M') }}"
                {% endif %}>
         <button class="btn btn-info btn-sm" onclick="setSchedule({{ a.id }})">設定 (JST)</button>
       </div>

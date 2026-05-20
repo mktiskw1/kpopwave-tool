@@ -9,6 +9,7 @@ import subprocess
 import os
 import webbrowser
 import sys
+import re
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 VENV_PYTHON = os.path.join(PROJECT_DIR, "venv", "Scripts", "python.exe")
@@ -169,6 +170,69 @@ def set_status(msg):
     status_var.set(msg)
 
 
+# ── スリープ制御 ────────────────────────────────────────────
+_sleep_disabled = False
+_original_ac_min = None
+_original_dc_min = None
+
+
+def _get_sleep_timeouts():
+    """現在のスリープタイムアウト（分）を取得して返す"""
+    try:
+        result = subprocess.run(
+            ["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"],
+            capture_output=True, text=True,
+        )
+        ac_m = re.search(r"Current AC Power Setting Index: 0x([0-9a-fA-F]+)", result.stdout)
+        dc_m = re.search(r"Current DC Power Setting Index: 0x([0-9a-fA-F]+)", result.stdout)
+        ac = int(ac_m.group(1), 16) // 60 if ac_m else 30
+        dc = int(dc_m.group(1), 16) // 60 if dc_m else 15
+        return ac, dc
+    except Exception:
+        return 30, 15
+
+
+def toggle_sleep():
+    global _sleep_disabled, _original_ac_min, _original_dc_min
+    COLOR_ON  = "#1e3a1e"   # 有効時（通常）
+    COLOR_OFF = "#4a1a6a"   # 無効中（紫）
+
+    if not _sleep_disabled:
+        if _original_ac_min is None:
+            _original_ac_min, _original_dc_min = _get_sleep_timeouts()
+        try:
+            subprocess.run(["powercfg", "/change", "standby-timeout-ac", "0"], check=True)
+            subprocess.run(["powercfg", "/change", "standby-timeout-dc", "0"], check=True)
+            _sleep_disabled = True
+            _sleep_outer.config(bg=COLOR_OFF)
+            _sleep_btn.config(
+                text="  スリープ無効中🌙\n  クリックでスリープを有効に戻す  ",
+                bg=COLOR_OFF,
+            )
+            _sleep_btn.bind("<Leave>", lambda e: _sleep_btn.configure(bg=COLOR_OFF))
+            _sleep_btn.bind("<Enter>", lambda e: _sleep_btn.configure(bg="#6a2a8a"))
+            set_status("スリープを無効にしました")
+        except subprocess.CalledProcessError as e:
+            messagebox.showerror("エラー", f"スリープ設定の変更に失敗:\n{e}\n※管理者権限が必要な場合があります")
+    else:
+        ac = _original_ac_min if _original_ac_min else 30
+        dc = _original_dc_min if _original_dc_min else 15
+        try:
+            subprocess.run(["powercfg", "/change", "standby-timeout-ac", str(ac)], check=True)
+            subprocess.run(["powercfg", "/change", "standby-timeout-dc", str(dc)], check=True)
+            _sleep_disabled = False
+            _sleep_outer.config(bg=COLOR_ON)
+            _sleep_btn.config(
+                text="  スリープ有効\n  クリックでスリープを無効にする  ",
+                bg=COLOR_ON,
+            )
+            _sleep_btn.bind("<Leave>", lambda e: _sleep_btn.configure(bg=COLOR_ON))
+            _sleep_btn.bind("<Enter>", lambda e: _sleep_btn.configure(bg="#3a3a5c"))
+            set_status("スリープを有効に戻しました")
+        except subprocess.CalledProcessError as e:
+            messagebox.showerror("エラー", f"スリープ設定の変更に失敗:\n{e}")
+
+
 # ── GUI ────────────────────────────────────────────────────
 root = tk.Tk()
 root.title("KPOPwave ランチャー")
@@ -219,6 +283,26 @@ for title, subtitle, cmd, color in BUTTONS:
     btn.pack(fill="x")
     btn.bind("<Enter>", lambda e, b=btn, c=color: b.configure(bg="#3a3a5c"))
     btn.bind("<Leave>", lambda e, b=btn, c=color: b.configure(bg=c))
+
+# ── スリープトグルボタン ────────────────────────────────────
+_SLEEP_COLOR = "#1e3a1e"
+_sleep_outer = tk.Frame(frame, bg=_SLEEP_COLOR)
+_sleep_outer.pack(fill="x", pady=5)
+_sleep_btn = tk.Button(
+    _sleep_outer,
+    text="  スリープ有効\n  クリックでスリープを無効にする  ",
+    font=("Segoe UI", 11),
+    anchor="w", justify="left",
+    bg=_SLEEP_COLOR, fg=FG,
+    activebackground="#3a3a5c", activeforeground=FG,
+    relief="flat", bd=0,
+    padx=16, pady=10,
+    cursor="hand2",
+    command=toggle_sleep,
+)
+_sleep_btn.pack(fill="x")
+_sleep_btn.bind("<Enter>", lambda e: _sleep_btn.configure(bg="#3a3a5c"))
+_sleep_btn.bind("<Leave>", lambda e: _sleep_btn.configure(bg=_SLEEP_COLOR))
 
 status_var = tk.StringVar(value="準備完了")
 tk.Label(
