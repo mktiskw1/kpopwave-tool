@@ -129,8 +129,20 @@ def open_admin():
     set_status("管理画面を開きました")
 
 
+def _ensure_git_config():
+    """git user.email / user.name が未設定なら自動で設定する"""
+    email = subprocess.run(
+        ["git", "config", "--global", "user.email"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if not email:
+        subprocess.run(["git", "config", "--global", "user.email", "mktiskw1@gmail.com"])
+        subprocess.run(["git", "config", "--global", "user.name", "mktis"])
+
+
 def git_push():
     try:
+        _ensure_git_config()
         result = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True, text=True, cwd=PROJECT_DIR,
@@ -255,11 +267,11 @@ tk.Label(
 ).pack()
 
 BUTTONS = [
-    ("① ツール起動",            "▶  コマンドプロンプトで run.py を実行",  run_tool,   "#0f3460"),
-    ("② Claude Code 起動",     "🤖  VS Code を開いて手順を表示",         run_claude, "#0f3460"),
-    ("③ 管理画面を開く",        "🌐  localhost:5000",                    open_admin, "#2d1b69"),
-    ("④ GitHub に保存",         "⬆  add → commit → push",              git_push,   "#1a472a"),
-    ("⑤ GitHub から最新版取得",  "⬇  git pull",                          git_pull,   "#1a472a"),
+    ("① ツール起動",            "▶  コマンドプロンプトで run.py を実行",   run_tool,   "#0f3460"),
+    ("② 管理画面を開く",        "🌐  Chrome で localhost:5000 を開く",     open_admin, "#2d1b69"),
+    ("③ GitHub に保存",         "⬆  add → commit → push",               git_push,   "#1a472a"),
+    ("④ GitHub から最新版取得",  "⬇  git pull",                           git_pull,   "#1a472a"),
+    ("⑤ Claude Code 起動",     "🤖  VS Code を開いて手順を表示",          run_claude, "#0f3460"),
 ]
 
 frame = tk.Frame(root, bg=BG, padx=20, pady=15)
