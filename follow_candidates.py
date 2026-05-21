@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import time
 import requests
 from datetime import datetime
 
@@ -115,6 +116,11 @@ def _scrape_threads_profile(username: str) -> dict:
         user = r.json().get("data", {}).get("user") or {}
         result: dict = {}
 
+        # 内部pk（スレッド取得に使用）
+        pk = user.get("pk") or ""
+        if pk:
+            result["pk"] = str(pk)
+
         # フォロワー数: edge_followed_by.count
         fc = (user.get("edge_followed_by") or {}).get("count")
         if fc is not None:
@@ -135,6 +141,123 @@ def _scrape_threads_profile(username: str) -> dict:
     except Exception as exc:
         logger.debug("プロフィールAPI失敗 @%s: %s", username, exc)
         return {}
+
+
+# ── KPOPアカウント返信者スキャン ─────────────────────────────────────────────
+
+DEFAULT_KPOP_ACCOUNTS = [
+    "blackpinkofficial",
+    "newjeans_official",
+    "aespa_official",
+    "le_sserafim",
+    "twicetagram",
+    "itzy.all.in.us",
+    "ive.official",
+    "stayc_official",
+    "mamamoo_official",
+    "redvelvet.smtown",
+    "kiss.of.life",
+    "illit_official",
+    "nmixx_official",
+    "babymonster_official",
+]
+
+
+def _get_user_threads_internal(user_pk: str, count: int = 5) -> list:
+    """内部APIでユーザーの最新スレッドのpkリストを取得する。"""
+    try:
+        r = requests.get(
+            f"https://www.threads.net/api/v1/text_feed/{user_pk}/profile/",
+            params={"count": count},
+            headers={"User-Agent": _IG_UA, "X-IG-App-ID": _IG_APP_ID, "Accept": "application/json"},
+            timeout=12,
+        )
+        if r.status_code != 200:
+            logger.debug("スレッド一覧取得 HTTP %d pk=%s", r.status_code, user_pk)
+            return []
+        pks = []
+        for item in r.json().get("items", []):
+            for ti in item.get("thread_items", []):
+                pk = str((ti.get("post") or {}).get("pk") or "")
+                if pk and pk not in pks:
+                    pks.append(pk)
+        return pks
+    except Exception as e:
+        logger.debug("スレッド一覧内部API失敗 pk=%s: %s", user_pk, e)
+        return []
+
+
+def _get_thread_repliers_internal(thread_pk: str) -> set:
+    """内部APIでスレッドへの返信者ユーザー名セットを取得する。"""
+    usernames: set = set()
+    try:
+        r = requests.get(
+            f"https://www.threads.net/api/v1/media/{thread_pk}/replies/",
+            params={"flat": "1"},
+            headers={"User-Agent": _IG_UA, "X-IG-App-ID": _IG_APP_ID, "Accept": "application/json"},
+            timeout=12,
+        )
+        if r.status_code != 200:
+            return usernames
+        for item in r.json().get("items", []):
+            uname = ((item.get("user") or {}).get("username") or "").strip().lower()
+            if uname:
+                usernames.add(uname)
+    except Exception as e:
+        logger.debug("返信者取得失敗 thread_pk=%s: %s", thread_pk, e)
+    return usernames
+
+
+def fetch_kpop_account_repliers(app, accounts: list = None) -> dict:
+    """
+    指定したKPOPアカウントの最新スレッドへの返信者をフォロー候補に追加する。
+    公式Threads APIではフォロワーリスト取得が不可のため、
+    返信者（KPOPファン確率が高い）を代替として収集する。
+    """
+    with app.app_context():
+        setting_str = Setting.get("kpop_seed_accounts", "")
+
+    if accounts is None:
+        if setting_str.strip():
+            accounts = [a.strip().lstrip("@").lower() for a in setting_str.split(",") if a.strip()]
+        else:
+            accounts = DEFAULT_KPOP_ACCOUNTS
+
+    all_repliers: set = set()
+    scan_log: list = []
+
+    for username in accounts:
+        profile = _scrape_threads_profile(username)
+        user_pk = profile.get("pk", "")
+        if not user_pk:
+            logger.info("KPOPスキャン @%s: pk取得失敗", username)
+            scan_log.append({"account": username, "ok": False, "error": "プロフィール取得失敗"})
+            time.sleep(0.5)
+            continue
+
+        thread_pks = _get_user_threads_internal(user_pk, count=5)
+        logger.info("KPOPスキャン @%s (pk=%s): %d件のスレッド取得", username, user_pk, len(thread_pks))
+
+        repliers: set = set()
+        for tpk in thread_pks:
+            repliers |= _get_thread_repliers_internal(tpk)
+            time.sleep(0.3)
+
+        all_repliers |= repliers
+        scan_log.append({"account": username, "ok": True, "threads": len(thread_pks), "repliers": len(repliers)})
+        logger.info("KPOPスキャン @%s: %d名の返信者発見", username, len(repliers))
+        time.sleep(1.0)
+
+    added = 0
+    with app.app_context():
+        for uname in all_repliers:
+            if not FollowCandidate.query.filter_by(username=uname).first():
+                db.session.add(FollowCandidate(username=uname, source="kpop_reply"))
+                added += 1
+        db.session.commit()
+
+    logger.info("KPOPスキャン完了: %d名発見 / %d名追加", len(all_repliers), added)
+    return {"found": len(all_repliers), "added": added, "scan_log": scan_log}
 
 
 # ── K-POP 文脈・バイオ検証 ────────────────────────────────────────────────────

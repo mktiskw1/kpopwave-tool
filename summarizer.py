@@ -230,6 +230,15 @@ def _is_japanese_source(feed_source: str) -> bool:
     return any(s in (feed_source or "").lower() for s in _JA_FEED_SOURCES)
 
 
+def _save_error(app, article_id: int, message: str) -> None:
+    """エラーメッセージをDBに保存するヘルパー。"""
+    with app.app_context():
+        art = db.session.get(Article, article_id)
+        if art:
+            art.error_message = message
+            db.session.commit()
+
+
 def summarize_article(app, article_id: int, style: str = "つぶやき型") -> bool:
     """1 記事の日本語投稿テキストを生成して DB に保存する。成功なら True。"""
     style_instruction = _STYLE_PROMPTS.get(style, _STYLE_PROMPTS["つぶやき型"])
@@ -242,8 +251,9 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
     )
 
     with app.app_context():
-        article = Article.query.get(article_id)
+        article = db.session.get(Article, article_id)
         if not article:
+            logger.error("article id=%d が見つかりません", article_id)
             return False
         title        = article.title
         stored_body  = (article.raw_content or "")[:3000]
@@ -253,8 +263,23 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
         is_ja_src    = _is_japanese_source(feed_source)
 
     api_key = _get_api_key(app)
+    with app.app_context():
+        db_key  = Setting.get("anthropic_api_key", "")
+    env_key = os.getenv("ANTHROPIC_API_KEY", "")
+    logger.info(
+        "Anthropic APIキー確認 — DB: %s / ENV: %s",
+        f'"{db_key[:12]}..." ({len(db_key)}文字)' if db_key else "未設定",
+        f'"{env_key[:12]}..." ({len(env_key)}文字)' if env_key else "未設定",
+    )
     if not api_key:
-        logger.error("Anthropic API key not configured")
+        msg = "Anthropic APIキーが未設定です。管理画面 → 設定 → Anthropic API キーを登録してください。"
+        logger.error(msg)
+        _save_error(app, article_id, msg)
+        return False
+    if api_key.endswith("...") or api_key in ("sk-ant-...", "your-api-key-here"):
+        msg = f"Anthropic APIキーがプレースホルダーのままです ({api_key!r})。管理画面 → 設定 → Anthropic API キーに本物のキーを入力してください。"
+        logger.error(msg)
+        _save_error(app, article_id, msg)
         return False
 
     # ── コンテンツ取得 ─────────────────────────────────────────────
@@ -435,12 +460,11 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
         post_text = summary_text + hashtag_part + source_part
 
         with app.app_context():
-            art = Article.query.get(article_id)
+            art = db.session.get(Article, article_id)
             if art:
                 art.summary    = post_text
                 art.post_style = style
                 art.error_message = None
-                # 画像URL（複数枚対応）を保存
                 if article_images:
                     art.image_urls = json.dumps(article_images, ensure_ascii=False)
                 db.session.commit()
@@ -452,12 +476,8 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
         return True
 
     except Exception as exc:
-        logger.error("Summarize error for article %d: %s", article_id, exc)
-        with app.app_context():
-            art = Article.query.get(article_id)
-            if art:
-                art.error_message = str(exc)
-                db.session.commit()
+        logger.error("Summarize error for article %d: %s", article_id, exc, exc_info=True)
+        _save_error(app, article_id, f"{type(exc).__name__}: {exc}")
         return False
 
 

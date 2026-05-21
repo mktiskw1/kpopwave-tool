@@ -1,9 +1,10 @@
 import json
 import logging
 import os
+import re
 import secrets
 from datetime import datetime, timedelta
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
 from dotenv import load_dotenv
@@ -91,6 +92,9 @@ def _init_default_settings():
         "collect_interval_hours": "2",
         "youtube_collect_interval_hours": "6",
         "youtube_api_key": os.getenv("YOUTUBE_API_KEY", ""),
+        "kpop_seed_accounts": "",
+        "youtube_min_view_count": "5000000",
+        "youtube_max_view_count": "0",
         "test_mode": "false",
         "threads_user_id": os.getenv("THREADS_USER_ID", ""),
         "threads_access_token": os.getenv("THREADS_ACCESS_TOKEN", ""),
@@ -121,6 +125,8 @@ def inject_globals():
     return {
         "pending_count": Article.query.filter_by(status="pending").count(),
         "queued_count": Article.query.filter_by(status="queued").count(),
+        "youtube_min_view_count": Setting.get("youtube_min_view_count", "5000000"),
+        "youtube_max_view_count": Setting.get("youtube_max_view_count", "0"),
     }
 
 
@@ -184,8 +190,10 @@ def approve_article(id):
         slot_label = ""
 
     db.session.commit()
+    if request.headers.get("X-Requested-With") == "fetch":
+        return jsonify({"ok": True, "slot_label": slot_label})
     flash(f"キューに追加しました{slot_label}: {article.title[:50]}", "success")
-    return redirect(request.referrer or url_for("pending"))
+    return redirect(url_for("pending"))
 
 
 @app.route("/articles/<int:id>/reject", methods=["POST"])
@@ -206,6 +214,132 @@ def delete_article(id):
     return redirect(request.referrer or url_for("pending"))
 
 
+# ── URL手動追加 ────────────────────────────────────────────────────────────
+
+_ADD_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def _extract_youtube_id(url: str) -> str:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host in ("www.youtube.com", "youtube.com", "m.youtube.com"):
+        vid = parse_qs(parsed.query).get("v", [""])[0]
+        if vid:
+            return vid
+        m = re.match(r"/(?:shorts|embed)/([a-zA-Z0-9_-]{11})", parsed.path)
+        if m:
+            return m.group(1)
+    elif host == "youtu.be":
+        return parsed.path.lstrip("/").split("?")[0]
+    return ""
+
+
+def _fetch_youtube_info(video_id: str) -> tuple:
+    db_key = Setting.get("youtube_api_key", "")
+    api_key = db_key or os.getenv("YOUTUBE_API_KEY", "")
+    if api_key:
+        try:
+            resp = requests.get(
+                "https://www.googleapis.com/youtube/v3/videos",
+                params={"part": "snippet", "id": video_id, "key": api_key},
+                timeout=15,
+            )
+            items = resp.json().get("items", [])
+            if items:
+                sn = items[0]["snippet"]
+                th = sn.get("thumbnails", {})
+                thumbnail = (th.get("maxres") or th.get("high") or th.get("medium") or {}).get("url", "")
+                return sn.get("title", ""), sn.get("description", "")[:5000], thumbnail, f"YouTube: {sn.get('channelTitle', 'YouTube')}"
+        except Exception as e:
+            logger.warning("YouTube API fetch error: %s", e)
+    # oEmbed fallback（APIキー不要）
+    try:
+        r = requests.get(
+            f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json",
+            timeout=10,
+        )
+        d = r.json()
+        return d.get("title", ""), "", f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg", f"YouTube: {d.get('author_name', 'YouTube')}"
+    except Exception:
+        return "", "", "", "YouTube"
+
+
+def _fetch_article_info(url: str) -> tuple:
+    try:
+        resp = requests.get(url, headers={"User-Agent": _ADD_UA, "Accept": "text/html", "Accept-Language": "en-US,en;q=0.9,ja;q=0.8"}, timeout=15)
+        if resp.status_code != 200:
+            return "", "", "", ""
+        html = resp.text
+        # タイトル: og:title → <title>
+        title = ""
+        m = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']{1,500})["\']|<meta[^>]+content=["\']([^"\']{1,500})["\'][^>]+property=["\']og:title["\']', html, re.IGNORECASE)
+        if m:
+            title = (m.group(1) or m.group(2) or "").strip()
+        if not title:
+            m2 = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
+            if m2:
+                title = m2.group(1).strip()
+        # OGP画像
+        thumbnail_url = ""
+        m3 = re.search(r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']|<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', html, re.IGNORECASE)
+        if m3:
+            img = (m3.group(1) or m3.group(2) or "").strip()
+            if img.startswith("http"):
+                thumbnail_url = img
+        # 本文
+        clean = re.sub(r"<(script|style)[^>]*>[\s\S]*?</\1>", " ", html, flags=re.IGNORECASE)
+        for tag in ("article", "main", "body"):
+            bm = re.search(rf"<{tag}[^>]*>([\s\S]*?)</{tag}>", clean, re.IGNORECASE)
+            if bm:
+                clean = bm.group(1); break
+        content = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", clean)).strip()[:5000]
+        domain = urlparse(url).netloc.removeprefix("www.")
+        return title, content, thumbnail_url, f"手動追加: {domain}"
+    except Exception as e:
+        logger.error("記事取得エラー: %s — %s", url, e)
+        return "", "", "", ""
+
+
+@app.route("/articles/add-from-url", methods=["POST"])
+def add_article_from_url():
+    data = request.get_json(silent=True) or {}
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "URLを入力してください"})
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    yt_id = _extract_youtube_id(url)
+    canonical_url = f"https://www.youtube.com/watch?v={yt_id}" if yt_id else url
+
+    if Article.query.filter_by(url=canonical_url).first():
+        return jsonify({"ok": False, "error": "このURLはすでに登録済みです"})
+
+    if yt_id:
+        title, content, thumbnail_url, feed_source = _fetch_youtube_info(yt_id)
+    else:
+        title, content, thumbnail_url, feed_source = _fetch_article_info(canonical_url)
+
+    if not title:
+        return jsonify({"ok": False, "error": "タイトルを取得できませんでした。URLを確認してください"})
+
+    article = Article(
+        feed_source=feed_source,
+        title=title[:500],
+        url=canonical_url,
+        raw_content=content,
+        thumbnail_url=thumbnail_url or None,
+        status="pending",
+    )
+    db.session.add(article)
+    db.session.commit()
+    logger.info("URL手動追加: id=%d source=%s title=%s", article.id, feed_source, title[:60])
+    return jsonify({"ok": True, "id": article.id, "title": article.title, "feed_source": feed_source})
+
+
 @app.route("/articles/<int:id>/edit", methods=["POST"])
 def edit_article(id):
     article = Article.query.get_or_404(id)
@@ -223,10 +357,14 @@ def resummary_article(id):
 
     style = (request.form.get("style") or "つぶやき型").strip()
     success = summarize_article(app, id, style=style)
+    # summarize_article は内部で別 app_context を開くため、セッションを明示的にリフレッシュ
+    db.session.expire_all()
+    article = db.session.get(Article, id)
+    logger.info("resummary article=%d success=%s error_message=%r", id, success, article.error_message if article else None)
     if success:
-        article = Article.query.get(id)
         return jsonify({"success": True, "summary": article.summary, "length": len(article.summary or "")})
-    return jsonify({"success": False, "error": "要約の生成に失敗しました"})
+    error_msg = (article.error_message if article else None) or "要約の生成に失敗しました（サーバーログを確認してください）"
+    return jsonify({"success": False, "error": error_msg})
 
 
 # ── 投稿キュー ─────────────────────────────────────────────────────────────
@@ -376,6 +514,7 @@ def settings():
         for key in ("threads_user_id", "threads_access_token", "anthropic_api_key",
                     "post_times", "collect_interval_hours",
                     "youtube_api_key", "youtube_collect_interval_hours",
+                    "youtube_min_view_count", "youtube_max_view_count",
                     "meta_app_id", "meta_app_secret", "app_base_url"):
             Setting.set(key, (request.form.get(key) or "").strip())
 
@@ -403,6 +542,8 @@ def settings():
         "collect_interval_hours": Setting.get("collect_interval_hours", "2"),
         "youtube_api_key": Setting.get("youtube_api_key"),
         "youtube_collect_interval_hours": Setting.get("youtube_collect_interval_hours", "6"),
+        "youtube_min_view_count": Setting.get("youtube_min_view_count", "5000000"),
+        "youtube_max_view_count": Setting.get("youtube_max_view_count", "0"),
         "test_mode": Setting.get("test_mode", "true") == "true",
         "rss_feeds": json.loads(Setting.get("rss_feeds", "[]") or "[]"),
         "meta_app_id": Setting.get("meta_app_id"),
@@ -411,6 +552,18 @@ def settings():
         "callback_url": base_url + "/auth/threads/callback",
     }
     return render_template("settings.html", settings=current)
+
+
+@app.route("/api/quick-setting", methods=["POST"])
+def quick_setting():
+    data = request.get_json(silent=True) or {}
+    key = data.get("key", "")
+    value = str(data.get("value", ""))
+    _allowed = {"youtube_min_view_count", "youtube_max_view_count"}
+    if key not in _allowed:
+        return jsonify({"ok": False, "error": "invalid key"}), 400
+    Setting.set(key, value)
+    return jsonify({"ok": True})
 
 
 # ── 週間スケジュール ──────────────────────────────────────────────────────────
@@ -811,6 +964,28 @@ def fetch_engagers():
             f"エンゲージメント取得完了: {result['found']}名発見 / {result['added']}名追加",
             "success",
         )
+    return redirect(url_for("follow_candidates"))
+
+
+@app.route("/follow-candidates/scan-kpop", methods=["POST"])
+def scan_kpop_accounts():
+    from follow_candidates import fetch_kpop_account_repliers, DEFAULT_KPOP_ACCOUNTS
+    accounts_raw = (request.form.get("accounts") or "").strip()
+    if accounts_raw:
+        Setting.set("kpop_seed_accounts", accounts_raw)
+        accounts = [a.strip().lstrip("@").lower() for a in accounts_raw.split(",") if a.strip()]
+    else:
+        accounts = None
+    result = fetch_kpop_account_repliers(app, accounts=accounts)
+    log = result["scan_log"]
+    ok_parts = [f"@{r['account']}({r.get('repliers',0)}名)" for r in log if r.get("ok")]
+    ng_parts = [f"@{r['account']}" for r in log if not r.get("ok")]
+    msg = f"スキャン完了: {result['added']}名追加 / {result['found']}名発見"
+    if ok_parts:
+        msg += " — " + " ".join(ok_parts[:6])
+    if ng_parts:
+        msg += f" ※取得失敗: {', '.join(ng_parts)}"
+    flash(msg, "success" if result["found"] > 0 else "secondary")
     return redirect(url_for("follow_candidates"))
 
 

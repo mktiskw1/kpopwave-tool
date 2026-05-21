@@ -25,6 +25,21 @@
   {% endfor %}
 </div>
 
+<!-- URL手動追加 -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-link-45deg me-2"></i>URLから記事を追加</div>
+  <div class="card-body">
+    <div class="d-flex gap-2">
+      <input type="url" id="add-url-input" class="form-control" placeholder="https://... （記事URL または YouTube URL）"
+             style="font-size:.88rem" onkeydown="if(event.key==='Enter') addFromUrl()">
+      <button class="btn btn-accent px-3 flex-shrink-0" onclick="addFromUrl()" id="add-url-btn">
+        <i class="bi bi-plus-lg me-1"></i>追加
+      </button>
+    </div>
+    <div id="add-url-result" class="mt-2" style="font-size:.83rem;min-height:1.2em"></div>
+  </div>
+</div>
+
 <!-- 最近のアクティビティ -->
 <div class="card">
   <div class="card-header d-flex justify-content-between align-items-center">
@@ -69,4 +84,50 @@
   </div>
 </div>
 
+{% endblock %}
+
+{% block scripts %}
+<script>
+function addFromUrl() {
+  var input = document.getElementById('add-url-input');
+  var btn   = document.getElementById('add-url-btn');
+  var result = document.getElementById('add-url-result');
+  var url = input.value.trim();
+  if (!url) { input.focus(); return; }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  result.innerHTML = '';
+
+  fetch('/articles/add-from-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: url })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-plus-lg me-1"></i>追加';
+    if (d.ok) {
+      input.value = '';
+      result.innerHTML =
+        '<span style="color:var(--accent3)"><i class="bi bi-check-circle-fill me-1"></i>' +
+        '追加しました: <strong>' + escHtml(d.title) + '</strong>' +
+        ' <small style="color:var(--text-muted)">(' + escHtml(d.feed_source) + ')</small>' +
+        ' — <a href="/pending">承認待ち画面で確認</a></span>';
+    } else {
+      result.innerHTML = '<span style="color:var(--accent)"><i class="bi bi-exclamation-circle-fill me-1"></i>' + escHtml(d.error) + '</span>';
+    }
+  })
+  .catch(function() {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-plus-lg me-1"></i>追加';
+    result.innerHTML = '<span style="color:var(--accent)">通信エラーが発生しました</span>';
+  });
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
 {% endblock %}

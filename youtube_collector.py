@@ -200,6 +200,14 @@ def collect_youtube_videos(app) -> int:
         db_key = Setting.get("youtube_api_key", "")
         env_key = os.getenv("YOUTUBE_API_KEY", "")
         api_key = db_key or env_key
+        try:
+            min_view_count = int(Setting.get("youtube_min_view_count", str(MIN_VIEW_COUNT)))
+        except (ValueError, TypeError):
+            min_view_count = MIN_VIEW_COUNT
+        try:
+            max_view_count = int(Setting.get("youtube_max_view_count", "0"))
+        except (ValueError, TypeError):
+            max_view_count = 0
 
     logger.info(
         "YouTube APIキー — DB: %s / ENV: %s",
@@ -359,25 +367,29 @@ def collect_youtube_videos(app) -> int:
             f"{vc:,}", c["title"][:55], c["channel_title"][:25], pub,
         )
 
-    if MIN_VIEW_COUNT > 0:
-        before_view_filter = len(candidates)
-        passed = [
-            c for c in candidates
-            if video_stats.get(c["video_id"], {}).get("viewCount", 0) >= MIN_VIEW_COUNT
-        ]
+    before_view_filter = len(candidates)
+    passed = candidates
+    if min_view_count > 0:
+        passed = [c for c in passed if video_stats.get(c["video_id"], {}).get("viewCount", 0) >= min_view_count]
+    if max_view_count > 0:
+        passed = [c for c in passed if video_stats.get(c["video_id"], {}).get("viewCount", 0) <= max_view_count]
+
+    if min_view_count > 0 or max_view_count > 0:
+        filter_parts = []
+        if min_view_count > 0:
+            filter_parts.append(f"{min_view_count:,}以上")
+        if max_view_count > 0:
+            filter_parts.append(f"{max_view_count:,}以下")
         logger.info(
-            "再生数フィルタ(%d万以上) — 通過: %d件 / 除外: %d件",
-            MIN_VIEW_COUNT // 10_000, len(passed), before_view_filter - len(passed),
+            "再生数フィルタ(%s) — 通過: %d件 / 除外: %d件",
+            " / ".join(filter_parts), len(passed), before_view_filter - len(passed),
         )
         if not passed:
-            logger.warning(
-                "再生数フィルタ後0件 — 閾値(%d万)を下げるか MIN_VIEW_COUNT=0 で無効化してください",
-                MIN_VIEW_COUNT // 10_000,
-            )
+            logger.warning("再生数フィルタ後0件 — 管理画面の再生数設定を確認してください")
             return 0
         candidates = passed
     else:
-        logger.info("再生数フィルタ: 無効 (MIN_VIEW_COUNT=0) — 全%d件を対象", len(candidates))
+        logger.info("再生数フィルタ: 無効 (最低・最高ともに0) — 全%d件を対象", len(candidates))
 
     # Phase 3: チャンネル登録者数を取得して公式チャンネル優先でソート
     channel_ids = list({c["channel_id"] for c in candidates if c["channel_id"]})

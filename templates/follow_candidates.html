@@ -13,10 +13,46 @@
         <i class="bi bi-heart-fill"></i> エンゲージメント取得
       </button>
     </form>
+    <button class="btn btn-sm btn-outline-secondary"
+            data-bs-toggle="collapse" data-bs-target="#kpopScanForm"
+            style="border-color:#AB47BC;color:#AB47BC">
+      <i class="bi bi-music-note-beamed"></i> KPOPスキャン
+    </button>
     <form action="/follow-candidates/refresh" method="post">
       <button type="submit" class="btn btn-accent btn-sm">
         <i class="bi bi-arrow-repeat"></i> 候補を更新
       </button>
+    </form>
+  </div>
+</div>
+
+<!-- KPOPスキャンパネル -->
+<div class="collapse mb-3" id="kpopScanForm">
+  <div class="card p-3" style="border-color:#AB47BC22;background:linear-gradient(135deg,#FDF4FF,#F6EEFF)">
+    <div class="mb-2" style="font-size:.82rem;font-weight:700;color:#AB47BC">
+      <i class="bi bi-music-note-beamed me-1"></i>KPOPアカウントの返信者をフォロー候補に追加
+    </div>
+    <p class="mb-2" style="font-size:.77rem;color:var(--text-muted)">
+      指定したKPOPアカウントの最新スレッドへ返信しているユーザーを自動取得します。
+      公式Threads APIではフォロワーリスト取得が非対応なため、返信者（KPOPファン率が高い）を代替収集します。
+    </p>
+    <form action="/follow-candidates/scan-kpop" method="post">
+      <div class="mb-2">
+        <label style="font-size:.78rem;color:var(--text-muted);display:block;margin-bottom:4px">
+          スキャン対象アカウント（カンマ区切り、空白で内蔵デフォルトリストを使用）
+        </label>
+        <textarea name="accounts" class="form-control" rows="3"
+                  style="font-size:.78rem;font-family:monospace"
+                  placeholder="例: blackpinkofficial, newjeans_official, aespa_official">{{ kpop_seed_accounts }}</textarea>
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        <button type="submit" class="btn btn-sm" style="background:#AB47BC;color:#fff;border:none">
+          <i class="bi bi-search me-1"></i>スキャン開始
+        </button>
+        <span style="font-size:.73rem;color:var(--text-muted)">
+          ※ アカウントごとに数秒かかります。スキャン中はページが応答しません。
+        </span>
+      </div>
     </form>
   </div>
 </div>

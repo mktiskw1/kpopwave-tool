@@ -46,7 +46,7 @@
         <!-- アクションボタン -->
         <div class="d-flex gap-1 flex-shrink-0">
           <button type="button" class="btn btn-success btn-sm px-2" title="承認してキューへ"
-                  onclick="submitForm('{{ url_for('approve_article', id=a.id) }}')">
+                  onclick="approveArticle({{ a.id }}, this)">
             <i class="bi bi-check-lg"></i> 承認
           </button>
           <button type="button" class="btn btn-secondary btn-sm px-2" title="却下"
@@ -200,7 +200,48 @@ function deleteSingle(id) {
   f.submit();
 }
 
-// ── 承認・却下（bulk-form 内から独立したフォームとして送信） ─────────────
+// ── 承認（Ajax：ページ遷移なし） ───────────────────────────────────────
+function approveArticle(id, btn) {
+  btn.disabled = true;
+  const orig = btn.innerHTML;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  fetch('/articles/' + id + '/approve', {
+    method: 'POST',
+    headers: { 'X-Requested-With': 'fetch' }
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      var card = document.getElementById('card-' + id);
+      if (card) card.remove();
+      // ヘッダーのカウンターを減らす
+      var badge = document.querySelector('h4 .badge-pending');
+      if (badge) {
+        var n = parseInt(badge.textContent, 10) - 1;
+        badge.textContent = n;
+      }
+      // サイドバーのカウンターも減らす
+      var sbBadge = document.querySelector('.nav-link[href*="pending"] .badge-pending');
+      if (sbBadge) {
+        var n2 = parseInt(sbBadge.textContent, 10) - 1;
+        if (n2 <= 0) sbBadge.remove(); else sbBadge.textContent = n2;
+      }
+      // 記事が0件になったらリロード（空メッセージを表示するため）
+      if (!document.querySelector('[id^="card-"]')) location.reload();
+    } else {
+      btn.disabled = false;
+      btn.innerHTML = orig;
+      alert('承認に失敗しました');
+    }
+  })
+  .catch(function() {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+    alert('通信エラーが発生しました');
+  });
+}
+
+// ── 却下・削除（bulk-form 内から独立したフォームとして送信） ───────────
 function submitForm(action) {
   const f = document.createElement('form');
   f.method = 'post';
