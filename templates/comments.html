@@ -1,0 +1,261 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<!-- ヘッダー -->
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="fw-bold mb-0">💬 コメント管理</h4>
+  <form action="{{ url_for('api_fetch_comments') }}" method="post">
+    <button type="submit" class="btn btn-accent btn-sm">
+      <i class="bi bi-arrow-repeat me-1"></i> コメントを取得
+    </button>
+  </form>
+</div>
+
+<!-- フィルタータブ -->
+<div class="d-flex gap-2 mb-4 flex-wrap">
+  {% for tab_id, tab_label in [('unread','📬 未読'),('all','📋 全て'),('replied','✅ 返信済み')] %}
+  <a href="?tab={{ tab_id }}"
+     class="btn btn-sm {% if filter_tab == tab_id %}btn-accent{% else %}btn-outline-secondary{% endif %}"
+     style="border-radius:20px;font-weight:700">
+    {{ tab_label }}
+    {% if tab_id == 'unread' and unread_comments_count > 0 %}
+      <span class="ms-1 px-2 py-0 rounded-pill"
+            style="background:rgba(255,255,255,.3);font-size:.72rem;font-weight:800">
+        {{ unread_comments_count }}
+      </span>
+    {% endif %}
+  </a>
+  {% endfor %}
+</div>
+
+<!-- コメント一覧 -->
+{% if comments %}
+  {% for comment in comments %}
+  <div class="card mb-3"
+       style="border-left:4px solid {% if not comment.is_read %}var(--accent){% elif comment.is_replied %}var(--accent3){% else %}var(--border){% endif %};
+              transition:box-shadow .15s">
+    <div class="card-body py-3">
+
+      <!-- ヘッダー行 -->
+      <div class="d-flex justify-content-between align-items-start mb-2">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <span class="fw-bold" style="color:var(--accent);font-size:.92rem">
+            @{{ comment.username or "unknown" }}
+          </span>
+          {% if not comment.is_read %}
+            <span class="badge badge-pending" style="font-size:.62rem;padding:.25em .55em">未読</span>
+          {% endif %}
+          {% if comment.is_replied %}
+            <span class="badge bg-success" style="font-size:.62rem;padding:.25em .55em">返信済み</span>
+          {% endif %}
+        </div>
+        <span class="text-muted" style="font-size:.73rem;white-space:nowrap">
+          {{ comment.timestamp | format_comment_time }}
+        </span>
+      </div>
+
+      <!-- コメント本文 -->
+      <div class="mb-2 p-2 rounded"
+           style="background:var(--surface2);border:1px solid var(--border);
+                  font-size:.88rem;white-space:pre-wrap;word-break:break-word;line-height:1.6">
+        {{ comment.text or "（本文なし）" }}
+      </div>
+
+      <!-- 投稿への参照 -->
+      <div class="mb-3 text-muted" style="font-size:.73rem">
+        <i class="bi bi-file-text me-1"></i>
+        {% if comment.post_id and post_titles.get(comment.post_id) %}
+          投稿：「{{ post_titles[comment.post_id] }}…」
+        {% elif comment.post_id %}
+          投稿ID: <code>{{ comment.post_id }}</code>
+        {% else %}
+          投稿情報なし
+        {% endif %}
+      </div>
+
+      <!-- アクションボタン -->
+      <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary btn-generate-ai" data-id="{{ comment.id }}">
+          ✨ AI返信生成
+        </button>
+        <button class="btn btn-sm btn-outline-danger btn-like" data-id="{{ comment.id }}">
+          ❤️ いいね
+        </button>
+        <button class="btn btn-sm btn-primary btn-reply-toggle" data-id="{{ comment.id }}">
+          📤 返信する
+        </button>
+      </div>
+
+      <!-- いいねステータス -->
+      <div id="like-status-{{ comment.id }}" style="font-size:.73rem;min-height:1rem;margin-top:4px;display:none"></div>
+
+      <!-- 返信エリア（非表示） -->
+      <div class="reply-area mt-3 d-none" id="reply-area-{{ comment.id }}">
+        <textarea class="form-control mb-2" id="reply-text-{{ comment.id }}"
+                  rows="3"
+                  placeholder="返信文を入力…（✨ AI返信生成で自動入力できます）"
+                  style="font-size:.85rem;resize:vertical"></textarea>
+        <div class="d-flex gap-2 align-items-center flex-wrap">
+          <button class="btn btn-sm btn-accent btn-post-reply" data-id="{{ comment.id }}">
+            <i class="bi bi-send me-1"></i> 投稿する
+          </button>
+          <button class="btn btn-sm btn-outline-secondary btn-cancel-reply" data-id="{{ comment.id }}">
+            キャンセル
+          </button>
+          <span id="reply-status-{{ comment.id }}"
+                style="font-size:.76rem;color:var(--text-muted)"></span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  {% endfor %}
+
+{% else %}
+  <!-- 空の状態 -->
+  <div class="text-center py-5">
+    <div style="font-size:3.5rem;opacity:.25">💬</div>
+    <p class="mt-3 text-muted fw-bold">
+      {% if filter_tab == 'unread' %}未読のコメントはありません
+      {% elif filter_tab == 'replied' %}返信済みのコメントはありません
+      {% else %}コメントがありません{% endif %}
+    </p>
+    <form action="{{ url_for('api_fetch_comments') }}" method="post" class="mt-2">
+      <button type="submit" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-repeat me-1"></i> Threadsからコメントを取得する
+      </button>
+    </form>
+  </div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  'use strict';
+
+  /* ── AI返信生成 ─────────────────────────── */
+  document.querySelectorAll('.btn-generate-ai').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      const id = this.dataset.id;
+      const self = this;
+      const orig = self.textContent;
+      self.textContent = '⏳ 生成中…';
+      self.disabled = true;
+
+      fetch('/api/comments/' + id + '/generate-reply', { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.ok) {
+            const area = document.getElementById('reply-area-' + id);
+            const ta = document.getElementById('reply-text-' + id);
+            area.classList.remove('d-none');
+            ta.value = data.text;
+            ta.focus();
+          } else {
+            alert('エラー: ' + (data.error || '生成に失敗しました'));
+          }
+        })
+        .catch(function () { alert('通信エラーが発生しました'); })
+        .finally(function () {
+          self.textContent = orig;
+          self.disabled = false;
+        });
+    });
+  });
+
+  /* ── いいね ─────────────────────────────── */
+  document.querySelectorAll('.btn-like').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      const id = this.dataset.id;
+      const self = this;
+      self.disabled = true;
+
+      fetch('/api/comments/' + id + '/like', { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          const st = document.getElementById('like-status-' + id);
+          if (data.ok) {
+            self.textContent = '❤️ いいね済み';
+            self.classList.remove('btn-outline-danger');
+            self.classList.add('btn-danger');
+            if (st) { st.style.display = ''; st.style.color = 'var(--accent3)'; st.textContent = 'いいねしました ✓'; }
+          } else {
+            if (st) { st.style.display = ''; st.style.color = 'var(--accent)'; st.textContent = 'エラー: ' + (data.error || 'いいねに失敗しました'); }
+            self.disabled = false;
+          }
+        })
+        .catch(function () {
+          const st = document.getElementById('like-status-' + id);
+          if (st) { st.style.display = ''; st.style.color = 'var(--accent)'; st.textContent = '通信エラー'; }
+          self.disabled = false;
+        });
+    });
+  });
+
+  /* ── 返信エリア 表示/非表示 ──────────────── */
+  document.querySelectorAll('.btn-reply-toggle').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      const area = document.getElementById('reply-area-' + this.dataset.id);
+      area.classList.toggle('d-none');
+      if (!area.classList.contains('d-none')) {
+        document.getElementById('reply-text-' + this.dataset.id).focus();
+      }
+    });
+  });
+
+  /* ── 返信キャンセル ──────────────────────── */
+  document.querySelectorAll('.btn-cancel-reply').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.getElementById('reply-area-' + this.dataset.id).classList.add('d-none');
+    });
+  });
+
+  /* ── 返信投稿 ───────────────────────────── */
+  document.querySelectorAll('.btn-post-reply').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      const id = this.dataset.id;
+      const text = document.getElementById('reply-text-' + id).value.trim();
+      const st = document.getElementById('reply-status-' + id);
+      const self = this;
+
+      if (!text) {
+        st.textContent = '返信文を入力してください';
+        st.style.color = 'var(--accent)';
+        return;
+      }
+
+      self.disabled = true;
+      st.textContent = '送信中…';
+      st.style.color = 'var(--text-muted)';
+
+      fetch('/api/comments/' + id + '/reply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text }),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.ok) {
+            st.textContent = '返信しました！ ✓';
+            st.style.color = 'var(--accent3)';
+            document.getElementById('reply-text-' + id).value = '';
+            setTimeout(function () { window.location.reload(); }, 1200);
+          } else {
+            st.textContent = 'エラー: ' + (data.error || '返信に失敗しました');
+            st.style.color = 'var(--accent)';
+            self.disabled = false;
+          }
+        })
+        .catch(function () {
+          st.textContent = '通信エラーが発生しました';
+          st.style.color = 'var(--accent)';
+          self.disabled = false;
+        });
+    });
+  });
+
+})();
+</script>
+{% endblock %}

@@ -104,9 +104,16 @@
             <span style="font-size:.75rem;color:var(--text-muted);font-weight:normal;display:block;margin-top:2px">固定範囲（フォロワー数 0 人時）</span>
           {% endif %}
         {% else %}
-          Threads 認証後に表示
+          <span style="font-size:.9rem;color:var(--text-muted)">取得できません</span>
         {% endif %}
       </div>
+      {% if min_target is none %}
+      <div class="mt-1" style="font-size:.72rem;color:#E65100;line-height:1.4">
+        <i class="bi bi-exclamation-triangle-fill me-1"></i>
+        設定ページの「🔄 トークンを再取得」で再認証すると表示されます<br>
+        <span style="color:var(--text-muted)">（threads_manage_insights 権限が必要です）</span>
+      </div>
+      {% endif %}
     </div>
   </div>
   <div class="col-auto ms-auto d-flex align-items-center">

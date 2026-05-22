@@ -83,12 +83,35 @@
                      value="{{ settings.threads_user_id }}" placeholder="数字の ID">
             </div>
             <div class="mb-3">
-              <label class="form-label" style="font-size:.85rem">アクセストークン</label>
+              <label class="form-label d-flex justify-content-between align-items-center" style="font-size:.85rem">
+                アクセストークン
+                <a href="{{ url_for('threads_auth_start') }}"
+                   class="btn btn-sm btn-outline-success py-0 px-2"
+                   style="font-size:.72rem;border-radius:12px;font-weight:700">
+                  🔄 トークンを再取得
+                </a>
+              </label>
               <input type="password" class="form-control" name="threads_access_token"
                      value="{{ settings.threads_access_token }}" placeholder="THR...">
-              <div class="form-text" style="font-size:.75rem">
-                threads_basic + threads_content_publish 権限が必要（有効期限: 60日）
-              </div>
+              {% if settings.threads_token_expires_in_days is not none %}
+                {% if settings.threads_token_expires_in_days <= 0 %}
+                  <div class="form-text" style="font-size:.75rem;color:var(--accent);font-weight:700">
+                    ⚠️ トークンの有効期限が切れています。再取得してください。
+                  </div>
+                {% elif settings.threads_token_expires_in_days <= 10 %}
+                  <div class="form-text" style="font-size:.75rem;color:#E65100;font-weight:700">
+                    ⚠️ 有効期限: あと {{ settings.threads_token_expires_in_days }} 日（まもなく期限切れ）
+                  </div>
+                {% else %}
+                  <div class="form-text" style="font-size:.75rem;color:var(--accent3)">
+                    ✓ 有効期限: あと {{ settings.threads_token_expires_in_days }} 日
+                  </div>
+                {% endif %}
+              {% else %}
+                <div class="form-text" style="font-size:.75rem">
+                  全スコープ権限が必要（有効期限: 60日）。「🔄 トークンを再取得」で自動取得できます。
+                </div>
+              {% endif %}
             </div>
             <div class="form-check">
               <input type="checkbox" class="form-check-input" name="test_mode" id="test_mode"

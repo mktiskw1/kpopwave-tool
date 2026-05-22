@@ -11,11 +11,18 @@ from dotenv import load_dotenv
 from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
 
 from config import Config
-from database import Article, Setting, db
+from database import Article, Comment, Setting, db
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+_THREADS_SCOPES = (
+    "threads_basic,threads_content_publish,threads_manage_replies,"
+    "threads_read_replies,threads_manage_mentions,threads_manage_insights,"
+    "threads_profile_discovery,threads_delete,threads_keyword_search,"
+    "threads_share_to_instagram"
+)
 
 DEFAULT_FEEDS = [
     {"name": "Soompi",      "url": "https://www.soompi.com/feed/"},
@@ -125,9 +132,24 @@ def inject_globals():
     return {
         "pending_count": Article.query.filter_by(status="pending").count(),
         "queued_count": Article.query.filter_by(status="queued").count(),
+        "unread_comments_count": Comment.query.filter_by(is_read=0).count(),
         "youtube_min_view_count": Setting.get("youtube_min_view_count", "5000000"),
         "youtube_max_view_count": Setting.get("youtube_max_view_count", "0"),
     }
+
+
+@app.template_filter("format_comment_time")
+def format_comment_time_filter(ts_str):
+    """Threads API のタイムスタンプ（ISO形式）→ JST 表示。"""
+    if not ts_str:
+        return ""
+    try:
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(ts_str.replace("+0000", "+00:00"))
+        jst = dt.astimezone(ZoneInfo("Asia/Tokyo"))
+        return jst.strftime("%m/%d %H:%M")
+    except Exception:
+        return ts_str
 
 
 # ── ダッシュボード ──────────────────────────────────────────────────────────
@@ -534,9 +556,22 @@ def settings():
         return redirect(url_for("settings"))
 
     base_url = Setting.get("app_base_url", "http://localhost:5000").rstrip("/")
+
+    # トークン有効期限の計算
+    token_acquired_at_str = Setting.get("threads_token_acquired_at", "")
+    threads_token_expires_in_days = None
+    if token_acquired_at_str:
+        try:
+            acquired_at = datetime.fromisoformat(token_acquired_at_str)
+            expires_at = acquired_at + timedelta(days=60)
+            threads_token_expires_in_days = max(0, (expires_at - datetime.utcnow()).days)
+        except Exception:
+            pass
+
     current = {
         "threads_user_id": Setting.get("threads_user_id"),
         "threads_access_token": Setting.get("threads_access_token"),
+        "threads_token_expires_in_days": threads_token_expires_in_days,
         "anthropic_api_key": Setting.get("anthropic_api_key"),
         "post_times": Setting.get("post_times", "09:00,15:00,21:00"),
         "collect_interval_hours": Setting.get("collect_interval_hours", "2"),
@@ -632,7 +667,7 @@ def threads_auth_start():
     auth_url = "https://threads.net/oauth/authorize?" + urlencode({
         "client_id": app_id,
         "redirect_uri": redirect_uri,
-        "scope": "threads_basic,threads_content_publish",
+        "scope": _THREADS_SCOPES,
         "response_type": "code",
         "state": state,
     })
@@ -656,7 +691,7 @@ def threads_auth_manual():
     auth_url = "https://threads.net/oauth/authorize?" + urlencode({
         "client_id": app_id,
         "redirect_uri": redirect_uri,
-        "scope": "threads_basic,threads_content_publish",
+        "scope": _THREADS_SCOPES,
         "response_type": "code",
         "state": state,
     })
@@ -708,9 +743,11 @@ def threads_auth_exchange():
             timeout=15,
         )
         resp2.raise_for_status()
-        long_token = resp2.json().get("access_token")
+        resp2_data = resp2.json()
+        long_token = resp2_data.get("access_token")
         if not long_token:
             raise ValueError(f"長期トークンが見つかりません: {resp2.text}")
+        expires_in_days = resp2_data.get("expires_in", 5184000) // 86400
 
         resp3 = requests.get(
             "https://graph.threads.net/v1.0/me",
@@ -724,9 +761,10 @@ def threads_auth_exchange():
 
         Setting.set("threads_access_token", long_token)
         Setting.set("threads_user_id", user_id)
+        Setting.set("threads_token_acquired_at", datetime.utcnow().isoformat())
         flash(
-            f"Threads 認証成功！ @{username}（ID: {user_id}）の"
-            "アクセストークンを取得・保存しました（有効期限: 60日）",
+            f"トークンを更新しました！ @{username}（ID: {user_id}）"
+            f"有効期限：{expires_in_days}日後",
             "success",
         )
     except Exception as e:
@@ -789,9 +827,11 @@ def threads_auth_callback():
             timeout=15,
         )
         resp2.raise_for_status()
-        long_token = resp2.json().get("access_token")
+        resp2_data = resp2.json()
+        long_token = resp2_data.get("access_token")
         if not long_token:
             raise ValueError(f"長期トークンが見つかりません: {resp2.text}")
+        expires_in_days = resp2_data.get("expires_in", 5184000) // 86400
 
         # ユーザー情報取得
         resp3 = requests.get(
@@ -806,9 +846,10 @@ def threads_auth_callback():
 
         Setting.set("threads_access_token", long_token)
         Setting.set("threads_user_id", user_id)
+        Setting.set("threads_token_acquired_at", datetime.utcnow().isoformat())
         flash(
-            f"Threads 認証成功！ @{username}（ID: {user_id}）の"
-            "アクセストークンを取得・保存しました（有効期限: 60日）",
+            f"トークンを更新しました！ @{username}（ID: {user_id}）"
+            f"有効期限：{expires_in_days}日後",
             "success",
         )
     except Exception as e:
@@ -816,6 +857,76 @@ def threads_auth_callback():
         flash(f"認証処理中にエラーが発生しました: {e}", "danger")
 
     return redirect(url_for("settings"))
+
+
+# ── コメント管理 ───────────────────────────────────────────────────────────
+
+
+@app.route("/comments")
+def comments_page():
+    filter_tab = request.args.get("tab", "unread")
+    if filter_tab == "unread":
+        comments_list = Comment.query.filter_by(is_read=0).order_by(Comment.created_at.desc()).all()
+    elif filter_tab == "replied":
+        comments_list = Comment.query.filter_by(is_replied=1).order_by(Comment.created_at.desc()).all()
+    else:
+        comments_list = Comment.query.order_by(Comment.created_at.desc()).all()
+
+    # 各コメントに対応する投稿タイトルを取得
+    post_ids = {c.post_id for c in comments_list if c.post_id}
+    post_titles = {}
+    for pid in post_ids:
+        article = Article.query.filter_by(threads_post_id=pid).first()
+        if article:
+            post_titles[pid] = article.title[:20]
+
+    return render_template(
+        "comments.html",
+        comments=comments_list,
+        filter_tab=filter_tab,
+        post_titles=post_titles,
+    )
+
+
+@app.route("/api/comments", methods=["GET", "POST"])
+def api_fetch_comments():
+    from comments import fetch_comments as _fetch
+    result = _fetch(app)
+    if "error" in result:
+        flash(result["error"], "danger")
+    else:
+        flash(f"コメント取得完了: {result['fetched']}件取得 / {result['new']}件新規", "success")
+    return redirect(url_for("comments_page"))
+
+
+@app.route("/api/comments/<reply_id>/like", methods=["POST"])
+def api_like_comment(reply_id):
+    from comments import like_comment
+    return jsonify(like_comment(app, reply_id))
+
+
+@app.route("/api/comments/<reply_id>/reply", methods=["POST"])
+def api_reply_comment(reply_id):
+    from comments import post_reply
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "返信文を入力してください"})
+    return jsonify(post_reply(app, reply_id, text))
+
+
+@app.route("/api/comments/<reply_id>/generate-reply", methods=["POST"])
+def api_generate_reply(reply_id):
+    from comments import generate_ai_reply
+    return jsonify(generate_ai_reply(app, reply_id))
+
+
+@app.route("/api/comments/<reply_id>/mark-read", methods=["POST"])
+def api_mark_comment_read(reply_id):
+    comment = Comment.query.filter_by(id=reply_id).first_or_404()
+    comment.is_read = 1
+    db.session.commit()
+    return jsonify({"ok": True})
 
 
 # ── プライバシーポリシー ────────────────────────────────────────────────────
@@ -1005,6 +1116,83 @@ def api_stats():
         s: Article.query.filter_by(status=s).count()
         for s in ("pending", "queued", "posted", "rejected", "failed")
     })
+
+
+@app.route("/api/debug/threads")
+def debug_threads_api():
+    """Threads API 診断エンドポイント（開発用）。
+    ブラウザで開くと各エンドポイントの生レスポンスを確認できます。"""
+    import time as _time
+    _BASE = "https://graph.threads.net/v1.0"
+
+    token   = Setting.get("threads_access_token", "")
+    user_id = Setting.get("threads_user_id", "")
+
+    if not token or not user_id:
+        return jsonify({"error": "threads_access_token / threads_user_id が未設定です"})
+
+    token_preview = f"{token[:12]}...{token[-4:]}" if len(token) > 20 else "短いトークン"
+    now_ts   = int(_time.time())
+    since_ts = now_ts - 86400 * 3
+
+    checks = [
+        ("①  GET /me (基本フィールド: id,username,name)",
+         f"{_BASE}/me",
+         {"fields": "id,username,name", "access_token": token}),
+
+        ("②  GET /me (followers_count フィールド)",
+         f"{_BASE}/me",
+         {"fields": "id,username,followers_count", "access_token": token}),
+
+        ("③  GET /me (follower_count — 単数形バリアント)",
+         f"{_BASE}/me",
+         {"fields": "id,username,follower_count", "access_token": token}),
+
+        ("④  GET /{user_id} (followers_count フィールド)",
+         f"{_BASE}/{user_id}",
+         {"fields": "id,username,followers_count", "access_token": token}),
+
+        ("⑤  GET /{user_id}/insights (metric=followers_count, period=day)",
+         f"{_BASE}/{user_id}/insights",
+         {"metric": "followers_count", "period": "day",
+          "since": since_ts, "until": now_ts, "access_token": token}),
+
+        ("⑥  GET /{user_id}/insights (metric=views, period=day) ← 動作確認用",
+         f"{_BASE}/{user_id}/insights",
+         {"metric": "views", "period": "day",
+          "since": since_ts, "until": now_ts, "access_token": token}),
+
+        ("⑦  GET /me (フィールド指定なし — 利用可能なデフォルトフィールドを確認)",
+         f"{_BASE}/me",
+         {"access_token": token}),
+    ]
+
+    results = {}
+    for label, url, params in checks:
+        safe_params = {k: (v if k != "access_token" else token_preview) for k, v in params.items()}
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            results[label] = {
+                "url": url,
+                "params": safe_params,
+                "status": r.status_code,
+                "body": r.json(),
+            }
+        except Exception as e:
+            results[label] = {"url": url, "params": safe_params, "error": str(e)}
+
+    import json as _json
+    from flask import Response
+    payload = {
+        "user_id_in_db": user_id,
+        "token_preview": token_preview,
+        "token_length": len(token),
+        "results": results,
+    }
+    return Response(
+        _json.dumps(payload, ensure_ascii=False, indent=2),
+        content_type="application/json; charset=utf-8",
+    )
 
 
 # ── 起動 ───────────────────────────────────────────────────────────────────

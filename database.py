@@ -83,3 +83,16 @@ class FollowCandidate(db.Model):
     follow_status = db.Column(db.String(20), nullable=True)   # unfollowed / followed
     priority = db.Column(db.String(10), nullable=True)        # high / medium / low
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Comment(db.Model):
+    __tablename__ = "comments"
+
+    id = db.Column(db.String(100), primary_key=True)
+    post_id = db.Column(db.String(100), nullable=True)   # root post の Threads ID
+    username = db.Column(db.String(200), nullable=True)
+    text = db.Column(db.Text, nullable=True)
+    timestamp = db.Column(db.String(50), nullable=True)
+    is_read = db.Column(db.Integer, default=0)
+    is_replied = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)

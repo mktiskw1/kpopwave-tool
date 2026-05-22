@@ -88,6 +88,12 @@ def _collect_youtube_job(app):
     collect_youtube_videos(app)
 
 
+def _collect_comments_job(app):
+    from comments import fetch_comments
+    logger.info("Running scheduled comment collection")
+    fetch_comments(app)
+
+
 def _post_job(app):
     from threads_api import post_to_threads
 
@@ -238,6 +244,14 @@ def setup_scheduler(app):
         IntervalTrigger(minutes=30),
         args=[app],
         id="rollover_overdue",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        _collect_comments_job,
+        IntervalTrigger(minutes=30),
+        args=[app],
+        id="collect_comments",
         replace_existing=True,
     )
 

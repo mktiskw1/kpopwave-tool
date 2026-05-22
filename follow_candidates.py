@@ -4,7 +4,7 @@ import os
 import re
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from database import FollowCandidate, Setting, db
 
@@ -66,17 +66,86 @@ def get_my_follower_count(app) -> "int | None":
         user_id = Setting.get("threads_user_id") or os.getenv("THREADS_USER_ID", "")
         token   = Setting.get("threads_access_token") or os.getenv("THREADS_ACCESS_TOKEN", "")
     if not user_id or not token:
+        logger.info("フォロワー数取得スキップ: 認証情報が未設定")
         return None
+
+    token_preview = f"{token[:12]}...{token[-4:]}" if len(token) > 20 else "***"
+    logger.info("フォロワー数取得開始: user_id=%s token=%s", user_id, token_preview)
+
+    # 方法1: GET /me?fields=followers_count（ユーザーオブジェクトフィールド）
+    try:
+        r = requests.get(
+            f"{THREADS_API}/me",
+            params={"fields": "id,username,followers_count", "access_token": token},
+            timeout=10,
+        )
+        logger.info("方法1 GET /me: status=%d body=%s", r.status_code, r.text[:300])
+        d = r.json()
+        if "error" not in d:
+            fc = d.get("followers_count")
+            if fc is not None:
+                logger.info("フォロワー数取得成功（方法1 /me フィールド）: %d", fc)
+                return fc
+            logger.info("方法1: followers_count フィールドが返されず → 方法2を試行")
+        else:
+            logger.warning("方法1エラー: code=%s message=%s", d["error"].get("code"), d["error"].get("message"))
+    except Exception as e:
+        logger.warning("方法1例外: %s", e)
+
+    # 方法2: GET /{user_id}/insights?metric=followers_count（Insights API）
+    try:
+        now_ts = int(time.time())
+        since_ts = now_ts - 86400 * 3  # 3日前
+        r = requests.get(
+            f"{THREADS_API}/{user_id}/insights",
+            params={
+                "metric": "followers_count",
+                "period": "day",
+                "since": since_ts,
+                "until": now_ts,
+                "access_token": token,
+            },
+            timeout=10,
+        )
+        logger.info("方法2 GET /%s/insights: status=%d body=%s", user_id, r.status_code, r.text[:300])
+        d = r.json()
+        if "error" not in d:
+            for item in d.get("data", []):
+                if item.get("name") == "followers_count":
+                    values = item.get("values", [])
+                    if values:
+                        fc = values[-1].get("value")
+                        if fc is not None:
+                            logger.info("フォロワー数取得成功（方法2 Insights）: %d", fc)
+                            return fc
+            logger.info("方法2: データなし → 方法3を試行")
+        else:
+            logger.warning("方法2エラー: code=%s message=%s", d["error"].get("code"), d["error"].get("message"))
+    except Exception as e:
+        logger.warning("方法2例外: %s", e)
+
+    # 方法3: GET /{user_id}?fields=followers_count（user_id 直接指定）
     try:
         r = requests.get(
             f"{THREADS_API}/{user_id}",
-            params={"fields": "followers_count", "access_token": token},
+            params={"fields": "id,username,followers_count", "access_token": token},
             timeout=10,
         )
-        return r.json().get("followers_count")
-    except Exception as exc:
-        logger.warning("自分のフォロワー数取得失敗: %s", exc)
-        return None
+        logger.info("方法3 GET /%s: status=%d body=%s", user_id, r.status_code, r.text[:300])
+        d = r.json()
+        if "error" not in d:
+            fc = d.get("followers_count")
+            if fc is not None:
+                logger.info("フォロワー数取得成功（方法3 /{user_id} フィールド）: %d", fc)
+                return fc
+            logger.info("方法3: followers_count フィールドなし")
+        else:
+            logger.warning("方法3エラー: code=%s message=%s", d["error"].get("code"), d["error"].get("message"))
+    except Exception as e:
+        logger.warning("方法3例外: %s", e)
+
+    logger.warning("フォロワー数取得: すべての方法が失敗 (user_id=%s) — /api/debug/threads で詳細を確認できます", user_id)
+    return None
 
 
 # ── Threads プロフィール取得（内部APIを使用） ────────────────────────────────
@@ -110,7 +179,7 @@ def _scrape_threads_profile(username: str) -> dict:
             timeout=12,
         )
         if r.status_code != 200:
-            logger.debug("Threads API HTTP %d for @%s", r.status_code, username)
+            logger.info("プロフィールAPI HTTP %d for @%s: %s", r.status_code, username, r.text[:120])
             return {}
 
         user = r.json().get("data", {}).get("user") or {}
@@ -139,7 +208,7 @@ def _scrape_threads_profile(username: str) -> dict:
         return result
 
     except Exception as exc:
-        logger.debug("プロフィールAPI失敗 @%s: %s", username, exc)
+        logger.info("プロフィールAPI例外 @%s: %s", username, exc)
         return {}
 
 
@@ -173,7 +242,7 @@ def _get_user_threads_internal(user_pk: str, count: int = 5) -> list:
             timeout=12,
         )
         if r.status_code != 200:
-            logger.debug("スレッド一覧取得 HTTP %d pk=%s", r.status_code, user_pk)
+            logger.info("スレッド一覧取得 HTTP %d pk=%s: %s", r.status_code, user_pk, r.text[:120])
             return []
         pks = []
         for item in r.json().get("items", []):
@@ -183,7 +252,7 @@ def _get_user_threads_internal(user_pk: str, count: int = 5) -> list:
                     pks.append(pk)
         return pks
     except Exception as e:
-        logger.debug("スレッド一覧内部API失敗 pk=%s: %s", user_pk, e)
+        logger.info("スレッド一覧内部API失敗 pk=%s: %s", user_pk, e)
         return []
 
 
@@ -517,18 +586,21 @@ def refresh_candidates(app) -> dict:
     purged = _purge_old_official(app)
     purged += purge_non_kpop(app)
 
-    # フォロワー数不明の非手動アカウントを削除（架空アカウント・前回スクレイプ失敗分）
+    # 30日以上前に追加されフォロワー数が取得できていないアカウントのみ削除
+    # （全削除するとスクレイプ失敗時に候補がすべて消えるため期間を設ける）
     with app.app_context():
-        unknown_purged = (
+        stale_cutoff = datetime.utcnow() - timedelta(days=30)
+        stale_purged = (
             FollowCandidate.query
             .filter(
                 FollowCandidate.followers_count.is_(None),
                 FollowCandidate.source != "manual",
+                FollowCandidate.updated_at < stale_cutoff,
             )
             .delete(synchronize_session=False)
         )
         db.session.commit()
-    purged += unknown_purged
+    purged += stale_purged
 
     new_reddit = scraped = removed_non_kpop = 0
 
@@ -554,13 +626,9 @@ def refresh_candidates(app) -> dict:
         profile = _scrape_threads_profile(uname)
 
         if not profile:
-            # プロフィール取得失敗 = アカウント不存在 → 手動追加以外は削除
-            if source != "manual":
-                with app.app_context():
-                    fc = FollowCandidate.query.filter_by(username=uname).first()
-                    if fc:
-                        db.session.delete(fc)
-                        db.session.commit()
+            # プロフィール取得失敗 → 削除せずスキップ（内部APIの一時的な不具合でも消えないように）
+            logger.info("プロフィール取得失敗（スキップ・保持）: @%s", uname)
+            time.sleep(0.5)
             continue
 
         bio = profile.get("bio", "") or ""
