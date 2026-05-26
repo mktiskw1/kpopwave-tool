@@ -12,7 +12,17 @@ logger = logging.getLogger(__name__)
 
 THREADS_API = "https://graph.threads.net/v1.0"
 # カルーセル1投稿あたりの最大画像枚数（Threads APIの上限は20）
-MAX_CAROUSEL_IMAGES = 4
+MAX_CAROUSEL_IMAGES = 20
+
+# 投稿画像から除外するドメイン（Googleデフォルト画像など）
+_EXCLUDE_DOMAINS = ("gstatic.com", "news.google.com")
+
+
+def _is_valid_image_url(url: str) -> bool:
+    """投稿に使用可能な画像URLか判定する。"""
+    if not url or not url.startswith("http"):
+        return False
+    return not any(d in url for d in _EXCLUDE_DOMAINS)
 
 
 def _get_credentials(app):
@@ -174,16 +184,21 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
         post_text     = article.summary
         thumbnail_url = article.thumbnail_url or ""
 
-        # image_urls（JSON配列）を優先、なければ thumbnail_url を使用
+        # thumbnail を1枚目、image_urls を全て追加（重複・除外ドメインを除く）
         images: list = []
+        if thumbnail_url and thumbnail_url.startswith("http"):
+            images.append(thumbnail_url)
         raw_image_urls = getattr(article, "image_urls", None)
         if raw_image_urls:
             try:
-                images = json.loads(raw_image_urls)
+                parsed = json.loads(raw_image_urls)
+                for url in parsed:
+                    if _is_valid_image_url(url) and url not in images:
+                        images.append(url)
+                        if len(images) >= MAX_CAROUSEL_IMAGES:
+                            break
             except (json.JSONDecodeError, TypeError):
-                images = []
-        if not images and thumbnail_url:
-            images = [thumbnail_url]
+                pass
 
     logger.info(
         "Threads投稿準備 article=%d images=%d test=%s",

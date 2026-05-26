@@ -60,13 +60,23 @@
         </div>
       </div>
 
-      <!-- サムネイル（YouTube動画） -->
-      {% if a.thumbnail_url %}
-      <div class="mb-2">
-        <a href="{{ a.url }}" target="_blank" rel="noopener">
-          <img src="{{ a.thumbnail_url }}" alt="thumbnail"
-               style="width:100%;max-width:400px;border-radius:6px;display:block">
+      <!-- 画像プレビュー（投稿と同じロジック: thumbnail→image_urls全件、最大20枚） -->
+      {% set imgs = images_map.get(a.id, []) %}
+      {% if imgs %}
+      <div class="mb-1" style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch">
+        {% for img_url in imgs %}
+        <a href="{{ a.url }}" target="_blank" rel="noopener" style="flex:0 0 auto">
+          <img src="{{ img_url }}"
+               style="height:100px;width:auto;max-width:160px;border-radius:6px;display:block;object-fit:cover">
         </a>
+        {% endfor %}
+      </div>
+      <div class="mb-2" style="font-size:.72rem;color:var(--text-muted)">
+        {% if imgs|length >= 2 %}
+          <i class="bi bi-images me-1"></i>カルーセル投稿（{{ imgs|length }}枚）
+        {% else %}
+          <i class="bi bi-image me-1"></i>画像投稿（1枚）
+        {% endif %}
       </div>
       {% endif %}
 

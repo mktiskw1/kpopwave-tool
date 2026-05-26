@@ -100,6 +100,37 @@ def _post_job(app):
     with app.app_context():
         test_mode = Setting.get("test_mode", "true").lower() == "true"
         now = datetime.utcnow()
+        now_jst = datetime.now(_JST)
+
+        all_queued = Article.query.filter_by(status="queued").order_by(
+            Article.scheduled_at.asc().nullsfirst()
+        ).all()
+
+        logger.info(
+            "[_post_job] 実行開始 now_utc=%s now_jst=%s test_mode=%s queued=%d件",
+            now.strftime("%Y-%m-%d %H:%M:%S"),
+            now_jst.strftime("%Y-%m-%d %H:%M:%S"),
+            test_mode,
+            len(all_queued),
+        )
+
+        # 各キュー記事の判定を1件ずつログ出力（タイムゾーン問題の診断用）
+        for a in all_queued:
+            if a.scheduled_at is None:
+                eligible = True
+                reason = "scheduled_at=NULL → 即時対象"
+            else:
+                eligible = a.scheduled_at <= now
+                diff_sec = (a.scheduled_at - now).total_seconds()
+                if eligible:
+                    reason = f"scheduled_at({a.scheduled_at}) <= now({now.strftime('%H:%M:%S')}) → 対象"
+                else:
+                    reason = (
+                        f"scheduled_at({a.scheduled_at}) > now({now.strftime('%H:%M:%S')}) "
+                        f"→ あと{int(diff_sec//60)}分{int(diff_sec%60)}秒"
+                    )
+            logger.info("[_post_job]   id=%-4d %s", a.id, reason)
+
         article = (
             Article.query.filter_by(status="queued")
             .filter(
@@ -111,29 +142,47 @@ def _post_job(app):
             .order_by(Article.scheduled_at.asc().nullsfirst(), Article.created_at.asc())
             .first()
         )
+
+        if article:
+            logger.info(
+                "[_post_job] 投稿対象決定: id=%d scheduled_at(UTC)=%s has_summary=%s",
+                article.id, article.scheduled_at, bool(article.summary),
+            )
+        else:
+            logger.info("[_post_job] 投稿対象なし（全%d件が未来スロット or キュー空）", len(all_queued))
+
         article_id = article.id if article else None
 
     if article_id:
-        logger.info("Scheduled posting article %d", article_id)
+        logger.info("[_post_job] 投稿実行: article_id=%d", article_id)
         success, msg = post_to_threads(app, article_id, test_mode=test_mode)
-        logger.info("Post result: %s - %s", success, msg)
+        logger.info("[_post_job] 投稿結果: success=%s msg=%s", success, msg)
 
 
 def _rollover_overdue_job(app):
-    """予定時刻を過ぎたキュー済み記事を次の空きスロットに自動繰り越す。"""
+    """予定時刻を過ぎたキュー済み記事を次の空きスロットに自動繰り越す。
+    _post_job（CronTrigger + jitter最大30分）との競合を避けるため、
+    scheduled_at から90分以上経過した記事のみ繰り越す。"""
     with app.app_context():
         now_utc = datetime.utcnow()
+        # 90分の猶予を設けることで、CronTrigger+jitterの投稿ウィンドウ内の記事を誤って繰り越さない
+        rollover_threshold = now_utc - timedelta(minutes=90)
+
+        logger.info("[_rollover_overdue_job] 実行 UTC=%s threshold(UTC)=%s",
+                    now_utc.strftime("%H:%M:%S"), rollover_threshold.strftime("%H:%M:%S"))
+
         overdue = (
             Article.query.filter_by(status="queued")
             .filter(Article.scheduled_at.isnot(None))
-            .filter(Article.scheduled_at < now_utc)
+            .filter(Article.scheduled_at < rollover_threshold)
             .order_by(Article.scheduled_at.asc())
             .all()
         )
         if not overdue:
+            logger.debug("[_rollover_overdue_job] 繰り越し対象なし")
             return
 
-        logger.info("繰り越し対象: %d件", len(overdue))
+        logger.info("[_rollover_overdue_job] 繰り越し対象: %d件", len(overdue))
 
         # 未来スロットの使用済みセットを構築
         occupied = {
@@ -182,7 +231,8 @@ def _rollover_overdue_job(app):
 def _setup_weekly_post_jobs(app):
     """週間スケジュールから CronJob を再設定する（±30分ゆらぎ付き）。"""
     for job in scheduler.get_jobs():
-        if job.id.startswith("post_"):
+        # "post_" で始まるジョブを削除するが、interval バックアップジョブ（"cron_post_"）は対象外
+        if job.id.startswith("cron_post_"):
             scheduler.remove_job(job.id)
 
     schedule = get_weekly_schedule(app)
@@ -205,7 +255,7 @@ def _setup_weekly_post_jobs(app):
                         jitter=_JITTER_SECONDS,
                     ),
                     args=[app],
-                    id=f"post_{day}_{i}",
+                    id=f"cron_post_{day}_{i}",
                     replace_existing=True,
                 )
                 job_count += 1
@@ -239,6 +289,16 @@ def setup_scheduler(app):
 
     _setup_weekly_post_jobs(app)
 
+    # バックアップ投稿ジョブ: CronTrigger が missed/競合した場合でも5分以内に投稿を実行する
+    # ID は "cron_post_" で始まらない名前にして _setup_weekly_post_jobs で削除されないようにする
+    scheduler.add_job(
+        _post_job,
+        IntervalTrigger(minutes=5),
+        args=[app],
+        id="interval_post_backup",
+        replace_existing=True,
+    )
+
     scheduler.add_job(
         _rollover_overdue_job,
         IntervalTrigger(minutes=30),
@@ -259,7 +319,7 @@ def setup_scheduler(app):
 
     scheduler.start()
     logger.info(
-        "Scheduler started (RSS every %dh, YouTube every %dh)",
+        "Scheduler started (RSS every %dh, YouTube every %dh, post backup every 5min)",
         interval_h, yt_interval_h,
     )
     return scheduler

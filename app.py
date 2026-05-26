@@ -152,6 +152,18 @@ def format_comment_time_filter(ts_str):
         return ts_str
 
 
+@app.template_filter("json_loads")
+def json_loads_filter(s):
+    """JSON文字列をPythonオブジェクトに変換。失敗時は空リストを返す。"""
+    if not s:
+        return []
+    try:
+        import json as _json
+        return _json.loads(s)
+    except Exception:
+        return []
+
+
 # ── ダッシュボード ──────────────────────────────────────────────────────────
 
 
@@ -168,10 +180,39 @@ def index():
 # ── 承認待ち記事 ───────────────────────────────────────────────────────────
 
 
+_PREVIEW_EXCLUDE = ("gstatic.com", "news.google.com")
+
+
+def _build_image_list(thumbnail_url, image_urls_json, max_images=20):
+    """投稿画像リストを構築する（threads_api.py と同一ロジック）。"""
+    import json as _json
+    imgs: list = []
+    if thumbnail_url and thumbnail_url.startswith("http"):
+        imgs.append(thumbnail_url)
+    if image_urls_json:
+        try:
+            parsed = _json.loads(image_urls_json)
+            for url in parsed:
+                if (url and url.startswith("http")
+                        and url not in imgs
+                        and not any(d in url for d in _PREVIEW_EXCLUDE)):
+                    imgs.append(url)
+                    if len(imgs) >= max_images:
+                        break
+        except Exception:
+            pass
+    return imgs
+
+
 @app.route("/pending")
 def pending():
     articles = Article.query.filter_by(status="pending").order_by(Article.created_at.desc()).all()
-    return render_template("pending.html", articles=articles)
+    images_map: dict = {}
+    for a in articles:
+        imgs = _build_image_list(a.thumbnail_url, a.image_urls)
+        images_map[a.id] = imgs
+        logger.debug("pending preview article=%d imgs=%d", a.id, len(imgs))
+    return render_template("pending.html", articles=articles, images_map=images_map)
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
@@ -1108,6 +1149,39 @@ def update_follow_candidate_status(id):
     fc.priority      = request.form.get("priority") or None
     db.session.commit()
     return jsonify({"success": True})
+
+
+@app.route("/api/debug/threads_search")
+def debug_threads_search():
+    """GET /threads/search デバッグエンドポイント。"""
+    import json as _json
+    from flask import Response
+
+    token = Setting.get("threads_access_token", "")
+    if not token:
+        return Response(
+            _json.dumps({"error": "threads_access_token が未設定です"}, ensure_ascii=False),
+            content_type="application/json; charset=utf-8",
+        )
+
+    try:
+        r = requests.get(
+            "https://graph.threads.net/v1.0/threads/search",
+            params={"q": "KPOP", "access_token": token},
+            timeout=15,
+        )
+        payload = {
+            "status": r.status_code,
+            "url": r.url,
+            "body": r.json(),
+        }
+    except Exception as e:
+        payload = {"error": str(e)}
+
+    return Response(
+        _json.dumps(payload, ensure_ascii=False, indent=2),
+        content_type="application/json; charset=utf-8",
+    )
 
 
 @app.route("/api/stats")
