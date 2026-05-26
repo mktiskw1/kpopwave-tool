@@ -164,6 +164,23 @@ def json_loads_filter(s):
         return []
 
 
+@app.template_filter("from_json")
+def from_json_filter(s):
+    """JSON文字列をdictに変換。失敗時は空dictを返す。"""
+    if not s:
+        return {}
+    try:
+        import json as _json
+        return _json.loads(s)
+    except Exception:
+        return {}
+
+
+@app.context_processor
+def inject_timedelta():
+    return {"timedelta": timedelta}
+
+
 # ── ダッシュボード ──────────────────────────────────────────────────────────
 
 
@@ -180,22 +197,43 @@ def index():
 # ── 承認待ち記事 ───────────────────────────────────────────────────────────
 
 
-_PREVIEW_EXCLUDE = ("gstatic.com", "news.google.com")
+_PREVIEW_EXCLUDE = (
+    "gstatic.com",
+    "news.google.com",
+    "googleusercontent.com",
+    "lh3.google.com",
+)
+_PREVIEW_SMALL_HINTS = (
+    "=s16", "=s24", "=s32", "=s48", "=s64",
+    "/s16/", "/s24/", "/s32/", "/s48/", "/s64/",
+    "/s16-", "/s24-", "/s32-", "/s48-", "/s64-",
+    "16x16", "24x24", "32x32", "48x48", "64x64",
+)
+
+
+def _is_preview_valid_image(url: str) -> bool:
+    """プレビュー表示に使用可能な画像URLか判定する（threads_api._is_valid_image_url と同一基準）。"""
+    if not url or not url.startswith("http"):
+        return False
+    if any(d in url for d in _PREVIEW_EXCLUDE):
+        return False
+    low = url.lower()
+    if any(h in low for h in _PREVIEW_SMALL_HINTS):
+        return False
+    return True
 
 
 def _build_image_list(thumbnail_url, image_urls_json, max_images=20):
     """投稿画像リストを構築する（threads_api.py と同一ロジック）。"""
     import json as _json
     imgs: list = []
-    if thumbnail_url and thumbnail_url.startswith("http"):
+    if _is_preview_valid_image(thumbnail_url):
         imgs.append(thumbnail_url)
     if image_urls_json:
         try:
             parsed = _json.loads(image_urls_json)
             for url in parsed:
-                if (url and url.startswith("http")
-                        and url not in imgs
-                        and not any(d in url for d in _PREVIEW_EXCLUDE)):
+                if _is_preview_valid_image(url) and url not in imgs:
                     imgs.append(url)
                     if len(imgs) >= max_images:
                         break
@@ -1001,40 +1039,85 @@ def collect_youtube():
 
 @app.route("/learning")
 def learning():
-    from learning import analyze_performance
-    from database import Setting
+    from database import BuzzPost
+    posts = BuzzPost.query.order_by(BuzzPost.created_at.desc()).all()
+    total = len(posts)
+    analyzed = sum(1 for p in posts if p.analysis)
+    return render_template("learning.html", posts=posts, total=total, analyzed=analyzed)
 
-    analysis = analyze_performance(app)
-    hints = Setting.get("learned_style_hints", "")
-    return render_template("learning.html", analysis=analysis, hints=hints)
+
+@app.route("/learning/add", methods=["POST"])
+def learning_add():
+    from database import BuzzPost
+    data = request.get_json(silent=True) or {}
+    content = (data.get("content") or "").strip()
+    if not content:
+        return jsonify({"ok": False, "error": "投稿本文は必須です"})
+    post = BuzzPost(
+        platform=(data.get("platform") or "その他").strip(),
+        url=(data.get("url") or "").strip() or None,
+        content=content,
+        likes=int(data.get("likes") or 0),
+        comments=int(data.get("comments") or 0),
+        shares=int(data.get("shares") or 0),
+        memo=(data.get("memo") or "").strip() or None,
+    )
+    db.session.add(post)
+    db.session.commit()
+    logger.info("BuzzPost登録: id=%d platform=%s", post.id, post.platform)
+    return jsonify({"ok": True, "id": post.id})
 
 
-@app.route("/learning/refresh-engagement", methods=["POST"])
-def learning_refresh_engagement():
-    from engagement_tracker import refresh_engagement
+@app.route("/learning/<int:id>/analyze", methods=["POST"])
+def learning_analyze(id):
+    import json as _json
+    import anthropic as _anthropic
+    from database import BuzzPost
 
-    result = refresh_engagement(app)
-    if "error" in result:
-        flash(result["error"], "danger")
-    else:
-        flash(
-            f"エンゲージメント取得完了: {result['updated']}件更新 / "
-            f"{result['skipped']}件スキップ(テスト) / {result['errors']}件エラー",
-            "success" if result["errors"] == 0 else "warning",
+    post = BuzzPost.query.get_or_404(id)
+    api_key = Setting.get("anthropic_api_key", "") or os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return jsonify({"ok": False, "error": "Anthropic APIキーが未設定です"})
+
+    prompt = (
+        "以下のSNS投稿はバズりました。KPOPアカウントの投稿文を改善するために、"
+        "以下の観点で分析してJSONのみで返してください（前置き・説明文不要）：\n"
+        "- writing_style: 文章スタイルの特徴（1〜2文）\n"
+        "- emotion: 感情的な切り口（共感・驚き・笑いなど）\n"
+        "- opening: 書き出しのパターン（1文）\n"
+        "- effective_elements: 効果的な要素リスト（配列）\n"
+        "- tips: 投稿文生成時に活かせるアドバイス（日本語・1〜3文）\n\n"
+        f"投稿内容：\n{post.content}"
+    )
+    try:
+        client = _anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
         )
-    return redirect(url_for("learning"))
+        raw = msg.content[0].text.strip()
+        # JSONブロック抽出
+        import re as _re
+        m = _re.search(r"\{[\s\S]+\}", raw)
+        json_str = m.group(0) if m else raw
+        parsed = _json.loads(json_str)
+        post.analysis = _json.dumps(parsed, ensure_ascii=False)
+        db.session.commit()
+        logger.info("BuzzPost分析完了: id=%d", id)
+        return jsonify({"ok": True, "analysis": parsed})
+    except Exception as exc:
+        logger.error("BuzzPost分析エラー id=%d: %s", id, exc)
+        return jsonify({"ok": False, "error": str(exc)})
 
 
-@app.route("/learning/update-hints", methods=["POST"])
-def learning_update_hints():
-    from learning import update_learned_hints
-
-    result = update_learned_hints(app)
-    if result.get("hints"):
-        flash("学習完了: プロンプトに反映しました", "success")
-    else:
-        flash("データ不足のため学習ヒントをクリアしました（5件以上必要）", "warning")
-    return redirect(url_for("learning"))
+@app.route("/learning/<int:id>", methods=["DELETE"])
+def learning_delete(id):
+    from database import BuzzPost
+    post = BuzzPost.query.get_or_404(id)
+    db.session.delete(post)
+    db.session.commit()
+    return jsonify({"ok": True})
 
 
 @app.route("/follow-candidates")
@@ -1263,6 +1346,58 @@ def debug_threads_api():
         "token_length": len(token),
         "results": results,
     }
+    return Response(
+        _json.dumps(payload, ensure_ascii=False, indent=2),
+        content_type="application/json; charset=utf-8",
+    )
+
+
+@app.route("/api/debug/threads_video")
+def debug_threads_video():
+    """Threads API 動画投稿コンテナ作成テスト（公開はしない）。"""
+    import json as _json
+    from flask import Response
+
+    _BASE = "https://graph.threads.net/v1.0"
+    _TEST_VIDEO_URL = "https://www.w3schools.com/html/mov_bbb.mp4"
+
+    token   = Setting.get("threads_access_token", "")
+    user_id = Setting.get("threads_user_id", "")
+
+    if not token or not user_id:
+        return Response(
+            _json.dumps({"error": "threads_access_token / threads_user_id が未設定です"}, ensure_ascii=False),
+            content_type="application/json; charset=utf-8",
+        )
+
+    token_preview = f"{token[:12]}...{token[-4:]}" if len(token) > 20 else token
+
+    try:
+        res = requests.post(
+            f"{_BASE}/{user_id}/threads",
+            data={
+                "media_type": "VIDEO",
+                "video_url": _TEST_VIDEO_URL,
+                "text": "テスト",
+                "access_token": token,
+            },
+            timeout=30,
+        )
+        payload = {
+            "step": "コンテナ作成（公開なし）",
+            "request": {
+                "url": f"{_BASE}/{user_id}/threads",
+                "media_type": "VIDEO",
+                "video_url": _TEST_VIDEO_URL,
+                "text": "テスト",
+                "access_token": token_preview,
+            },
+            "http_status": res.status_code,
+            "response": res.json(),
+        }
+    except Exception as e:
+        payload = {"error": str(e)}
+
     return Response(
         _json.dumps(payload, ensure_ascii=False, indent=2),
         content_type="application/json; charset=utf-8",

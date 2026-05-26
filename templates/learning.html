@@ -1,208 +1,354 @@
 {% extends 'base.html' %}
 {% block content %}
 
+<!-- ヘッダー -->
 <div class="d-flex justify-content-between align-items-center mb-3">
-  <h4 class="mb-0 fw-bold">学習 <span style="font-size:.7rem;color:#777;font-weight:400">— 投稿パフォーマンス分析</span></h4>
-  <div class="d-flex gap-2">
-    <form action="{{ url_for('learning_refresh_engagement') }}" method="post">
-      <button type="submit" class="btn btn-sm btn-outline-secondary">
-        <i class="bi bi-arrow-repeat"></i> エンゲージメント取得
-      </button>
-    </form>
-    <form action="{{ url_for('learning_update_hints') }}" method="post">
-      <button type="submit" class="btn btn-sm btn-accent"
-              {% if not analysis.enough_data %}disabled title="データが5件以上必要です"{% endif %}>
-        <i class="bi bi-lightning-charge-fill"></i> 学習してプロンプトに反映
-      </button>
-    </form>
+  <h4 class="mb-0 fw-bold">
+    ✨ バズり投稿学習
+    <span style="font-size:.7rem;color:var(--text-muted);font-weight:400">— AI パターン分析 → 要約自動反映</span>
+  </h4>
+  <div class="d-flex gap-2 align-items-center">
+    <span class="badge" style="background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);font-size:.78rem">
+      登録 {{ total }} 件
+    </span>
+    <span class="badge" style="background:var(--accent-soft);color:var(--accent);border:1px solid var(--accent-light);font-size:.78rem">
+      ✅ 分析済み {{ analyzed }} 件
+    </span>
   </div>
 </div>
 
-<!-- サマリーカード -->
-<div class="row g-3 mb-4">
-  <div class="col-6 col-md-3">
-    <div class="card p-3 text-center">
-      <div style="font-size:1.6rem;font-weight:700;color:var(--text)">{{ analysis.total_posted }}</div>
-      <div style="font-size:.75rem;color:#666">投稿済み総数</div>
-    </div>
+<!-- 登録フォーム -->
+<div class="card mb-4">
+  <div class="card-header fw-bold" style="font-size:.9rem">
+    <i class="bi bi-plus-circle-fill me-1" style="color:var(--accent)"></i> バズり投稿を登録
   </div>
-  <div class="col-6 col-md-3">
-    <div class="card p-3 text-center">
-      <div style="font-size:1.6rem;font-weight:700;color:{% if analysis.with_data >= 5 %}var(--accent3){% else %}var(--peach){% endif %}">
-        {{ analysis.with_data }}
+  <div class="card-body">
+    <div class="row g-2">
+      <!-- プラットフォーム -->
+      <div class="col-12 col-sm-4 col-md-3">
+        <label class="form-label mb-1" style="font-size:.8rem;color:var(--text-muted)">プラットフォーム</label>
+        <select id="f-platform" class="form-select form-select-sm">
+          <option value="Threads">Threads</option>
+          <option value="X">X (Twitter)</option>
+          <option value="Instagram">Instagram</option>
+          <option value="TikTok">TikTok</option>
+          <option value="その他">その他</option>
+        </select>
       </div>
-      <div style="font-size:.75rem;color:#666">データあり</div>
-    </div>
-  </div>
-  <div class="col-6 col-md-3">
-    <div class="card p-3 text-center">
-      <div style="font-size:1.6rem;font-weight:700;color:var(--text)">{{ analysis.all_avg_score or '—' }}</div>
-      <div style="font-size:.75rem;color:#666">平均スコア</div>
-    </div>
-  </div>
-  <div class="col-6 col-md-3">
-    <div class="card p-3 text-center">
-      <div style="font-size:1.6rem;font-weight:700;color:{% if hints %}var(--accent){% else %}var(--text-muted){% endif %}">
-        {% if hints %}適用中{% else %}未学習{% endif %}
+      <!-- URL -->
+      <div class="col-12 col-sm-8 col-md-9">
+        <label class="form-label mb-1" style="font-size:.8rem;color:var(--text-muted)">URL（任意）</label>
+        <input type="url" id="f-url" class="form-control form-control-sm" placeholder="https://...">
       </div>
-      <div style="font-size:.75rem;color:#666">プロンプト学習</div>
+      <!-- 投稿本文 -->
+      <div class="col-12">
+        <label class="form-label mb-1" style="font-size:.8rem;color:var(--text-muted)">投稿本文 <span style="color:var(--accent)">*</span></label>
+        <textarea id="f-content" class="form-control form-control-sm" rows="3"
+                  placeholder="バズった投稿の本文をそのまま貼り付けてください"></textarea>
+      </div>
+      <!-- いいね / コメント / メモ -->
+      <div class="col-4 col-md-2">
+        <label class="form-label mb-1" style="font-size:.8rem;color:var(--text-muted)">❤️ いいね</label>
+        <input type="number" id="f-likes" class="form-control form-control-sm" min="0" placeholder="0">
+      </div>
+      <div class="col-4 col-md-2">
+        <label class="form-label mb-1" style="font-size:.8rem;color:var(--text-muted)">💬 コメント</label>
+        <input type="number" id="f-comments" class="form-control form-control-sm" min="0" placeholder="0">
+      </div>
+      <div class="col-4 col-md-2">
+        <label class="form-label mb-1" style="font-size:.8rem;color:var(--text-muted)">🔁 シェア</label>
+        <input type="number" id="f-shares" class="form-control form-control-sm" min="0" placeholder="0">
+      </div>
+      <div class="col-12 col-md-6">
+        <label class="form-label mb-1" style="font-size:.8rem;color:var(--text-muted)">メモ（任意）</label>
+        <input type="text" id="f-memo" class="form-control form-control-sm" placeholder="バズった理由など">
+      </div>
+      <!-- 登録ボタン -->
+      <div class="col-12 d-flex justify-content-end">
+        <button class="btn btn-accent btn-sm px-4" onclick="addPost()">
+          <i class="bi bi-plus-lg me-1"></i> 登録する
+        </button>
+      </div>
     </div>
   </div>
 </div>
 
-{% if not analysis.with_data %}
-<div class="card p-5 text-center" style="color:var(--text-muted)">
-  <i class="bi bi-bar-chart" style="font-size:2.5rem;display:block;margin-bottom:.5rem"></i>
-  <div>エンゲージメントデータがありません</div>
-  <div style="font-size:.82rem;margin-top:.3rem">「エンゲージメント取得」ボタンで Threads からいいね数・リプライ数を取得してください</div>
+<!-- 登録済み一覧 -->
+{% if posts %}
+<div id="buzz-list">
+  {% for p in posts %}
+  <div class="card mb-3" id="buzz-{{ p.id }}">
+    <div class="card-body pb-2">
+
+      <!-- ヘッダー行 -->
+      <div class="d-flex justify-content-between align-items-start mb-2 gap-2">
+        <div class="d-flex align-items-center gap-2 flex-wrap" style="min-width:0">
+          <!-- プラットフォームバッジ -->
+          <span class="badge platform-badge platform-{{ p.platform|lower|replace(' ','') }}"
+                style="font-size:.72rem">{{ p.platform }}</span>
+          <!-- 分析済みバッジ -->
+          {% if p.analysis %}
+          <span class="badge" style="background:var(--accent-soft);color:var(--accent);border:1px solid var(--accent-light);font-size:.7rem">
+            ✅ 分析済み
+          </span>
+          {% endif %}
+          <!-- エンゲージメント数 -->
+          {% if p.likes or p.comments or p.shares %}
+          <span style="font-size:.76rem;color:var(--text-muted)">
+            {% if p.likes %}❤️ {{ "{:,}".format(p.likes) }}{% endif %}
+            {% if p.comments %} 💬 {{ "{:,}".format(p.comments) }}{% endif %}
+            {% if p.shares %} 🔁 {{ "{:,}".format(p.shares) }}{% endif %}
+          </span>
+          {% endif %}
+          <!-- 日時 -->
+          <span style="font-size:.72rem;color:var(--text-muted)">
+            {{ (p.created_at + timedelta(hours=9)).strftime('%m/%d') }}
+          </span>
+        </div>
+        <!-- アクションボタン -->
+        <div class="d-flex gap-1 flex-shrink-0">
+          <button class="btn btn-sm btn-outline-secondary px-2 py-0" style="font-size:.8rem"
+                  onclick="analyzePost({{ p.id }}, this)">
+            🤖 AI分析
+          </button>
+          <button class="btn btn-sm btn-outline-danger px-2 py-0" style="font-size:.8rem"
+                  onclick="deletePost({{ p.id }})">
+            🗑️
+          </button>
+        </div>
+      </div>
+
+      <!-- 投稿本文 -->
+      <div style="font-size:.85rem;color:var(--text);white-space:pre-wrap;word-break:break-word;
+                  background:var(--surface2);border-radius:8px;padding:.5rem .75rem;
+                  max-height:120px;overflow:hidden;line-height:1.5"
+           id="content-{{ p.id }}">{{ p.content }}</div>
+      {% if p.content|length > 200 %}
+      <button class="btn btn-link btn-sm p-0 mt-1" style="font-size:.75rem;color:var(--text-muted)"
+              onclick="toggleContent({{ p.id }})">続きを見る</button>
+      {% endif %}
+
+      <!-- メモ -->
+      {% if p.memo %}
+      <div style="font-size:.76rem;color:var(--text-muted);margin-top:.3rem">
+        📝 {{ p.memo }}
+      </div>
+      {% endif %}
+
+      <!-- 分析結果エリア -->
+      <div id="analysis-{{ p.id }}"
+           style="{% if not p.analysis %}display:none;{% endif %}margin-top:.75rem">
+        {% if p.analysis %}
+        {% set a = p.analysis | from_json %}
+        {{ _render_analysis(a) }}
+        {% endif %}
+      </div>
+
+    </div>
+  </div>
+  {% endfor %}
 </div>
 
 {% else %}
-
-<div class="row g-3">
-
-  <!-- 左カラム -->
-  <div class="col-lg-7">
-
-    <!-- トップ投稿 -->
-    <div class="card mb-3">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <span><i class="bi bi-trophy-fill text-warning me-1"></i> 高エンゲージメント投稿 TOP{{ analysis.top_posts|length }}</span>
-        <span style="font-size:.72rem;color:#666">スコア = いいね×1 + リプライ×2 + リポスト×3 + 引用×2</span>
-      </div>
-      <div class="card-body p-0">
-        {% set max_score = analysis.top_posts[0].score if analysis.top_posts else 1 %}
-        {% for p in analysis.top_posts %}
-        <div class="p-3 {% if not loop.last %}border-bottom{% endif %}" style="border-color:var(--border)!important">
-          <div class="d-flex justify-content-between align-items-start mb-1">
-            <span style="font-size:.78rem;color:var(--text-muted)">#{{ loop.index }} &nbsp;
-              {% if p.style != '不明' %}<span class="badge" style="background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);font-size:.68rem">{{ p.style }}</span>{% endif %}
-              &nbsp; {{ p.length }}字
-            </span>
-            <div class="d-flex gap-2" style="font-size:.78rem;color:var(--text-muted)">
-              <span title="いいね"><i class="bi bi-heart-fill" style="color:var(--accent)"></i> {{ p.like_count }}</span>
-              <span title="リプライ"><i class="bi bi-chat-fill" style="color:var(--accent2)"></i> {{ p.reply_count }}</span>
-              <span title="リポスト"><i class="bi bi-arrow-repeat" style="color:var(--accent3)"></i> {{ p.repost_count }}</span>
-              <span title="引用"><i class="bi bi-quote" style="color:var(--peach)"></i> {{ p.quote_count }}</span>
-              <strong style="color:var(--text)">{{ p.score }}pt</strong>
-            </div>
-          </div>
-          <!-- スコアバー -->
-          <div style="background:var(--surface2);border-radius:3px;height:5px;margin-bottom:.5rem">
-            <div style="background:linear-gradient(90deg,var(--accent),var(--accent2));height:5px;border-radius:3px;width:{{ [(p.score / max_score * 100)|int, 100]|min }}%"></div>
-          </div>
-          <div style="font-size:.8rem;color:var(--text);white-space:pre-wrap;word-break:break-word;max-height:80px;overflow:hidden">{{ p.summary_body }}</div>
-        </div>
-        {% endfor %}
-      </div>
-    </div>
-
-  </div>
-
-  <!-- 右カラム -->
-  <div class="col-lg-5">
-
-    <!-- スタイル別 -->
-    {% if analysis.style_stats %}
-    <div class="card mb-3">
-      <div class="card-header"><i class="bi bi-palette me-1"></i> スタイル別パフォーマンス</div>
-      <div class="card-body p-0">
-        <table class="table table-sm mb-0" style="font-size:.82rem">
-          <thead><tr>
-            <th class="ps-3">スタイル</th><th class="text-center">件数</th>
-            <th class="text-center">avg</th><th class="text-end pe-3">max</th>
-          </tr></thead>
-          <tbody>
-          {% set max_avg = (analysis.style_stats.values()|map(attribute='avg')|max) or 1 %}
-          {% for style, s in analysis.style_stats|dictsort(by='value', attribute='avg')|reverse %}
-          <tr>
-            <td class="ps-3">
-              <div style="background:var(--surface2);border-radius:3px;height:4px;width:100%;margin-bottom:3px">
-                <div style="background:linear-gradient(90deg,var(--accent2-light),var(--accent2));height:4px;border-radius:3px;width:{{ [(s.avg / max_avg * 100)|int, 100]|min }}%"></div>
-              </div>
-              {{ style }}
-            </td>
-            <td class="text-center text-muted">{{ s.count }}</td>
-            <td class="text-center"><strong>{{ s.avg }}</strong></td>
-            <td class="text-end pe-3 text-muted">{{ s.max }}</td>
-          </tr>
-          {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </div>
-    {% endif %}
-
-    <!-- 文字数別 -->
-    <div class="card mb-3">
-      <div class="card-header"><i class="bi bi-text-left me-1"></i> 文字数帯別パフォーマンス</div>
-      <div class="card-body p-0">
-        <table class="table table-sm mb-0" style="font-size:.82rem">
-          <thead><tr>
-            <th class="ps-3">文字数</th><th class="text-center">件数</th><th class="text-end pe-3">avg</th>
-          </tr></thead>
-          <tbody>
-          {% set max_lavg = (analysis.length_stats.values()|map(attribute='avg')|max) or 1 %}
-          {% for bucket, s in analysis.length_stats.items() %}
-          <tr>
-            <td class="ps-3">
-              <div style="background:var(--surface2);border-radius:3px;height:4px;width:100%;margin-bottom:3px">
-                <div style="background:linear-gradient(90deg,var(--accent3-light),var(--accent3));height:4px;border-radius:3px;width:{{ [(s.avg / max_lavg * 100)|int, 100]|min if s.avg else 0 }}%"></div>
-              </div>
-              {{ bucket }}
-            </td>
-            <td class="text-center text-muted">{{ s.count }}</td>
-            <td class="text-end pe-3"><strong>{{ s.avg }}</strong></td>
-          </tr>
-          {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- 絵文字・問いかけ -->
-    <div class="card mb-3">
-      <div class="card-header"><i class="bi bi-emoji-smile me-1"></i> 絵文字 / 問いかけ</div>
-      <div class="card-body" style="font-size:.82rem">
-        <div class="row g-2">
-          <div class="col-6">
-            <div style="color:#666;font-size:.72rem;margin-bottom:.3rem">絵文字</div>
-            {% for label, s in analysis.emoji_stats.items() %}
-            <div class="d-flex justify-content-between">
-              <span>{{ label }} ({{ s.count }}件)</span>
-              <strong>{{ s.avg }}pt</strong>
-            </div>
-            {% endfor %}
-          </div>
-          <div class="col-6">
-            <div style="color:#666;font-size:.72rem;margin-bottom:.3rem">問いかけ</div>
-            {% for label, s in analysis.question_stats.items() %}
-            <div class="d-flex justify-content-between">
-              <span>{{ label }} ({{ s.count }}件)</span>
-              <strong>{{ s.avg }}pt</strong>
-            </div>
-            {% endfor %}
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 学習済みヒント -->
-    <div class="card">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <span><i class="bi bi-lightning-charge-fill text-warning me-1"></i> 現在のプロンプト学習内容</span>
-      </div>
-      <div class="card-body">
-        {% if hints %}
-        <pre style="font-size:.78rem;color:var(--text);white-space:pre-wrap;margin:0;background:transparent;border:none">{{ hints }}</pre>
-        {% else %}
-        <span style="font-size:.82rem;color:var(--text-muted)">未適用（データが5件以上になったら「学習してプロンプトに反映」を実行）</span>
-        {% endif %}
-      </div>
-    </div>
-
-  </div>
+<div class="card p-5 text-center" style="color:var(--text-muted)">
+  <div style="font-size:2.2rem;margin-bottom:.5rem">✨</div>
+  <div style="font-weight:700;margin-bottom:.3rem">バズり投稿を登録しよう</div>
+  <div style="font-size:.85rem">他SNSでバズった投稿を登録してAIに分析させると、<br>要約生成時に自動でコツが反映されます</div>
 </div>
 {% endif %}
 
+{% endblock %}
+
+{% macro _render_analysis(a) %}
+<div class="p-2 rounded" style="background:linear-gradient(135deg,var(--accent-soft),#F3E5F5);border:1px solid var(--accent-light)">
+  <div style="font-size:.75rem;font-weight:700;color:var(--accent);margin-bottom:.4rem">
+    🤖 AI分析結果
+  </div>
+  <div class="row g-2" style="font-size:.78rem">
+    {% if a.writing_style %}
+    <div class="col-12 col-md-6">
+      <span style="color:var(--text-muted)">📝 スタイル：</span>
+      <span style="color:var(--text)">{{ a.writing_style }}</span>
+    </div>
+    {% endif %}
+    {% if a.emotion %}
+    <div class="col-12 col-md-6">
+      <span style="color:var(--text-muted)">💡 感情：</span>
+      <span style="color:var(--text)">{{ a.emotion }}</span>
+    </div>
+    {% endif %}
+    {% if a.opening %}
+    <div class="col-12">
+      <span style="color:var(--text-muted)">🚀 書き出し：</span>
+      <span style="color:var(--text)">{{ a.opening }}</span>
+    </div>
+    {% endif %}
+    {% if a.effective_elements %}
+    <div class="col-12">
+      <span style="color:var(--text-muted)">⚡ 効果的な要素：</span>
+      {% for el in a.effective_elements %}
+      <span class="badge me-1" style="background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);font-size:.7rem">{{ el }}</span>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if a.tips %}
+    <div class="col-12">
+      <div style="background:white;border-radius:6px;padding:.4rem .6rem;border:1px solid var(--border)">
+        <span style="color:var(--accent);font-weight:700">💬 活かせるコツ：</span>
+        <span style="color:var(--text)">{{ a.tips }}</span>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endmacro %}
+
+{% block scripts %}
+<script>
+const timedelta = null; // Jinja側で処理済み
+
+function addPost() {
+  const content = document.getElementById('f-content').value.trim();
+  if (!content) { alert('投稿本文は必須です'); return; }
+
+  const btn = document.querySelector('[onclick="addPost()"]');
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+
+  fetch('/learning/add', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      platform: document.getElementById('f-platform').value,
+      url:      document.getElementById('f-url').value.trim(),
+      content:  content,
+      likes:    parseInt(document.getElementById('f-likes').value) || 0,
+      comments: parseInt(document.getElementById('f-comments').value) || 0,
+      shares:   parseInt(document.getElementById('f-shares').value) || 0,
+      memo:     document.getElementById('f-memo').value.trim(),
+    })
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      location.reload();
+    } else {
+      alert('エラー: ' + d.error);
+      btn.disabled = false;
+      btn.innerHTML = orig;
+    }
+  })
+  .catch(() => {
+    alert('通信エラーが発生しました');
+    btn.disabled = false;
+    btn.innerHTML = orig;
+  });
+}
+
+function analyzePost(id, btn) {
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 分析中...';
+
+  fetch('/learning/' + id + '/analyze', { method: 'POST' })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      const area = document.getElementById('analysis-' + id);
+      area.style.display = '';
+      area.innerHTML = renderAnalysis(d.analysis);
+      // 分析済みバッジを追加
+      const header = document.querySelector('#buzz-' + id + ' .platform-badge');
+      if (header && !document.querySelector('#buzz-' + id + ' .analyzed-badge')) {
+        const badge = document.createElement('span');
+        badge.className = 'badge analyzed-badge';
+        badge.style.cssText = 'background:var(--accent-soft);color:var(--accent);border:1px solid var(--accent-light);font-size:.7rem';
+        badge.textContent = '✅ 分析済み';
+        header.insertAdjacentElement('afterend', badge);
+      }
+      btn.innerHTML = '🔄 再分析';
+      btn.disabled = false;
+    } else {
+      alert('分析エラー: ' + d.error);
+      btn.disabled = false;
+      btn.innerHTML = orig;
+    }
+  })
+  .catch(() => {
+    alert('通信エラーが発生しました');
+    btn.disabled = false;
+    btn.innerHTML = orig;
+  });
+}
+
+function renderAnalysis(a) {
+  let html = `<div class="p-2 rounded" style="background:linear-gradient(135deg,var(--accent-soft),#F3E5F5);border:1px solid var(--accent-light)">
+    <div style="font-size:.75rem;font-weight:700;color:var(--accent);margin-bottom:.4rem">🤖 AI分析結果</div>
+    <div class="row g-2" style="font-size:.78rem">`;
+
+  if (a.writing_style)
+    html += `<div class="col-12 col-md-6"><span style="color:var(--text-muted)">📝 スタイル：</span><span style="color:var(--text)">${esc(a.writing_style)}</span></div>`;
+  if (a.emotion)
+    html += `<div class="col-12 col-md-6"><span style="color:var(--text-muted)">💡 感情：</span><span style="color:var(--text)">${esc(a.emotion)}</span></div>`;
+  if (a.opening)
+    html += `<div class="col-12"><span style="color:var(--text-muted)">🚀 書き出し：</span><span style="color:var(--text)">${esc(a.opening)}</span></div>`;
+  if (a.effective_elements && a.effective_elements.length) {
+    html += `<div class="col-12"><span style="color:var(--text-muted)">⚡ 効果的な要素：</span>`;
+    a.effective_elements.forEach(el => {
+      html += `<span class="badge me-1" style="background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);font-size:.7rem">${esc(el)}</span>`;
+    });
+    html += `</div>`;
+  }
+  if (a.tips)
+    html += `<div class="col-12"><div style="background:white;border-radius:6px;padding:.4rem .6rem;border:1px solid var(--border)"><span style="color:var(--accent);font-weight:700">💬 活かせるコツ：</span><span style="color:var(--text)">${esc(a.tips)}</span></div></div>`;
+
+  html += `</div></div>`;
+  return html;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function deletePost(id) {
+  if (!confirm('この投稿を削除しますか？')) return;
+  fetch('/learning/' + id, { method: 'DELETE' })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      const card = document.getElementById('buzz-' + id);
+      if (card) card.remove();
+    } else {
+      alert('削除に失敗しました');
+    }
+  });
+}
+
+function toggleContent(id) {
+  const el = document.getElementById('content-' + id);
+  const btn = el.nextElementSibling;
+  if (el.style.maxHeight === 'none') {
+    el.style.maxHeight = '120px';
+    el.style.overflow = 'hidden';
+    btn.textContent = '続きを見る';
+  } else {
+    el.style.maxHeight = 'none';
+    el.style.overflow = 'visible';
+    btn.textContent = '折りたたむ';
+  }
+}
+</script>
+
+<style>
+.platform-badge {
+  font-weight: 700;
+}
+.platform-threads  { background: #000; color: #fff; }
+.platform-x,
+.platform-xtwitter { background: #1da1f2; color: #fff; }
+.platform-instagram { background: linear-gradient(45deg,#f09433,#e6683c,#dc2743,#cc2366,#bc1888); color:#fff; }
+.platform-tiktok   { background: #010101; color: #fff; }
+.platform-その他   { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); }
+</style>
 {% endblock %}

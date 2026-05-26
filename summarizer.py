@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import anthropic
 import requests
 
-from database import Article, Setting, db
+from database import Article, BuzzPost, Setting, db
 
 logger = logging.getLogger(__name__)
 
@@ -162,8 +162,37 @@ def _fetch_article_page(url: str) -> tuple:
         return "", [], False
 
 
+# 画像除外ドメイン（Googleデフォルト画像・プロフィール写真など）
+_EXCLUDE_IMAGE_DOMAINS = (
+    "gstatic.com",
+    "news.google.com",
+    "googleusercontent.com",
+    "lh3.google.com",
+)
+# URLに含まれるサイズヒントから64px以下の小画像を検出するパターン
+_SMALL_SIZE_HINTS = (
+    "=s16", "=s24", "=s32", "=s48", "=s64",
+    "/s16/", "/s24/", "/s32/", "/s48/", "/s64/",
+    "/s16-", "/s24-", "/s32-", "/s48-", "/s64-",
+    "16x16", "24x24", "32x32", "48x48", "64x64",
+)
+
+
+def _is_valid_image_url(url: str) -> bool:
+    """保存・投稿に使用可能な画像URLか判定する（threads_api._is_valid_image_url と同一基準）。"""
+    if not url or not url.startswith("http"):
+        return False
+    if any(d in url for d in _EXCLUDE_IMAGE_DOMAINS):
+        return False
+    low = url.lower()
+    if any(h in low for h in _SMALL_SIZE_HINTS):
+        return False
+    return True
+
+
 def _extract_images_from_html(html: str) -> list:
-    """HTMLからog:imageと記事本文内の画像URLを最大4件抽出する。"""
+    """HTMLからog:imageと記事本文内の画像URLを最大4件抽出する。
+    Googleデフォルト画像・64px以下の小画像は除外する。"""
     images = []
 
     # og:image（最優先：記事のメイン画像）
@@ -174,8 +203,10 @@ def _extract_images_from_html(html: str) -> list:
     )
     if og_match:
         og_url = og_match.group(1) or og_match.group(2) or ""
-        if og_url.startswith("http"):
+        if _is_valid_image_url(og_url):
             images.append(og_url)
+        elif og_url:
+            logger.debug("og:image 除外: %s", og_url)
 
     # article/main ブロック内の <img src>
     for section_tag in ("article", "main"):
@@ -183,14 +214,15 @@ def _extract_images_from_html(html: str) -> list:
         if m:
             block = m.group(1)
             for img_url in re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', block, re.IGNORECASE):
-                if img_url.startswith("http") and img_url not in images:
-                    # SVG・1px追跡画像・アイコン系を除外
-                    low = img_url.lower()
-                    if any(x in low for x in (".svg", "1x1", "pixel", "tracking", "avatar", "icon", "logo")):
-                        continue
-                    images.append(img_url)
-                    if len(images) >= 4:
-                        break
+                if not _is_valid_image_url(img_url) or img_url in images:
+                    continue
+                low = img_url.lower()
+                # SVG・1px追跡画像・アイコン系を除外
+                if any(x in low for x in (".svg", "1x1", "pixel", "tracking", "avatar", "icon", "logo")):
+                    continue
+                images.append(img_url)
+                if len(images) >= 4:
+                    break
             break
 
     return images[:4]
@@ -245,10 +277,40 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
 
     with app.app_context():
         learned_hints = Setting.get("learned_style_hints", "")
-    learned_section = (
-        f"\n━━ 学習済みインサイト（過去の高エンゲージメント投稿の傾向） ━━\n{learned_hints}"
-        if learned_hints else ""
-    )
+        # buzz_posts から AI 分析済みの tips を最大5件取得
+        buzz_tips: list[str] = []
+        try:
+            buzz_rows = (
+                BuzzPost.query
+                .filter(BuzzPost.analysis.isnot(None))
+                .order_by(BuzzPost.created_at.desc())
+                .limit(5)
+                .all()
+            )
+            for row in buzz_rows:
+                try:
+                    parsed = json.loads(row.analysis)
+                    tip = parsed.get("tips", "")
+                    if tip:
+                        buzz_tips.append(f"・{tip}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    buzz_section = ""
+    if buzz_tips:
+        buzz_section = (
+            "\n━━ バズり投稿から学んだコツ ━━\n"
+            + "\n".join(buzz_tips)
+            + "\n上記を参考にして投稿文を生成してください。"
+        )
+
+    learned_section = ""
+    if learned_hints:
+        learned_section += f"\n━━ 学習済みインサイト（過去の高エンゲージメント投稿の傾向） ━━\n{learned_hints}"
+    if buzz_section:
+        learned_section += buzz_section
 
     with app.app_context():
         article = db.session.get(Article, article_id)

@@ -14,15 +14,34 @@ THREADS_API = "https://graph.threads.net/v1.0"
 # カルーセル1投稿あたりの最大画像枚数（Threads APIの上限は20）
 MAX_CAROUSEL_IMAGES = 20
 
-# 投稿画像から除外するドメイン（Googleデフォルト画像など）
-_EXCLUDE_DOMAINS = ("gstatic.com", "news.google.com")
+# 投稿画像から除外するドメイン（Googleデフォルト画像・プロフィール写真など）
+_EXCLUDE_DOMAINS = (
+    "gstatic.com",
+    "news.google.com",
+    "googleusercontent.com",
+    "lh3.google.com",
+)
+
+# URLに含まれるサイズヒントから64px以下の小画像を検出するパターン
+# Google profile: =s64, =s64-c, /s64/, /s64-c/  一般: 64x64, _64., -64.
+_SMALL_SIZE_HINTS = (
+    "=s16", "=s24", "=s32", "=s48", "=s64",
+    "/s16/", "/s24/", "/s32/", "/s48/", "/s64/",
+    "/s16-", "/s24-", "/s32-", "/s48-", "/s64-",
+    "16x16", "24x24", "32x32", "48x48", "64x64",
+)
 
 
 def _is_valid_image_url(url: str) -> bool:
     """投稿に使用可能な画像URLか判定する。"""
     if not url or not url.startswith("http"):
         return False
-    return not any(d in url for d in _EXCLUDE_DOMAINS)
+    if any(d in url for d in _EXCLUDE_DOMAINS):
+        return False
+    low = url.lower()
+    if any(h in low for h in _SMALL_SIZE_HINTS):
+        return False
+    return True
 
 
 def _get_credentials(app):
@@ -184,10 +203,12 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
         post_text     = article.summary
         thumbnail_url = article.thumbnail_url or ""
 
-        # thumbnail を1枚目、image_urls を全て追加（重複・除外ドメインを除く）
+        # thumbnail を1枚目、image_urls を全て追加（除外ドメイン・小画像・重複を除く）
         images: list = []
-        if thumbnail_url and thumbnail_url.startswith("http"):
+        if _is_valid_image_url(thumbnail_url):
             images.append(thumbnail_url)
+        elif thumbnail_url:
+            logger.info("サムネイル除外 (除外ドメインまたは小画像): %s", thumbnail_url)
         raw_image_urls = getattr(article, "image_urls", None)
         if raw_image_urls:
             try:
