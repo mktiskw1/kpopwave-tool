@@ -4,13 +4,45 @@
 <!-- ヘッダー -->
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h4 class="mb-0 fw-bold">承認待ち記事
-    <span class="badge badge-pending ms-2" style="font-size:.7rem">{{ articles|length }}</span>
+    <span class="badge badge-pending ms-2" style="font-size:.7rem">{{ counts.all }}</span>
   </h4>
 </div>
+
+<!-- フィルタータブ -->
+<ul class="nav mb-3" style="gap:4px;border-bottom:1.5px solid var(--border);padding-bottom:0">
+  {% set tabs = [
+    ('all',     'すべて',       counts.all,     'var(--accent)'),
+    ('rss',     'RSS記事',      counts.rss,     '#6c757d'),
+    ('youtube', 'YouTube',      counts.youtube, '#e03030'),
+    ('video',   '動画',         counts.video,   '#e03030'),
+    ('posted',  '投稿済み動画', counts.posted,  '#2e7d32'),
+  ] %}
+  {% for key, label, count, badge_color in tabs %}
+  <li class="nav-item">
+    <a href="{{ url_for('pending', tab=key) }}"
+       class="nav-link px-3 py-2 {% if active_tab == key %}active{% endif %}"
+       style="border-radius:8px 8px 0 0;font-size:.88rem;
+              {% if active_tab == key %}
+                background:var(--surface2);color:var(--text);border:1.5px solid var(--border);border-bottom:2px solid var(--accent);
+              {% else %}
+                color:var(--text-muted);border:1px solid transparent;
+              {% endif %}">
+      {{ label }}
+      {% if count %}
+      <span class="badge rounded-pill ms-1"
+            style="font-size:.68rem;background:{{ badge_color }};opacity:{% if active_tab == key %}1{% else %}.7{% endif %}">
+        {{ count }}
+      </span>
+      {% endif %}
+    </a>
+  </li>
+  {% endfor %}
+</ul>
 
 {% if articles %}
 <!-- 一括操作ツールバー -->
 <form id="bulk-form" action="{{ url_for('bulk_delete_articles') }}" method="post">
+  <input type="hidden" name="tab" value="{{ active_tab }}">
   <div class="d-flex align-items-center gap-2 mb-3 p-2 rounded" style="background:var(--surface2);border:1.5px solid var(--border);border-radius:14px!important">
     <input type="checkbox" id="select-all" class="form-check-input mt-0" title="全選択/全解除">
     <label for="select-all" class="text-muted mb-0" style="font-size:.82rem;cursor:pointer">全選択</label>
@@ -20,7 +52,7 @@
               onclick="return confirmBulk()">
         <i class="bi bi-trash3 me-1"></i>選択削除
       </button>
-      <button type="button" class="btn btn-danger btn-sm" onclick="deleteAll()">
+      <button type="button" class="btn btn-danger btn-sm" onclick="deleteAll({{ counts.all }})">
         <i class="bi bi-trash3-fill me-1"></i>全削除
       </button>
     </div>
@@ -45,6 +77,12 @@
 
         <!-- アクションボタン -->
         <div class="d-flex gap-1 flex-shrink-0">
+          {% if active_tab == 'posted' %}
+          <button type="button" class="btn btn-primary btn-sm px-2" title="承認待ちに戻して再投稿"
+                  onclick="requeueArticle({{ a.id }}, this)">
+            🔄 再投稿
+          </button>
+          {% else %}
           <button type="button" class="btn btn-success btn-sm px-2" title="承認してキューへ"
                   onclick="approveArticle({{ a.id }}, this)">
             <i class="bi bi-check-lg"></i> 承認
@@ -53,6 +91,7 @@
                   onclick="submitForm('{{ url_for('reject_article', id=a.id) }}')">
             <i class="bi bi-x-lg"></i>
           </button>
+          {% endif %}
           <button type="button" class="btn btn-outline-danger btn-sm px-2" title="削除"
                   onclick="deleteSingle({{ a.id }})">
             <i class="bi bi-trash3"></i>
@@ -67,13 +106,34 @@
           <span class="badge bg-danger me-1" style="font-size:.7rem">
             <i class="bi bi-camera-video-fill"></i> 動画
           </span>
+          {% if active_tab == 'posted' %}
+          <span class="badge bg-success me-1" style="font-size:.7rem">投稿済み</span>
+          {% endif %}
           <span>yt-dlpダウンロード済み · Threads動画投稿</span>
         </div>
-        <video controls
+        <video id="vid-{{ a.id }}" controls
                style="max-width:100%;max-height:220px;display:block;border-radius:10px;background:#000">
-          <source src="{{ url_for('static', filename=a.video_file_path) }}" type="video/mp4">
+          <source id="vid-src-{{ a.id }}" src="{{ url_for('static', filename=a.video_file_path) }}" type="video/mp4">
           お使いのブラウザは動画再生に対応していません。
         </video>
+        <!-- トリミングUI -->
+        <div class="d-flex align-items-center gap-2 mt-2 flex-wrap" style="font-size:.82rem">
+          <span style="color:var(--text-muted)">✂️ トリミング</span>
+          <label style="color:var(--text-muted);margin:0">開始(秒)</label>
+          <input id="trim-start-{{ a.id }}" type="number" min="0" value="0"
+                 style="width:68px;padding:2px 6px;border-radius:6px;border:1px solid var(--border);
+                        background:var(--surface2);color:var(--text);font-size:.82rem">
+          <label style="color:var(--text-muted);margin:0">終了(秒)</label>
+          <input id="trim-end-{{ a.id }}" type="number" min="1" placeholder="例: 60"
+                 style="width:68px;padding:2px 6px;border-radius:6px;border:1px solid var(--border);
+                        background:var(--surface2);color:var(--text);font-size:.82rem">
+          <button type="button"
+                  onclick="trimVideo({{ a.id }}, this)"
+                  style="padding:3px 12px;border-radius:6px;border:1px solid var(--border);
+                         background:var(--surface2);color:var(--text);font-size:.82rem;cursor:pointer">
+            ✂️ 切り出し
+          </button>
+        </div>
       </div>
 
       <!-- 画像プレビュー（記事投稿のみ: thumbnail→image_urls全件、最大20枚） -->
@@ -211,9 +271,8 @@ function confirmBulk() {
   return confirm(`選択した ${n} 件の記事を削除しますか？`);
 }
 
-function deleteAll() {
-  const n = document.querySelectorAll('.article-cb').length;
-  if (confirm(`承認待ち記事 ${n} 件をすべて削除しますか？`)) {
+function deleteAll(total) {
+  if (confirm(`承認待ち記事をすべて削除しますか？（全 ${total} 件）`)) {
     document.getElementById('delete-all-form').submit();
   }
 }
@@ -309,6 +368,79 @@ function saveSummary(id) {
     } else {
       alert('保存失敗: ' + d.error);
     }
+  });
+}
+
+// ── 動画再投稿 ────────────────────────────────────────────────────────────
+function requeueArticle(id, btn) {
+  if (!confirm('この動画を承認待ちに戻しますか？\n（ファイルが消えている場合は再ダウンロードします）')) return;
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  fetch('/api/articles/' + id + '/requeue', {
+    method: 'POST',
+    headers: {'X-Requested-With': 'fetch'}
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      var card = document.getElementById('card-' + id);
+      if (card) card.remove();
+      var badge = document.querySelector('.badge-pending');
+      if (badge) badge.textContent = parseInt(badge.textContent || '0') + 1;
+      if (!document.querySelector('[id^="card-"]')) location.reload();
+    } else {
+      alert('再投稿に失敗しました: ' + (d.error || ''));
+      btn.disabled = false;
+      btn.innerHTML = orig;
+    }
+  })
+  .catch(function() {
+    alert('通信エラーが発生しました');
+    btn.disabled = false;
+    btn.innerHTML = orig;
+  });
+}
+
+// ── 動画トリミング ──────────────────────────────────────────────────────────
+function trimVideo(id, btn) {
+  const start = parseInt(document.getElementById('trim-start-' + id).value) || 0;
+  const endVal = document.getElementById('trim-end-' + id).value;
+  const end = endVal !== '' ? parseInt(endVal) : null;
+  if (end !== null && end <= start) {
+    alert('終了時間は開始時間より大きい値を入力してください');
+    return;
+  }
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  fetch('/api/videos/' + id + '/trim', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({start: start, end: end})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      var src = document.getElementById('vid-src-' + id);
+      var vid = document.getElementById('vid-' + id);
+      if (src && vid) {
+        var base = src.getAttribute('src').split('?')[0];
+        src.setAttribute('src', base + '?t=' + Date.now());
+        vid.load();
+      }
+      btn.innerHTML = '✅ 完了';
+      setTimeout(function() { btn.innerHTML = orig; btn.disabled = false; }, 2000);
+    } else {
+      alert('トリミング失敗: ' + (d.error || '不明なエラー'));
+      btn.disabled = false;
+      btn.innerHTML = orig;
+    }
+  })
+  .catch(function() {
+    alert('通信エラーが発生しました');
+    btn.disabled = false;
+    btn.innerHTML = orig;
   });
 }
 

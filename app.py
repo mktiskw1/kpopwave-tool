@@ -30,10 +30,10 @@ DEFAULT_YOUTUBE_CHANNELS = [
     {"name": "BLACKPINK",    "url": "https://www.youtube.com/@BLACKPINK"},
     {"name": "TWICE",        "url": "https://www.youtube.com/@TWICE"},
     {"name": "IVE",          "url": "https://www.youtube.com/@IVEstarship"},
-    {"name": "LE SSERAFIM",  "url": "https://www.youtube.com/@LESSERAFIM"},
+    {"name": "LE SSERAFIM",  "url": "https://www.youtube.com/channel/UCs-QBT4qkj_YiQw1ZntDO3g"},
     {"name": "ILLIT",        "url": "https://www.youtube.com/@ILLIT_official"},
-    {"name": "tripleS",      "url": "https://www.youtube.com/@tripleS"},
-    {"name": "KISS OF LIFE", "url": "https://www.youtube.com/@KISSOFLIFE"},
+    {"name": "tripleS",      "url": "https://www.youtube.com/channel/UCJnL-TBcsYrF2SLs7tmiC8Q"},
+    {"name": "KISS OF LIFE", "url": "https://www.youtube.com/@KISSofLIFEofficial"},
 ]
 
 DEFAULT_FEEDS = [
@@ -263,25 +263,72 @@ def _build_image_list(thumbnail_url, image_urls_json, max_images=20):
 
 @app.route("/pending")
 def pending():
-    articles = Article.query.filter_by(status="pending").order_by(Article.created_at.desc()).all()
-    images_map: dict = {}
-    for a in articles:
-        imgs = _build_image_list(a.thumbnail_url, a.image_urls)
-        images_map[a.id] = imgs
-        logger.debug("pending preview article=%d imgs=%d", a.id, len(imgs))
-    return render_template("pending.html", articles=articles, images_map=images_map)
+    tab = request.args.get("tab", "all")
+
+    all_pending = Article.query.filter_by(status="pending").order_by(Article.created_at.desc()).all()
+
+    counts = {
+        "all":    len(all_pending),
+        "rss":    0,
+        "youtube": 0,
+        "video":  0,
+        "posted": Article.query.filter_by(status="posted", content_type="video").count(),
+    }
+    for a in all_pending:
+        src = a.feed_source or ""
+        if (a.content_type or "article") == "video":
+            counts["video"] += 1
+        elif src.startswith("YouTube:"):
+            counts["youtube"] += 1
+        else:
+            counts["rss"] += 1
+
+    if tab == "posted":
+        articles = (Article.query
+                    .filter_by(status="posted", content_type="video")
+                    .order_by(Article.created_at.desc())
+                    .limit(50).all())
+        images_map = {}
+    elif tab == "video":
+        articles = [a for a in all_pending if (a.content_type or "article") == "video"]
+        images_map = {}
+    elif tab == "youtube":
+        articles = [a for a in all_pending
+                    if (a.feed_source or "").startswith("YouTube:")
+                    and (a.content_type or "article") != "video"]
+        images_map = {}
+        for a in articles:
+            images_map[a.id] = _build_image_list(a.thumbnail_url, a.image_urls)
+    elif tab == "rss":
+        articles = [a for a in all_pending
+                    if not (a.feed_source or "").startswith("YouTube")
+                    and (a.content_type or "article") != "video"]
+        images_map = {}
+        for a in articles:
+            images_map[a.id] = _build_image_list(a.thumbnail_url, a.image_urls)
+    else:
+        articles = all_pending
+        images_map = {}
+        for a in articles:
+            imgs = _build_image_list(a.thumbnail_url, a.image_urls)
+            images_map[a.id] = imgs
+            logger.debug("pending preview article=%d imgs=%d", a.id, len(imgs))
+
+    return render_template("pending.html", articles=articles, images_map=images_map,
+                           active_tab=tab, counts=counts)
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
 def bulk_delete_articles():
     ids = request.form.getlist("ids")
+    tab = request.form.get("tab", "all")
     if not ids:
         flash("記事が選択されていません", "secondary")
-        return redirect(url_for("pending"))
+        return redirect(url_for("pending", tab=tab))
     Article.query.filter(Article.id.in_([int(i) for i in ids])).delete(synchronize_session=False)
     db.session.commit()
     flash(f"{len(ids)} 件の記事を削除しました", "warning")
-    return redirect(url_for("pending"))
+    return redirect(url_for("pending", tab=tab))
 
 
 @app.route("/pending/delete-all", methods=["POST"])
@@ -1061,6 +1108,232 @@ def collect_youtube():
     new = collect_youtube_videos(app)
     flash(f"YouTube 収集完了: {new} 件の新しい動画を取得しました（承認待ち画面で要約を生成してください）", "success")
     return redirect(url_for("index"))
+
+
+@app.route("/api/videos/<int:article_id>/trim", methods=["POST"])
+def trim_video(article_id):
+    import subprocess as _sp
+    data = request.get_json(force=True) or {}
+    start = int(data.get("start", 0))
+    end   = data.get("end")
+
+    article = Article.query.get_or_404(article_id)
+    if not article.video_file_path:
+        return jsonify({"ok": False, "error": "動画ファイルがありません"}), 400
+
+    video_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", article.video_file_path)
+    if not os.path.exists(video_path):
+        return jsonify({"ok": False, "error": "ファイルが見つかりません"}), 404
+
+    ffmpeg_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin", "ffmpeg.exe")
+    if not os.path.exists(ffmpeg_exe):
+        return jsonify({"ok": False, "error": "ffmpeg.exe が見つかりません"}), 500
+
+    tmp_path = video_path + ".trim.tmp.mp4"
+    cmd = [ffmpeg_exe, "-y", "-i", video_path, "-ss", str(start)]
+    if end is not None:
+        cmd += ["-to", str(int(end))]
+    cmd += ["-c", "copy", tmp_path]
+
+    try:
+        result = _sp.run(cmd, capture_output=True, timeout=300)
+        if result.returncode != 0:
+            err = result.stderr.decode("utf-8", errors="replace")[-500:]
+            return jsonify({"ok": False, "error": err}), 500
+        os.replace(tmp_path, video_path)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+    logger.info("動画トリミング完了: article_id=%d start=%d end=%s", article_id, start, end)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/articles/<int:article_id>/requeue", methods=["POST"])
+def requeue_article(article_id):
+    import shutil, tempfile
+
+    article = Article.query.get_or_404(article_id)
+    if (article.content_type or "article") != "video":
+        return jsonify({"ok": False, "error": "動画記事のみ再投稿できます"}), 400
+
+    # 動画ファイルが存在しない場合は再ダウンロード
+    needs_download = False
+    if article.video_file_path:
+        vpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", article.video_file_path)
+        if not os.path.exists(vpath):
+            needs_download = True
+    else:
+        needs_download = True
+
+    if needs_download:
+        yt_url = article.url
+        from urllib.parse import urlparse, parse_qs as _parse_qs
+        parsed = urlparse(yt_url)
+        vid_id = _parse_qs(parsed.query).get("v", [None])[0]
+        if not vid_id:
+            return jsonify({"ok": False, "error": "動画IDを取得できませんでした"}), 400
+
+        try:
+            import yt_dlp
+        except ImportError:
+            return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
+
+        tmp_dir = os.path.join(tempfile.gettempdir(), "kpopwave_videos")
+        os.makedirs(tmp_dir, exist_ok=True)
+        ffmpeg_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin")
+        dl_opts = {
+            "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]",
+            "ffmpeg_location": ffmpeg_bin,
+            "merge_output_format": "mp4",
+            "outtmpl": os.path.join(tmp_dir, f"{vid_id}.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "ignoreerrors": True,
+        }
+        try:
+            with yt_dlp.YoutubeDL(dl_opts) as ydl:
+                ydl.download([yt_url])
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"ダウンロードエラー: {str(exc)[:120]}"}), 500
+
+        from video_collector import _find_downloaded_file
+        found = _find_downloaded_file(tmp_dir, vid_id)
+        if not found:
+            return jsonify({"ok": False, "error": "ダウンロードファイルが見つかりません"}), 500
+
+        local_path, ext = found
+        static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
+        os.makedirs(static_dir, exist_ok=True)
+        dest_filename = f"{vid_id}.{ext}"
+        dest_path = os.path.join(static_dir, dest_filename)
+        try:
+            shutil.copy2(local_path, dest_path)
+            try:
+                os.remove(local_path)
+            except Exception:
+                pass
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"ファイルコピーエラー: {str(exc)[:120]}"}), 500
+
+        article.video_file_path = f"videos/{dest_filename}"
+        logger.info("再投稿: 動画再ダウンロード完了 id=%d %s", article_id, dest_filename)
+
+    article.status = "pending"
+    db.session.commit()
+    logger.info("再投稿キュー: id=%d title=%s", article_id, article.title[:60])
+    return jsonify({"ok": True})
+
+
+@app.route("/api/videos/add-manual", methods=["POST"])
+def add_video_manual():
+    import shutil, tempfile
+
+    data = request.get_json(force=True) or {}
+    yt_url = (data.get("url") or "").strip()
+
+    if not yt_url:
+        return jsonify({"ok": False, "error": "URLを入力してください"}), 400
+    if "youtube.com/watch" not in yt_url and "youtu.be/" not in yt_url:
+        return jsonify({"ok": False, "error": "YouTube動画のURLを入力してください"}), 400
+
+    if Article.query.filter(
+        Article.url == yt_url,
+        Article.status.in_(["pending", "queued"])
+    ).first():
+        return jsonify({"ok": False, "error": "この動画はすでに承認待ち・キュー中です"}), 400
+
+    try:
+        import yt_dlp
+    except ImportError:
+        return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
+
+    info_opts = {"quiet": True, "no_warnings": True, "ignoreerrors": True}
+    try:
+        with yt_dlp.YoutubeDL(info_opts) as ydl:
+            full = ydl.extract_info(yt_url, download=False)
+        if not full:
+            return jsonify({"ok": False, "error": "動画情報を取得できませんでした"}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"動画情報取得エラー: {str(exc)[:120]}"}), 500
+
+    vid_id = full.get("id", "")
+    if not vid_id:
+        return jsonify({"ok": False, "error": "動画IDを取得できませんでした"}), 400
+
+    title = (full.get("title") or "YouTube動画")[:500]
+
+    tmp_dir = os.path.join(tempfile.gettempdir(), "kpopwave_videos")
+    os.makedirs(tmp_dir, exist_ok=True)
+    outtmpl = os.path.join(tmp_dir, f"{vid_id}.%(ext)s")
+    ffmpeg_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin")
+
+    dl_opts = {
+        "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]",
+        "ffmpeg_location": ffmpeg_bin,
+        "merge_output_format": "mp4",
+        "outtmpl": outtmpl,
+        "quiet": True,
+        "no_warnings": True,
+        "ignoreerrors": True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(dl_opts) as ydl:
+            ydl.download([yt_url])
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"ダウンロードエラー: {str(exc)[:120]}"}), 500
+
+    from video_collector import _find_downloaded_file
+    found = _find_downloaded_file(tmp_dir, vid_id)
+    if not found:
+        return jsonify({"ok": False, "error": "ダウンロードファイルが見つかりません"}), 500
+
+    local_path, ext = found
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
+    os.makedirs(static_dir, exist_ok=True)
+    dest_filename = f"{vid_id}.{ext}"
+    dest_path = os.path.join(static_dir, dest_filename)
+
+    try:
+        shutil.copy2(local_path, dest_path)
+        try:
+            os.remove(local_path)
+        except Exception:
+            pass
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"ファイルコピーエラー: {str(exc)[:120]}"}), 500
+
+    ud = full.get("upload_date", "")
+    published_at = None
+    if ud and len(ud) == 8:
+        try:
+            published_at = datetime.strptime(ud, "%Y%m%d")
+        except Exception:
+            pass
+
+    uploader = full.get("uploader") or full.get("channel") or "YouTube"
+    article = Article(
+        feed_source=f"YouTube動画: {uploader}",
+        title=title,
+        url=yt_url,
+        published_at=published_at,
+        raw_content=(full.get("description") or "")[:5000],
+        thumbnail_url=full.get("thumbnail") or None,
+        status="pending",
+        content_type="video",
+        video_file_path=f"videos/{dest_filename}",
+    )
+    db.session.add(article)
+    db.session.commit()
+
+    logger.info("動画手動追加: %s (%s)", title[:60], yt_url)
+    return jsonify({"ok": True, "title": title})
 
 
 @app.route("/collect-videos", methods=["POST"])

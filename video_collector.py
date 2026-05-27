@@ -9,8 +9,9 @@ from database import Article, Setting, db
 
 logger = logging.getLogger(__name__)
 
-MAX_DURATION = 600   # 秒（MV・ティザー対応：最大10分）
-DAYS_LIMIT = 7       # 過去N日以内の動画のみ対象
+MAX_DURATION = 600          # 秒（MV・ティザー対応：最大10分）
+DAYS_LIMIT = 7              # 過去N日以内の動画のみ対象
+MAX_VIDEOS_PER_CHANNEL = 3  # チャンネルごとの最大取得件数
 
 DEFAULT_CHANNELS = [
     {"name": "aespa",        "url": "https://www.youtube.com/@aespa"},
@@ -141,6 +142,10 @@ def _fetch_channel_entries(channel_url: str, flat_opts: dict, cutoff_str: str,
                 continue
             upload_date = entry.get("upload_date", "")
             if upload_date and upload_date < cutoff_str:
+                logger.debug(
+                    "[%s] スキップ（%sは7日以上前）: %s",
+                    channel_name, upload_date, entry.get("title", "")[:60],
+                )
                 continue
             candidates.append({
                 "id":          vid_id,
@@ -158,21 +163,22 @@ def _fetch_channel_entries(channel_url: str, flat_opts: dict, cutoff_str: str,
     return candidates
 
 
-def _collect_channel_video(channel_info: dict, tmp_dir: str, existing_urls: set) -> dict | None:
+def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set) -> list[dict]:
     """
-    yt-dlpで指定チャンネルから最新動画（≤MAX_DURATION秒・DAYS_LIMIT日以内）を1件取得する。
-    成功時は動画メタデータdict、失敗時はNoneを返す。
+    yt-dlpで指定チャンネルから最新動画（≤MAX_DURATION秒・DAYS_LIMIT日以内）を
+    最大MAX_VIDEOS_PER_CHANNEL件取得する。
+    ダウンロード済み動画メタデータのリストを返す（0件の場合は空リスト）。
     """
     try:
         import yt_dlp
     except ImportError:
         logger.error("yt-dlpが未インストールです。pip install yt-dlp を実行してください。")
-        return None
+        return []
 
     channel_name = channel_info.get("name", "Unknown")
     channel_url = channel_info.get("url", "").rstrip("/")
     if not channel_url:
-        return None
+        return []
 
     cutoff_str = (datetime.utcnow() - timedelta(days=DAYS_LIMIT)).strftime("%Y%m%d")
 
@@ -189,17 +195,27 @@ def _collect_channel_video(channel_info: dict, tmp_dir: str, existing_urls: set)
 
     if not candidates:
         logger.info("[%s] 新着動画なし（過去%d日・未収録）", channel_name, DAYS_LIMIT)
-        return None
+        return []
 
-    # ─── Step 2: 各候補の詳細情報でdurationチェック ───────────────────────
+    # ─── Step 2: 各候補の詳細情報でdurationチェック（最大MAX_VIDEOS_PER_CHANNEL件）
     info_opts = {"quiet": True, "no_warnings": True, "ignoreerrors": True}
 
-    target = None
+    targets = []
     for c in candidates:
+        if len(targets) >= MAX_VIDEOS_PER_CHANNEL:
+            break
         try:
             with yt_dlp.YoutubeDL(info_opts) as ydl:
                 full = ydl.extract_info(c["url"], download=False)
             if not full:
+                continue
+            # フラット取得では upload_date が返らないことが多いため Step2 で確認
+            actual_date = full.get("upload_date") or c.get("upload_date", "")
+            if actual_date and actual_date < cutoff_str:
+                logger.info(
+                    "[%s] スキップ（%sは7日以上前）: %s",
+                    channel_name, actual_date, c["title"][:60],
+                )
                 continue
             duration = full.get("duration") or 9999
             if duration > MAX_DURATION:
@@ -208,7 +224,7 @@ def _collect_channel_video(channel_info: dict, tmp_dir: str, existing_urls: set)
                     channel_name, duration, MAX_DURATION, c["title"][:60],
                 )
                 continue
-            target = {
+            targets.append({
                 "id":           c["id"],
                 "url":          c["url"],
                 "title":        (full.get("title") or c["title"])[:500],
@@ -217,51 +233,53 @@ def _collect_channel_video(channel_info: dict, tmp_dir: str, existing_urls: set)
                 "duration":     duration,
                 "channel_name": full.get("uploader") or channel_name,
                 "upload_date":  full.get("upload_date") or c.get("upload_date", ""),
-            }
-            break
+            })
         except Exception as exc:
             logger.warning("[%s] 動画情報取得エラー %s: %s", channel_name, c["url"], exc)
 
-    if not target:
+    if not targets:
         logger.info("[%s] 条件に合う動画なし（%ds以内）", channel_name, MAX_DURATION)
-        return None
+        return []
 
-    # ─── Step 3: ダウンロード ─────────────────────────────────────────────
-    vid_id = target["id"]
+    logger.info("[%s] ダウンロード対象: %d件", channel_name, len(targets))
 
-    # outtmpl に vid_id を直接埋め込み、%(ext)s のみ動的にする
-    outtmpl_path = os.path.join(tmp_dir, f"{vid_id}.%(ext)s")
-
-    dl_opts = {
+    # ─── Step 3: ダウンロード（各ターゲット） ────────────────────────────────
+    dl_opts_base = {
         "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]",
         "ffmpeg_location": r"C:\Users\mktis\kpopwave-tool\ffmpeg\bin",
         "merge_output_format": "mp4",
-        "outtmpl": outtmpl_path,
         "quiet": False,
         "no_warnings": False,
         "ignoreerrors": True,
     }
 
-    try:
-        with yt_dlp.YoutubeDL(dl_opts) as ydl:
-            ydl.download([target["url"]])
-    except Exception as exc:
-        logger.error("[%s] ダウンロードエラー: %s", channel_name, exc)
-        return None
+    results = []
+    for target in targets:
+        vid_id = target["id"]
+        outtmpl_path = os.path.join(tmp_dir, f"{vid_id}.%(ext)s")
+        dl_opts = {**dl_opts_base, "outtmpl": outtmpl_path}
 
-    # ファイルをディレクトリスキャンで確実に検索
-    found = _find_downloaded_file(tmp_dir, vid_id)
-    if not found:
-        return None
+        try:
+            with yt_dlp.YoutubeDL(dl_opts) as ydl:
+                ydl.download([target["url"]])
+        except Exception as exc:
+            logger.error("[%s] ダウンロードエラー: %s", channel_name, exc)
+            continue
 
-    local_path, ext = found
-    target["local_path"] = local_path
-    target["ext"] = ext
-    logger.info(
-        "[%s] ダウンロード完了: %s (%ds) → %s",
-        channel_name, target["title"][:60], target["duration"], os.path.basename(local_path),
-    )
-    return target
+        found = _find_downloaded_file(tmp_dir, vid_id)
+        if not found:
+            continue
+
+        local_path, ext = found
+        target["local_path"] = local_path
+        target["ext"] = ext
+        logger.info(
+            "[%s] ダウンロード完了: %s (%ds) → %s",
+            channel_name, target["title"][:60], target["duration"], os.path.basename(local_path),
+        )
+        results.append(target)
+
+    return results
 
 
 def collect_youtube_videos(app) -> int:
@@ -282,59 +300,60 @@ def collect_youtube_videos(app) -> int:
         channel_name = ch.get("name", "Unknown")
         logger.info("動画収集開始: %s", channel_name)
 
-        video = _collect_channel_video(ch, tmp_dir, existing_urls)
-        if not video:
+        videos = _collect_channel_videos(ch, tmp_dir, existing_urls)
+        if not videos:
             continue
 
-        vid_id = video["id"]
-        ext = video.get("ext", "mp4")
-        dest_filename = f"{vid_id}.{ext}"
-        dest_path = os.path.join(static_dir, dest_filename)
+        for video in videos:
+            vid_id = video["id"]
+            ext = video.get("ext", "mp4")
+            dest_filename = f"{vid_id}.{ext}"
+            dest_path = os.path.join(static_dir, dest_filename)
 
-        try:
-            shutil.copy2(video["local_path"], dest_path)
             try:
-                os.remove(video["local_path"])
-            except Exception:
-                pass
-        except Exception as exc:
-            logger.error("[%s] ファイルコピーエラー: %s", channel_name, exc)
-            continue
-
-        yt_url = video["url"]
-        with app.app_context():
-            if Article.query.filter_by(url=yt_url).first():
-                logger.info("[%s] 重複スキップ: %s", channel_name, yt_url)
-                continue
-
-            published_at = None
-            ud = video.get("upload_date", "")
-            if ud and len(ud) == 8:
+                shutil.copy2(video["local_path"], dest_path)
                 try:
-                    published_at = datetime.strptime(ud, "%Y%m%d")
+                    os.remove(video["local_path"])
                 except Exception:
                     pass
+            except Exception as exc:
+                logger.error("[%s] ファイルコピーエラー: %s", channel_name, exc)
+                continue
 
-            article = Article(
-                feed_source=f"YouTube動画: {channel_name}",
-                title=video["title"] or "YouTube動画",
-                url=yt_url,
-                published_at=published_at,
-                raw_content=video.get("description", ""),
-                thumbnail_url=video.get("thumbnail") or None,
-                status="pending",
-                content_type="video",
-                video_file_path=f"videos/{dest_filename}",
-            )
-            db.session.add(article)
-            db.session.commit()
+            yt_url = video["url"]
+            with app.app_context():
+                if Article.query.filter_by(url=yt_url).first():
+                    logger.info("[%s] 重複スキップ: %s", channel_name, yt_url)
+                    continue
 
-            existing_urls.add(yt_url)
-            new_count += 1
-            logger.info(
-                "[%s] DB追加: %s (%ds)",
-                channel_name, video["title"][:60], video.get("duration", 0),
-            )
+                published_at = None
+                ud = video.get("upload_date", "")
+                if ud and len(ud) == 8:
+                    try:
+                        published_at = datetime.strptime(ud, "%Y%m%d")
+                    except Exception:
+                        pass
+
+                article = Article(
+                    feed_source=f"YouTube動画: {channel_name}",
+                    title=video["title"] or "YouTube動画",
+                    url=yt_url,
+                    published_at=published_at,
+                    raw_content=video.get("description", ""),
+                    thumbnail_url=video.get("thumbnail") or None,
+                    status="pending",
+                    content_type="video",
+                    video_file_path=f"videos/{dest_filename}",
+                )
+                db.session.add(article)
+                db.session.commit()
+
+                existing_urls.add(yt_url)
+                new_count += 1
+                logger.info(
+                    "[%s] DB追加: %s (%ds)",
+                    channel_name, video["title"][:60], video.get("duration", 0),
+                )
 
     logger.info("動画収集完了: %d件追加", new_count)
     return new_count
