@@ -19,6 +19,11 @@ instance/
 # バイナリ
 cloudflared.exe
 
+# yt-dlpダウンロード動画（容量大のため除外）
+static/videos/*.mp4
+static/videos/*.mkv
+static/videos/*.webm
+
 # Claude Code設定
 .claude/
 

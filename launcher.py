@@ -10,11 +10,19 @@ import os
 import webbrowser
 import sys
 import re
+import json
+import sqlite3
+import threading
+import time
+import urllib.request
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 VENV_PYTHON = os.path.join(PROJECT_DIR, "venv", "Scripts", "python.exe")
 if not os.path.exists(VENV_PYTHON):
     VENV_PYTHON = sys.executable
+
+NGROK_EXE = os.path.join(PROJECT_DIR, "ngrok", "ngrok.exe")
+DB_PATH    = os.path.join(PROJECT_DIR, "instance", "rock_metal.db")
 
 
 def run_tool():
@@ -182,6 +190,87 @@ def set_status(msg):
     status_var.set(msg)
 
 
+# ── ngrok ──────────────────────────────────────────────────
+def _get_ngrok_url() -> str | None:
+    """localhost:4040/api/tunnels から HTTPS URL を取得する"""
+    try:
+        with urllib.request.urlopen("http://localhost:4040/api/tunnels", timeout=2) as resp:
+            data = json.loads(resp.read())
+        for t in data.get("tunnels", []):
+            if t.get("proto") == "https":
+                return t["public_url"]
+    except Exception:
+        pass
+    return None
+
+
+def _update_ngrok_url_in_db(url: str) -> bool:
+    """SQLite の app_base_url を ngrok URL に更新する"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE settings SET value=? WHERE key='app_base_url'", (url,))
+        if c.rowcount == 0:
+            c.execute("INSERT INTO settings (key, value) VALUES ('app_base_url', ?)", (url,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        return False
+
+
+def run_ngrok():
+    # すでに起動中かチェック
+    existing_url = _get_ngrok_url()
+    if existing_url:
+        messagebox.showinfo("ngrok", f"すでに起動中です\n\n{existing_url}")
+        set_status(f"ngrok 起動中: {existing_url}")
+        return
+
+    if not os.path.exists(NGROK_EXE):
+        messagebox.showerror(
+            "エラー",
+            "ngrok.exe が見つかりません。\nsetup_ngrok.bat を先に実行してください。\n\n"
+            f"Expected: {NGROK_EXE}",
+        )
+        set_status("ngrok: setup が必要")
+        return
+
+    # 残存プロセスを終了してから起動
+    subprocess.run(["taskkill", "/f", "/im", "ngrok.exe"], capture_output=True)
+    subprocess.Popen(
+        [NGROK_EXE, "http", "5000"],
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+    )
+    set_status("ngrok を起動中... (最大20秒)")
+
+    def _wait_for_ngrok():
+        url = None
+        for _ in range(10):
+            time.sleep(2)
+            url = _get_ngrok_url()
+            if url:
+                break
+
+        def _on_done():
+            if not url:
+                messagebox.showerror(
+                    "エラー",
+                    "ngrok の起動がタイムアウトしました（20秒）。\n"
+                    "ngrok ウィンドウのエラーを確認してください。",
+                )
+                set_status("ngrok 起動タイムアウト")
+                return
+            ok = _update_ngrok_url_in_db(url)
+            db_msg = "app_base_url を更新しました。" if ok else "DB 更新に失敗しました。手動で設定してください。"
+            messagebox.showinfo("ngrok 起動完了", f"URL: {url}\n\n{db_msg}")
+            set_status(f"ngrok: {url}")
+
+        root.after(0, _on_done)
+
+    threading.Thread(target=_wait_for_ngrok, daemon=True).start()
+
+
 # ── スリープ制御 ────────────────────────────────────────────
 _sleep_disabled = False
 _original_ac_min = None
@@ -272,6 +361,7 @@ BUTTONS = [
     ("③ GitHub に保存",         "⬆  add → commit → push",               git_push,   "#1a472a"),
     ("④ GitHub から最新版取得",  "⬇  git pull",                           git_pull,   "#1a472a"),
     ("⑤ Claude Code 起動",     "🤖  VS Code を開いて手順を表示",          run_claude, "#0f3460"),
+    ("⑦ ngrok 起動",           "🌐  トンネル起動 → URL を設定に反映",     run_ngrok,  "#0d4d4d"),
 ]
 
 frame = tk.Frame(root, bg=BG, padx=20, pady=15)

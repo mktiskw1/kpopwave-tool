@@ -225,6 +225,41 @@
     </div>
   </div>
 
+  <!-- yt-dlp 動画収集チャンネル -->
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-camera-video-fill me-2" style="color:var(--accent)"></i>動画収集チャンネル（yt-dlp）</span>
+        <button type="button" class="btn btn-sm btn-outline-success py-0 px-2" onclick="addChannel()">
+          <i class="bi bi-plus-lg"></i> 追加
+        </button>
+      </div>
+      <div class="card-body">
+        <div class="form-text mb-2" style="font-size:.75rem">
+          <i class="bi bi-info-circle me-1"></i>
+          過去7日以内の動画（180秒以内）を自動ダウンロード。サイドバーの「動画収集」ボタンで実行します。
+        </div>
+        <div id="channels-container">
+          {% for ch in settings.youtube_channels %}
+          <div class="input-group mb-2 channel-row">
+            <input type="text" class="form-control" name="youtube_channel_name"
+                   placeholder="グループ名" value="{{ ch.name }}" style="max-width:130px;font-size:.82rem">
+            <input type="text" class="form-control" name="youtube_channel_url"
+                   placeholder="https://www.youtube.com/@..." value="{{ ch.url }}" style="font-size:.82rem">
+            <button type="button" class="btn btn-outline-danger btn-sm px-2"
+                    onclick="this.closest('.channel-row').remove()">
+              <i class="bi bi-trash3"></i>
+            </button>
+          </div>
+          {% endfor %}
+        </div>
+        <div class="form-text" style="font-size:.72rem">
+          yt-dlpが未インストールの場合: <code>pip install yt-dlp</code>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="col-12">
     <button type="submit" class="btn btn-accent px-4">
       <i class="bi bi-save-fill me-1"></i> 設定を保存
@@ -267,6 +302,20 @@ function addFeed() {
     </button>`;
   c.appendChild(div);
   div.querySelector('input[name=feed_name]').focus();
+}
+
+function addChannel() {
+  const c = document.getElementById('channels-container');
+  const div = document.createElement('div');
+  div.className = 'input-group mb-2 channel-row';
+  div.innerHTML = `
+    <input type="text" class="form-control" name="youtube_channel_name" placeholder="グループ名" style="max-width:130px;font-size:.82rem">
+    <input type="text" class="form-control" name="youtube_channel_url" placeholder="https://www.youtube.com/@..." style="font-size:.82rem">
+    <button type="button" class="btn btn-outline-danger btn-sm px-2" onclick="this.closest('.channel-row').remove()">
+      <i class="bi bi-trash3"></i>
+    </button>`;
+  c.appendChild(div);
+  div.querySelector('input[name=youtube_channel_name]').focus();
 }
 </script>
 {% endblock %}

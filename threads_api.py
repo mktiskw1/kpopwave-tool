@@ -6,7 +6,7 @@ from datetime import datetime
 
 import requests
 
-from database import Article, Setting, db
+from database import Article, Setting, db  # Setting は動画URL生成に使用
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,62 @@ def _publish(user_id: str, token: str, container_id: str) -> tuple[bool, str]:
         err = data.get("error", {}).get("message", res.text[:200])
         return False, f"公開失敗: {err}"
     return True, data.get("id", "")
+
+
+def _post_video(user_id: str, token: str, post_text: str, video_url: str, article_id: int, app) -> tuple[bool, str]:
+    """動画投稿。コンテナ作成→処理待ち→公開。失敗時はテキストにフォールバック。"""
+    res = requests.post(
+        f"{THREADS_API}/{user_id}/threads",
+        data={
+            "media_type": "VIDEO",
+            "video_url": video_url,
+            "text": post_text,
+            "access_token": token,
+        },
+        timeout=30,
+    )
+    data = res.json()
+    logger.info("Container (VIDEO): HTTP %d %s", res.status_code, data)
+    if res.status_code != 200:
+        err = data.get("error", {}).get("message", res.text[:200])
+        logger.warning("動画コンテナ作成失敗、テキスト投稿にフォールバック: %s", err)
+        return _post_text_only(user_id, token, post_text, article_id, app)
+
+    container_id = data.get("id")
+    if not container_id:
+        logger.warning("コンテナIDなし、テキスト投稿にフォールバック")
+        return _post_text_only(user_id, token, post_text, article_id, app)
+
+    # 動画処理完了を最大150秒ポーリング
+    logger.info("動画処理待ち: container_id=%s", container_id)
+    for attempt in range(30):
+        time.sleep(5)
+        st_res = requests.get(
+            f"{THREADS_API}/{container_id}",
+            params={"fields": "status,error_message", "access_token": token},
+            timeout=15,
+        )
+        if st_res.status_code != 200:
+            continue
+        st = st_res.json()
+        status = st.get("status", "")
+        logger.info("動画処理状態 [%d/30]: %s", attempt + 1, status)
+        if status == "FINISHED":
+            break
+        if status == "ERROR":
+            err_msg = st.get("error_message", "動画処理エラー")
+            logger.warning("動画処理エラー、テキスト投稿にフォールバック: %s", err_msg)
+            return _post_text_only(user_id, token, post_text, article_id, app)
+    else:
+        logger.warning("動画処理タイムアウト、テキスト投稿にフォールバック")
+        return _post_text_only(user_id, token, post_text, article_id, app)
+
+    ok, result = _publish(user_id, token, container_id)
+    if ok:
+        _mark_posted(app, article_id, result)
+        return True, f"投稿成功 (VIDEO, ID: {result})"
+    _mark_failed(app, article_id, result)
+    return False, result
 
 
 def _post_text_only(user_id: str, token: str, post_text: str, article_id: int, app) -> tuple[bool, str]:
@@ -200,8 +256,10 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
             return False, "記事が見つかりません"
         if not article.summary:
             return False, "要約がありません。先に要約を生成してください"
-        post_text     = article.summary
-        thumbnail_url = article.thumbnail_url or ""
+        post_text      = article.summary
+        thumbnail_url  = article.thumbnail_url or ""
+        content_type   = (getattr(article, "content_type", None) or "article")
+        video_file_path = getattr(article, "video_file_path", None)
 
         # thumbnail を1枚目、image_urls を全て追加（除外ドメイン・小画像・重複を除く）
         images: list = []
@@ -222,14 +280,17 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
                 pass
 
     logger.info(
-        "Threads投稿準備 article=%d images=%d test=%s",
-        article_id, len(images), test_mode,
+        "Threads投稿準備 article=%d content_type=%s images=%d test=%s",
+        article_id, content_type, len(images), test_mode,
     )
 
     # ── テストモード ──────────────────────────────────────────────
     if test_mode:
         logger.info("[TEST] Post text:\n%s", post_text)
-        logger.info("[TEST] images: %s", images)
+        if content_type == "video":
+            logger.info("[TEST] video_file_path: %s", video_file_path)
+        else:
+            logger.info("[TEST] images: %s", images)
         with app.app_context():
             art = Article.query.get(article_id)
             if art:
@@ -237,7 +298,8 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
                 art.posted_at = datetime.utcnow()
                 art.threads_post_id = f"test_{article_id}"
                 db.session.commit()
-        return True, f"テストモード: 投稿シミュレーション成功 ({len(images)}枚)"
+        mode_label = "VIDEO" if content_type == "video" else f"{len(images)}枚"
+        return True, f"テストモード: 投稿シミュレーション成功 ({mode_label})"
 
     # ── 実投稿 ───────────────────────────────────────────────────
     user_id, token = _get_credentials(app)
@@ -245,6 +307,15 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
         return False, "Threads の認証情報が設定されていません"
 
     try:
+        # 動画投稿
+        if content_type == "video" and video_file_path:
+            with app.app_context():
+                base_url = Setting.get("app_base_url", "http://localhost:5000").rstrip("/")
+            video_url = f"{base_url}/static/{video_file_path}"
+            logger.info("動画URL: %s", video_url)
+            return _post_video(user_id, token, post_text, video_url, article_id, app)
+
+        # 記事投稿（画像なし・1枚・複数）
         if len(images) >= 2:
             return _post_carousel(user_id, token, post_text, images, article_id, app)
         elif len(images) == 1:

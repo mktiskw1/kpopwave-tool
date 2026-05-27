@@ -35,6 +35,9 @@ class Article(db.Model):
     post_style = db.Column(db.String(20), nullable=True)
     # 複数画像URL（JSON配列テキスト）
     image_urls = db.Column(db.Text, nullable=True)
+    # 動画投稿用
+    content_type = db.Column(db.String(20), nullable=True, default='article')  # 'article' or 'video'
+    video_file_path = db.Column(db.String(500), nullable=True)  # static/videos/xxxx.mp4 形式
 
     def to_dict(self):
         return {

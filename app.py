@@ -24,6 +24,18 @@ _THREADS_SCOPES = (
     "threads_share_to_instagram"
 )
 
+DEFAULT_YOUTUBE_CHANNELS = [
+    {"name": "aespa",        "url": "https://www.youtube.com/@aespa"},
+    {"name": "NewJeans",     "url": "https://www.youtube.com/@NewJeans_official"},
+    {"name": "BLACKPINK",    "url": "https://www.youtube.com/@BLACKPINK"},
+    {"name": "TWICE",        "url": "https://www.youtube.com/@TWICE"},
+    {"name": "IVE",          "url": "https://www.youtube.com/@IVEstarship"},
+    {"name": "LE SSERAFIM",  "url": "https://www.youtube.com/@LESSERAFIM"},
+    {"name": "ILLIT",        "url": "https://www.youtube.com/@ILLIT_official"},
+    {"name": "tripleS",      "url": "https://www.youtube.com/@tripleS"},
+    {"name": "KISS OF LIFE", "url": "https://www.youtube.com/@KISSOFLIFE"},
+]
+
 DEFAULT_FEEDS = [
     {"name": "Soompi",      "url": "https://www.soompi.com/feed/"},
     {"name": "Koreaboo",    "url": "https://www.koreaboo.com/feed/"},
@@ -51,6 +63,10 @@ def create_app() -> Flask:
         _init_default_settings()
         _migrate_db()
 
+    # 動画保存用ディレクトリを起動時に作成
+    videos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
+    os.makedirs(videos_dir, exist_ok=True)
+
     return app
 
 
@@ -70,6 +86,8 @@ def _migrate_db():
         ("engagement_fetched_at", "DATETIME"),
         ("post_style", "VARCHAR(20)"),
         ("image_urls", "TEXT"),
+        ("content_type", "VARCHAR(20) DEFAULT 'article'"),
+        ("video_file_path", "VARCHAR(500)"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -109,6 +127,7 @@ def _init_default_settings():
         "meta_app_id": os.getenv("META_APP_ID", ""),
         "meta_app_secret": os.getenv("META_APP_SECRET", ""),
         "app_base_url": os.getenv("APP_BASE_URL", "http://localhost:5000"),
+        "youtube_channels": json.dumps(DEFAULT_YOUTUBE_CHANNELS),
     }
     for key, value in defaults.items():
         if not Setting.query.filter_by(key=key).first():
@@ -627,6 +646,12 @@ def settings():
                  for n, u in zip(feed_names, feed_urls) if u.strip()]
         Setting.set("rss_feeds", json.dumps(feeds))
 
+        ch_names = request.form.getlist("youtube_channel_name")
+        ch_urls = request.form.getlist("youtube_channel_url")
+        channels = [{"name": n.strip(), "url": u.strip()}
+                    for n, u in zip(ch_names, ch_urls) if u.strip()]
+        Setting.set("youtube_channels", json.dumps(channels))
+
         flash("設定を保存しました", "success")
 
         if hasattr(app, "reschedule_post_jobs"):
@@ -660,6 +685,7 @@ def settings():
         "youtube_max_view_count": Setting.get("youtube_max_view_count", "0"),
         "test_mode": Setting.get("test_mode", "true") == "true",
         "rss_feeds": json.loads(Setting.get("rss_feeds", "[]") or "[]"),
+        "youtube_channels": json.loads(Setting.get("youtube_channels", "[]") or "[]"),
         "meta_app_id": Setting.get("meta_app_id"),
         "meta_app_secret": Setting.get("meta_app_secret"),
         "app_base_url": base_url,
@@ -1034,6 +1060,15 @@ def collect_youtube():
 
     new = collect_youtube_videos(app)
     flash(f"YouTube 収集完了: {new} 件の新しい動画を取得しました（承認待ち画面で要約を生成してください）", "success")
+    return redirect(url_for("index"))
+
+
+@app.route("/collect-videos", methods=["POST"])
+def collect_videos():
+    from video_collector import collect_youtube_videos as collect_yt_dlp_videos
+
+    new = collect_yt_dlp_videos(app)
+    flash(f"動画収集完了: {new} 件の動画をダウンロードしました（承認待ち画面で確認してください）", "success")
     return redirect(url_for("index"))
 
 

@@ -60,7 +60,24 @@
         </div>
       </div>
 
-      <!-- 画像プレビュー（投稿と同じロジック: thumbnail→image_urls全件、最大20枚） -->
+      <!-- 動画プレビュー（content_type == 'video' の場合） -->
+      {% if (a.content_type or 'article') == 'video' and a.video_file_path %}
+      <div class="mb-2">
+        <div class="mb-1" style="font-size:.72rem;color:var(--text-muted)">
+          <span class="badge bg-danger me-1" style="font-size:.7rem">
+            <i class="bi bi-camera-video-fill"></i> 動画
+          </span>
+          <span>yt-dlpダウンロード済み · Threads動画投稿</span>
+        </div>
+        <video controls
+               style="max-width:100%;max-height:220px;display:block;border-radius:10px;background:#000">
+          <source src="{{ url_for('static', filename=a.video_file_path) }}" type="video/mp4">
+          お使いのブラウザは動画再生に対応していません。
+        </video>
+      </div>
+
+      <!-- 画像プレビュー（記事投稿のみ: thumbnail→image_urls全件、最大20枚） -->
+      {% else %}
       {% set imgs = images_map.get(a.id, []) %}
       {% if imgs %}
       <div class="mb-1" style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch">
@@ -78,6 +95,7 @@
           <i class="bi bi-image me-1"></i>画像投稿（1枚）
         {% endif %}
       </div>
+      {% endif %}
       {% endif %}
 
       <!-- タイトル -->
