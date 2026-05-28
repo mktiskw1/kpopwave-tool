@@ -25,6 +25,9 @@ DEFAULT_CHANNELS = [
     {"name": "tripleS",      "url": "https://www.youtube.com/channel/UCJnL-TBcsYrF2SLs7tmiC8Q"},
 ]
 
+# 公式グループチャンネル名セット（このチャンネルは女性アイドルフィルターをスキップ）
+_OFFICIAL_GROUP_NAMES = frozenset(ch["name"].lower() for ch in DEFAULT_CHANNELS)
+
 # チャンネルURLに試みるタブサフィックス（Shortsは別関数で処理するため除外）
 _URL_SUFFIXES = ["/videos", ""]
 
@@ -55,6 +58,40 @@ def _get_existing_yt_urls(app) -> set:
             Article.url.like("https://www.youtube.com/watch?v=%")
         ).all()
         return {r.url for r in rows}
+
+
+def _is_official_group_channel(channel_name: str) -> bool:
+    """公式グループチャンネルかどうかを判定する（フィルタースキップ用）。"""
+    return channel_name.lower() in _OFFICIAL_GROUP_NAMES
+
+
+def _is_female_idol_video(title: str, api_key: str) -> bool:
+    """Claude HaikuでKPOP女性アイドル関連かどうかを判定する。
+    判定できない場合はTrue（通過扱い）を返す。
+    """
+    if not api_key or not title:
+        return True
+    try:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=5,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "以下のYouTube動画タイトルはKPOP女性アイドルに関連していますか？\n"
+                    "男性アイドル・男性アーティスト・関係ない動画は除外してください。\n"
+                    "YESかNOだけ答えてください。\n"
+                    f"タイトル：{title}"
+                ),
+            }],
+        )
+        answer = msg.content[0].text.strip().upper()
+        return answer.startswith("YES")
+    except Exception as exc:
+        logger.warning("女性アイドルフィルター判定失敗（通過扱い）: %s — %s", title[:40], exc)
+        return True
 
 
 def _find_downloaded_file(tmp_dir: str, vid_id: str) -> tuple[str, str] | None:
@@ -162,10 +199,12 @@ def _fetch_channel_entries(channel_url: str, flat_opts: dict, cutoff_str: str,
     return candidates
 
 
-def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set) -> list[dict]:
+def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set,
+                             api_key: str = "", apply_filter: bool = False) -> list[dict]:
     """
     yt-dlpで指定チャンネルから最新動画（≤MAX_DURATION秒・DAYS_LIMIT日以内）を
     最大MAX_VIDEOS_PER_CHANNEL件取得する。
+    apply_filter=True の場合は Claude Haiku で女性アイドル関連かチェックする。
     ダウンロード済み動画メタデータのリストを返す（0件の場合は空リスト）。
     """
     try:
@@ -252,6 +291,13 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
                 )
                 continue
 
+            # 複合チャンネルのみ女性アイドルフィルターを適用
+            if apply_filter:
+                title_to_check = full.get("title") or c["title"]
+                if not _is_female_idol_video(title_to_check, api_key):
+                    logger.info("[%s] スキップ（女性アイドル以外）: %s", channel_name, title_to_check[:60])
+                    continue
+
             targets.append({
                 "id":           c["id"],
                 "url":          c["url"],
@@ -310,10 +356,12 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
     return results
 
 
-def _collect_channel_shorts(channel_info: dict, tmp_dir: str, existing_urls: set) -> list[dict]:
+def _collect_channel_shorts(channel_info: dict, tmp_dir: str, existing_urls: set,
+                             api_key: str = "", apply_filter: bool = False) -> list[dict]:
     """
     yt-dlpで指定チャンネルのShortsを最新MAX_VIDEOS_PER_CHANNEL件取得する。
     Shortsは60秒以内なのでduration制限は適用しない。
+    apply_filter=True の場合は Claude Haiku で女性アイドル関連かチェックする。
     """
     try:
         import yt_dlp
@@ -412,6 +460,13 @@ def _collect_channel_shorts(channel_info: dict, tmp_dir: str, existing_urls: set
                 )
                 continue
 
+            # 複合チャンネルのみ女性アイドルフィルターを適用
+            if apply_filter:
+                title_to_check = full.get("title") or c["title"]
+                if not _is_female_idol_video(title_to_check, api_key):
+                    logger.info("[%s] Shorts スキップ（女性アイドル以外）: %s", channel_name, title_to_check[:60])
+                    continue
+
             targets.append({
                 "id":           c["id"],
                 "url":          c["url"],
@@ -479,6 +534,9 @@ def collect_youtube_videos(app) -> int:
     static_dir = _get_static_videos_dir()
     existing_urls = _get_existing_yt_urls(app)
 
+    with app.app_context():
+        api_key = Setting.get("anthropic_api_key", "") or ""
+
     tmp_dir = os.path.join(tempfile.gettempdir(), "kpopwave_videos")
     os.makedirs(tmp_dir, exist_ok=True)
 
@@ -486,10 +544,12 @@ def collect_youtube_videos(app) -> int:
 
     for ch in channels:
         channel_name = ch.get("name", "Unknown")
-        logger.info("動画収集開始: %s", channel_name)
+        # 公式グループチャンネルはフィルタースキップ、複合チャンネルのみ適用
+        apply_filter = not _is_official_group_channel(channel_name) and bool(api_key)
+        logger.info("動画収集開始: %s（フィルター: %s）", channel_name, "あり" if apply_filter else "スキップ")
 
-        videos = _collect_channel_videos(ch, tmp_dir, existing_urls)
-        shorts = _collect_channel_shorts(ch, tmp_dir, existing_urls)
+        videos = _collect_channel_videos(ch, tmp_dir, existing_urls, api_key, apply_filter)
+        shorts = _collect_channel_shorts(ch, tmp_dir, existing_urls, api_key, apply_filter)
 
         # (コンテンツ種別フラグ, videoデータ) のリストに統合
         all_content = [("video", v) for v in videos] + [("short", s) for s in shorts]

@@ -543,6 +543,8 @@ function resummary(id, btn) {
             cc.textContent = d.length + ' / 500 文字';
             cc.className = 'char-count ' + (d.length > 500 ? 'over' : 'ok');
           }
+          const card = document.getElementById('card-' + id);
+          if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
         } else {
           location.reload();
         }
