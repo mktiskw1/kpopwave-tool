@@ -25,8 +25,8 @@ DEFAULT_CHANNELS = [
     {"name": "tripleS",      "url": "https://www.youtube.com/channel/UCJnL-TBcsYrF2SLs7tmiC8Q"},
 ]
 
-# チャンネルURLに試みるタブサフィックス（順番に試す）
-_URL_SUFFIXES = ["/videos", "", "/shorts"]
+# チャンネルURLに試みるタブサフィックス（Shortsは別関数で処理するため除外）
+_URL_SUFFIXES = ["/videos", ""]
 
 # ダウンロード後に無視する一時拡張子
 _SKIP_EXTS = {".part", ".ytdl", ".temp", ".tmp", ".jpg", ".png", ".webp"}
@@ -310,6 +310,166 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
     return results
 
 
+def _collect_channel_shorts(channel_info: dict, tmp_dir: str, existing_urls: set) -> list[dict]:
+    """
+    yt-dlpで指定チャンネルのShortsを最新MAX_VIDEOS_PER_CHANNEL件取得する。
+    Shortsは60秒以内なのでduration制限は適用しない。
+    """
+    try:
+        import yt_dlp
+    except ImportError:
+        return []
+
+    channel_name = channel_info.get("name", "Unknown")
+    channel_url  = channel_info.get("url", "").rstrip("/")
+    if not channel_url:
+        return []
+
+    cutoff_str = (datetime.utcnow() - timedelta(days=DAYS_LIMIT)).strftime("%Y%m%d")
+    shorts_url  = channel_url + "/shorts"
+
+    flat_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "playlistend": 15,
+        "ignoreerrors": True,
+    }
+
+    # ─── Step1: Shortsリストをフラット取得 ──────────────────────────────────
+    try:
+        with yt_dlp.YoutubeDL(flat_opts) as ydl:
+            info = ydl.extract_info(shorts_url, download=False)
+    except Exception as exc:
+        logger.debug("[%s] Shorts取得失敗: %s", channel_name, exc)
+        return []
+
+    if not info:
+        return []
+
+    candidates = []
+    for entry in (info.get("entries") or []):
+        if not entry:
+            continue
+        vid_id = entry.get("id") or ""
+        if not vid_id or len(vid_id) != 11:
+            continue
+        yt_url = f"https://www.youtube.com/watch?v={vid_id}"
+        if yt_url in existing_urls:
+            continue
+        upload_date = entry.get("upload_date", "")
+        if upload_date and upload_date < cutoff_str:
+            continue
+        candidates.append({
+            "id":          vid_id,
+            "url":         yt_url,
+            "title":       entry.get("title", ""),
+            "upload_date": upload_date,
+        })
+
+    if not candidates:
+        logger.info("[%s] Shorts: 新着なし（過去%d日・未収録）", channel_name, DAYS_LIMIT)
+        return []
+
+    logger.info("[%s] Shorts: %d件候補", channel_name, len(candidates))
+
+    # ─── Step2: 詳細情報で日付確認（duration制限は適用しない） ──────────────
+    info_opts = {"quiet": True, "no_warnings": True, "ignoreerrors": True}
+    targets = []
+    for c in candidates:
+        if len(targets) >= MAX_VIDEOS_PER_CHANNEL:
+            break
+        try:
+            with yt_dlp.YoutubeDL(info_opts) as ydl:
+                full = ydl.extract_info(c["url"], download=False)
+            if not full:
+                continue
+
+            actual_date = full.get("upload_date") or c.get("upload_date", "")
+            if not actual_date:
+                ts = full.get("timestamp") or full.get("release_timestamp")
+                if ts:
+                    try:
+                        actual_date = datetime.utcfromtimestamp(ts).strftime("%Y%m%d")
+                    except Exception:
+                        pass
+
+            logger.info(
+                "[%s] Shorts日付確認 upload_date=%s cutoff=%s title=%s",
+                channel_name,
+                full.get("upload_date") or "(空)",
+                cutoff_str,
+                c["title"][:40],
+            )
+
+            if not actual_date:
+                logger.info("[%s] Shorts スキップ（日付不明）: %s", channel_name, c["title"][:60])
+                continue
+            if actual_date < cutoff_str:
+                logger.info(
+                    "[%s] Shorts スキップ（%sは%d日以上前）: %s",
+                    channel_name, actual_date, DAYS_LIMIT, c["title"][:60],
+                )
+                continue
+
+            targets.append({
+                "id":           c["id"],
+                "url":          c["url"],
+                "title":        (full.get("title") or c["title"])[:500],
+                "description":  (full.get("description") or "")[:5000],
+                "thumbnail":    full.get("thumbnail", ""),
+                "duration":     full.get("duration") or 0,
+                "channel_name": full.get("uploader") or channel_name,
+                "upload_date":  actual_date,
+            })
+        except Exception as exc:
+            logger.warning("[%s] Shorts情報取得エラー %s: %s", channel_name, c["url"], exc)
+
+    if not targets:
+        logger.info("[%s] Shorts: 条件に合う動画なし", channel_name)
+        return []
+
+    logger.info("[%s] Shorts ダウンロード対象: %d件", channel_name, len(targets))
+
+    # ─── Step3: ダウンロード ────────────────────────────────────────────────
+    dl_opts_base = {
+        "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]",
+        "ffmpeg_location": r"C:\Users\mktis\kpopwave-tool\ffmpeg\bin",
+        "merge_output_format": "mp4",
+        "quiet": False,
+        "no_warnings": False,
+        "ignoreerrors": True,
+    }
+
+    results = []
+    for target in targets:
+        vid_id = target["id"]
+        outtmpl_path = os.path.join(tmp_dir, f"{vid_id}.%(ext)s")
+        dl_opts = {**dl_opts_base, "outtmpl": outtmpl_path}
+
+        try:
+            with yt_dlp.YoutubeDL(dl_opts) as ydl:
+                ydl.download([target["url"]])
+        except Exception as exc:
+            logger.error("[%s] Shorts ダウンロードエラー: %s", channel_name, exc)
+            continue
+
+        found = _find_downloaded_file(tmp_dir, vid_id)
+        if not found:
+            continue
+
+        local_path, ext = found
+        target["local_path"] = local_path
+        target["ext"]        = ext
+        logger.info(
+            "[%s] Shorts ダウンロード完了: %s (%ds) → %s",
+            channel_name, target["title"][:60], target["duration"], os.path.basename(local_path),
+        )
+        results.append(target)
+
+    return results
+
+
 def collect_youtube_videos(app) -> int:
     """
     全チャンネルからyt-dlpで最新動画を収集してDBに保存する。
@@ -329,10 +489,15 @@ def collect_youtube_videos(app) -> int:
         logger.info("動画収集開始: %s", channel_name)
 
         videos = _collect_channel_videos(ch, tmp_dir, existing_urls)
-        if not videos:
+        shorts = _collect_channel_shorts(ch, tmp_dir, existing_urls)
+
+        # (コンテンツ種別フラグ, videoデータ) のリストに統合
+        all_content = [("video", v) for v in videos] + [("short", s) for s in shorts]
+        if not all_content:
             continue
 
-        for video in videos:
+        for content_flag, video in all_content:
+            is_short = (content_flag == "short")
             vid_id = video["id"]
             ext = video.get("ext", "mp4")
             dest_filename = f"{vid_id}.{ext}"
@@ -362,9 +527,13 @@ def collect_youtube_videos(app) -> int:
                     except Exception:
                         pass
 
+                feed_src      = f"YouTube Shorts: {channel_name}" if is_short else f"YouTube動画: {channel_name}"
+                title_default = "YouTube Shorts" if is_short else "YouTube動画"
+                label         = "Shorts" if is_short else "動画"
+
                 article = Article(
-                    feed_source=f"YouTube動画: {channel_name}",
-                    title=video["title"] or "YouTube動画",
+                    feed_source=feed_src,
+                    title=video["title"] or title_default,
                     url=yt_url,
                     published_at=published_at,
                     raw_content=video.get("description", ""),
@@ -379,8 +548,8 @@ def collect_youtube_videos(app) -> int:
                 existing_urls.add(yt_url)
                 new_count += 1
                 logger.info(
-                    "[%s] DB追加: %s (%ds)",
-                    channel_name, video["title"][:60], video.get("duration", 0),
+                    "[%s] DB追加(%s): %s (%ds)",
+                    channel_name, label, video["title"][:60], video.get("duration", 0),
                 )
 
     logger.info("動画収集完了: %d件追加", new_count)
