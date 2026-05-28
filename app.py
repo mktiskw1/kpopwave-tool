@@ -33,7 +33,6 @@ DEFAULT_YOUTUBE_CHANNELS = [
     {"name": "LE SSERAFIM",  "url": "https://www.youtube.com/channel/UCs-QBT4qkj_YiQw1ZntDO3g"},
     {"name": "ILLIT",        "url": "https://www.youtube.com/@ILLIT_official"},
     {"name": "tripleS",      "url": "https://www.youtube.com/channel/UCJnL-TBcsYrF2SLs7tmiC8Q"},
-    {"name": "KISS OF LIFE", "url": "https://www.youtube.com/@KISSofLIFEofficial"},
 ]
 
 DEFAULT_FEEDS = [
@@ -1121,7 +1120,8 @@ def trim_video(article_id):
     if not article.video_file_path:
         return jsonify({"ok": False, "error": "動画ファイルがありません"}), 400
 
-    video_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", article.video_file_path)
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    video_path = os.path.join(static_dir, article.video_file_path)
     if not os.path.exists(video_path):
         return jsonify({"ok": False, "error": "ファイルが見つかりません"}), 404
 
@@ -1129,29 +1129,60 @@ def trim_video(article_id):
     if not os.path.exists(ffmpeg_exe):
         return jsonify({"ok": False, "error": "ffmpeg.exe が見つかりません"}), 500
 
-    tmp_path = video_path + ".trim.tmp.mp4"
+    videos_dir = os.path.join(static_dir, "videos")
+
+    # 元ファイルのベース名（拡張子なし）
+    # video_file_path は "videos/{video_id}.mp4" 形式
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+
+    # 元ファイルを _original として保持（まだなければリネーム）
+    original_filename = base_name + "_original.mp4"
+    original_path = os.path.join(videos_dir, original_filename)
+    if not os.path.exists(original_path):
+        import shutil as _shutil
+        _shutil.copy2(video_path, original_path)
+
+    # clip 連番を決定（既存の clip ファイル数をカウント）
+    existing_clips = [
+        f for f in os.listdir(videos_dir)
+        if f.startswith(base_name + "_clip_") and f.endswith(".mp4")
+    ]
+    clip_num = len(existing_clips) + 1
+    clip_filename = f"{base_name}_clip_{clip_num}.mp4"
+    clip_path = os.path.join(videos_dir, clip_filename)
+
     cmd = [ffmpeg_exe, "-y", "-i", video_path, "-ss", str(start)]
     if end is not None:
         cmd += ["-to", str(int(end))]
-    cmd += ["-c", "copy", tmp_path]
+    cmd += ["-c", "copy", clip_path]
 
     try:
         result = _sp.run(cmd, capture_output=True, timeout=300)
         if result.returncode != 0:
             err = result.stderr.decode("utf-8", errors="replace")[-500:]
             return jsonify({"ok": False, "error": err}), 500
-        os.replace(tmp_path, video_path)
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
-    finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
 
-    logger.info("動画トリミング完了: article_id=%d start=%d end=%s", article_id, start, end)
-    return jsonify({"ok": True})
+    # 新しい Article レコードを作成（元記事はそのまま残す）
+    import time as _time
+    clip_rel_path = f"videos/{clip_filename}"
+    new_article = Article(
+        feed_source=article.feed_source,
+        title=f"{article.title} [クリップ {clip_num}]",
+        url=f"{article.url}#clip_{int(_time.time())}",
+        status="pending",
+        content_type="video",
+        thumbnail_url=article.thumbnail_url,
+        video_file_path=clip_rel_path,
+        published_at=article.published_at,
+    )
+    db.session.add(new_article)
+    db.session.commit()
+
+    logger.info("動画クリップ作成完了: 元article_id=%d -> new_article_id=%d clip=%s",
+                article_id, new_article.id, clip_filename)
+    return jsonify({"ok": True, "new_article_id": new_article.id})
 
 
 @app.route("/api/articles/<int:article_id>/requeue", methods=["POST"])

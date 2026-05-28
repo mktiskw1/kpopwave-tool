@@ -110,29 +110,86 @@
           <span class="badge bg-success me-1" style="font-size:.7rem">投稿済み</span>
           {% endif %}
           <span>yt-dlpダウンロード済み · Threads動画投稿</span>
+          {% if a.published_at %}
+          <span class="ms-2" style="color:var(--text-muted)">📅 YouTube投稿日: <strong>{{ a.published_at.strftime('%Y/%m/%d') }}</strong></span>
+          {% endif %}
         </div>
-        <video id="vid-{{ a.id }}" controls
+        <video id="vid-{{ a.id }}" controls ontimeupdate="updateVidTime({{ a.id }}, this)"
                style="max-width:100%;max-height:220px;display:block;border-radius:10px;background:#000">
           <source id="vid-src-{{ a.id }}" src="{{ url_for('static', filename=a.video_file_path) }}" type="video/mp4">
           お使いのブラウザは動画再生に対応していません。
         </video>
         <!-- トリミングUI -->
-        <div class="d-flex align-items-center gap-2 mt-2 flex-wrap" style="font-size:.82rem">
-          <span style="color:var(--text-muted)">✂️ トリミング</span>
-          <label style="color:var(--text-muted);margin:0">開始(秒)</label>
-          <input id="trim-start-{{ a.id }}" type="number" min="0" value="0"
-                 style="width:68px;padding:2px 6px;border-radius:6px;border:1px solid var(--border);
-                        background:var(--surface2);color:var(--text);font-size:.82rem">
-          <label style="color:var(--text-muted);margin:0">終了(秒)</label>
-          <input id="trim-end-{{ a.id }}" type="number" min="1" placeholder="例: 60"
-                 style="width:68px;padding:2px 6px;border-radius:6px;border:1px solid var(--border);
-                        background:var(--surface2);color:var(--text);font-size:.82rem">
+        <div class="mt-2" style="font-size:.82rem;background:var(--surface2);border-radius:10px;
+             border:1px solid var(--border);padding:10px 12px">
+          <!-- 再生コントロール & 現在時刻 -->
+          <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
+            <button type="button" onclick="document.getElementById('vid-{{ a.id }}').play()"
+                    style="padding:3px 11px;border-radius:6px;border:1px solid var(--border);
+                           background:#fff;color:var(--text);font-size:.82rem;cursor:pointer">
+              ▶ 再生
+            </button>
+            <button type="button" onclick="document.getElementById('vid-{{ a.id }}').pause()"
+                    style="padding:3px 11px;border-radius:6px;border:1px solid var(--border);
+                           background:#fff;color:var(--text);font-size:.82rem;cursor:pointer">
+              ⏸ 一時停止
+            </button>
+            <span style="color:var(--text-muted);margin-left:4px">現在時刻:
+              <span id="vid-time-{{ a.id }}"
+                    style="color:var(--accent);font-weight:700;font-family:monospace;min-width:3ch;display:inline-block">
+                0:00
+              </span>
+            </span>
+          </div>
+          <!-- マーク記録ボタン -->
+          <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
+            <button type="button" onclick="markTrimPoint('start', {{ a.id }})"
+                    style="padding:3px 11px;border-radius:6px;border:1px solid var(--accent-light);
+                           background:var(--accent-soft);color:var(--accent);font-size:.82rem;
+                           cursor:pointer;font-weight:700">
+              📍 ここから開始
+            </button>
+            <span style="color:var(--text-muted)">開始:
+              <span id="trim-start-display-{{ a.id }}"
+                    style="color:var(--accent2);font-weight:700;font-family:monospace">--:--</span>
+            </span>
+            <button type="button" onclick="markTrimPoint('end', {{ a.id }})"
+                    style="padding:3px 11px;border-radius:6px;border:1px solid var(--accent-light);
+                           background:var(--accent-soft);color:var(--accent);font-size:.82rem;
+                           cursor:pointer;font-weight:700">
+              📍 ここで終了
+            </button>
+            <span style="color:var(--text-muted)">終了:
+              <span id="trim-end-display-{{ a.id }}"
+                    style="color:var(--accent2);font-weight:700;font-family:monospace">--:--</span>
+            </span>
+          </div>
+          <!-- 手入力（補助） -->
+          <div class="d-flex align-items-center gap-2 flex-wrap mb-2" style="font-size:.78rem;color:var(--text-muted)">
+            <span>手入力(秒):</span>
+            <label style="margin:0">開始</label>
+            <input id="trim-start-{{ a.id }}" type="number" min="0" value="0"
+                   oninput="syncTrimDisplay('start', {{ a.id }})"
+                   style="width:64px;padding:2px 5px;border-radius:6px;border:1px solid var(--border);
+                          background:#fff;color:var(--text);font-size:.78rem">
+            <label style="margin:0">終了</label>
+            <input id="trim-end-{{ a.id }}" type="number" min="1" placeholder="例: 60"
+                   oninput="syncTrimDisplay('end', {{ a.id }})"
+                   style="width:64px;padding:2px 5px;border-radius:6px;border:1px solid var(--border);
+                          background:#fff;color:var(--text);font-size:.78rem">
+          </div>
+          <!-- 切り取りボタン -->
           <button type="button"
                   onclick="trimVideo({{ a.id }}, this)"
-                  style="padding:3px 12px;border-radius:6px;border:1px solid var(--border);
-                         background:var(--surface2);color:var(--text);font-size:.82rem;cursor:pointer">
-            ✂️ 切り出し
+                  style="padding:4px 14px;border-radius:6px;border:1px solid var(--accent);
+                         background:var(--accent-soft);color:var(--accent);font-size:.82rem;
+                         cursor:pointer;font-weight:700">
+            ✂️ 切り取って別投稿として追加
           </button>
+          <div id="trim-msg-{{ a.id }}" style="display:none;margin-top:6px;padding:4px 10px;
+               border-radius:6px;background:#e8f5ed;color:#2e7d32;font-weight:700;font-size:.82rem">
+            ✅ 承認待ちに追加しました！
+          </div>
         </div>
       </div>
 
@@ -402,7 +459,33 @@ function requeueArticle(id, btn) {
   });
 }
 
-// ── 動画トリミング ──────────────────────────────────────────────────────────
+// ── 動画プレーヤー操作ユーティリティ ────────────────────────────────────────
+function formatTime(sec) {
+  var s = Math.floor(sec);
+  var m = Math.floor(s / 60);
+  return m + ':' + (s % 60 < 10 ? '0' : '') + (s % 60);
+}
+
+function updateVidTime(id, vid) {
+  var el = document.getElementById('vid-time-' + id);
+  if (el) el.textContent = formatTime(vid.currentTime);
+}
+
+function markTrimPoint(type, id) {
+  var vid = document.getElementById('vid-' + id);
+  if (!vid) return;
+  var t = Math.floor(vid.currentTime);
+  document.getElementById('trim-' + type + '-' + id).value = t;
+  document.getElementById('trim-' + type + '-display-' + id).textContent = formatTime(t);
+}
+
+function syncTrimDisplay(type, id) {
+  var val = parseFloat(document.getElementById('trim-' + type + '-' + id).value);
+  var el = document.getElementById('trim-' + type + '-display-' + id);
+  if (el) el.textContent = isNaN(val) ? '--:--' : formatTime(val);
+}
+
+// ── 動画切り取り（別投稿として追加） ────────────────────────────────────────
 function trimVideo(id, btn) {
   const start = parseInt(document.getElementById('trim-start-' + id).value) || 0;
   const endVal = document.getElementById('trim-end-' + id).value;
@@ -413,7 +496,7 @@ function trimVideo(id, btn) {
   }
   const orig = btn.innerHTML;
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 処理中...';
   fetch('/api/videos/' + id + '/trim', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -421,20 +504,14 @@ function trimVideo(id, btn) {
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {
+    btn.disabled = false;
+    btn.innerHTML = orig;
     if (d.ok) {
-      var src = document.getElementById('vid-src-' + id);
-      var vid = document.getElementById('vid-' + id);
-      if (src && vid) {
-        var base = src.getAttribute('src').split('?')[0];
-        src.setAttribute('src', base + '?t=' + Date.now());
-        vid.load();
-      }
-      btn.innerHTML = '✅ 完了';
-      setTimeout(function() { btn.innerHTML = orig; btn.disabled = false; }, 2000);
+      var msg = document.getElementById('trim-msg-' + id);
+      if (msg) msg.style.display = 'block';
+      setTimeout(function() { location.href = '/pending?tab=video'; }, 1000);
     } else {
-      alert('トリミング失敗: ' + (d.error || '不明なエラー'));
-      btn.disabled = false;
-      btn.innerHTML = orig;
+      alert('切り取り失敗: ' + (d.error || '不明なエラー'));
     }
   })
   .catch(function() {

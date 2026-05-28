@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import anthropic
@@ -12,9 +13,8 @@ from database import Article, BuzzPost, Setting, db
 logger = logging.getLogger(__name__)
 
 THREADS_MAX = 500
-BODY_MAX = 50          # 本文（ハッシュタグ・URL除く）の上限文字数
+BODY_MAX = 50          # 本文の上限文字数
 BODY_MAX_RETRIES = 3   # 超過時の再生成試行回数
-SOURCE_PREFIX = "\n\n📎 source: "
 
 _RANKING_TITLE_KEYWORDS = frozenset([
     "ranking", "rankings", "ranked", "chart", "charts",
@@ -43,26 +43,63 @@ _FETCH_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# スタイルごとの投稿トーン指示（1〜2行の超短い投稿）
-_STYLE_PROMPTS: dict = {
-    "つぶやき型": (
-        "感情ワードで始めて、驚き・発見・感情を1〜2行に凝縮。"
-        "情報は最小限。問いかけ不要。勢いとテンションが伝わる短さで。"
-    ),
-    "情報型": (
-        "「ねえ聞いて」「知ってた？」などで始めてKPOP情報を1〜2行で届ける。"
-        "グループ名・曲名など固有名詞は正確に。口語体で簡潔に。"
-    ),
-    "体験談型": (
-        "「これ鳥肌立った」「泣いた」など感情を最初にぶつけて、"
-        "グループ名・曲名・イベント名と感情表現だけで1〜2行まとめる。"
-        "「〜してたんだけど」「〜見たんだけど」のような説明的書き出し禁止。"
-    ),
-    "バズり型": (
-        "「これ絶対見て！」「来たーーー！」レベルの熱量を1〜2行で。"
-        "興奮と勢いを凝縮。大げさなくらいでOK。"
-    ),
+# フックパターン（カテゴリ別）
+_HOOK_PATTERNS: dict[str, list[str]] = {
+    "逆張り・有益系": [
+        "それ、逆です。",
+        "待って、〇〇やばいわ。",
+        "結局、〇〇しか勝たんのよ。",
+        "まだバレてませんが",
+        "無双したいひとは",
+    ],
+    "こっそり・暴露系": [
+        "ここだけの話。",
+        "勘がいい人は気づいてるけど、",
+        "これガチなんですけど、",
+        "嘘みたいな本当の話なんですけど、",
+        "なぜ気づかなかった…。",
+    ],
+    "つかみ・警告系": [
+        "断言します。",
+        "知らないと普通にヤバいです。",
+        "今すぐやめてください。",
+        "これ知らないと一生変わりません。",
+        "当てはまったらヤバイ",
+    ],
 }
+
+# スタイルごとのフックカテゴリとトーン
+_STYLE_PROMPTS: dict = {
+    "つぶやき型": {
+        "hook_category": "こっそり・暴露系",
+        "tone": "感情をぶつける・驚き・発見を1〜2行に凝縮。問いかけは不要。勢いとテンションが伝わる短さで。",
+    },
+    "情報型": {
+        "hook_category": "逆張り・有益系",
+        "tone": "有益な発見・驚きのファクトを1〜2行で届ける。グループ名・曲名など固有名詞は正確に。",
+    },
+    "体験談型": {
+        "hook_category": "こっそり・暴露系",
+        "tone": "感情を最初にぶつけて、グループ名・曲名・イベント名と感情表現だけで1〜2行まとめる。",
+    },
+    "バズり型": {
+        "hook_category": "つかみ・警告系",
+        "tone": "強烈なフックで引き込む。興奮と勢いを凝縮。熱量MAX。大げさなくらいでOK。",
+    },
+}
+
+
+def _get_time_style_hint() -> str:
+    """現在のJST時刻に応じた投稿スタイルヒントを返す。"""
+    JST = timezone(timedelta(hours=9))
+    h = datetime.now(JST).hour
+    if 6 <= h <= 9:
+        return "【朝の投稿（6〜9時）】学び系・今日から使える情報として届ける。「知ってた？」「今日のKPOP情報」トーンで。"
+    if 11 <= h <= 13:
+        return "【昼の投稿（11〜13時）】共感系・あるある・短め。サクッと読めてニヤッとできる感じで。"
+    if 20 <= h <= 23:
+        return "【夜の投稿（20〜23時）】感情系・ストーリー・深い共感。「泣けるんだけど」「ちょっと聞いて」系のトーンで。"
+    return ""
 
 # ハッシュタグ生成用KPOPグループリスト（長いグループ名を先に並べて誤検出防止）
 _KPOP_GROUPS = [
@@ -273,11 +310,15 @@ def _save_error(app, article_id: int, message: str) -> None:
 
 def summarize_article(app, article_id: int, style: str = "つぶやき型") -> bool:
     """1 記事の日本語投稿テキストを生成して DB に保存する。成功なら True。"""
-    style_instruction = _STYLE_PROMPTS.get(style, _STYLE_PROMPTS["つぶやき型"])
+    style_conf    = _STYLE_PROMPTS.get(style, _STYLE_PROMPTS["つぶやき型"])
+    hook_category = style_conf["hook_category"]
+    style_tone    = style_conf["tone"]
+    hooks_text    = "\n".join(f"・{h}" for h in _HOOK_PATTERNS[hook_category])
+    time_hint     = _get_time_style_hint()
 
+    # ── buzz_posts から AI 分析済みの tips を最大5件取得 ──────────────────
     with app.app_context():
         learned_hints = Setting.get("learned_style_hints", "")
-        # buzz_posts から AI 分析済みの tips を最大5件取得
         buzz_tips: list[str] = []
         try:
             buzz_rows = (
@@ -300,30 +341,24 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
 
     buzz_section = ""
     if buzz_tips:
-        buzz_section = (
-            "\n━━ バズり投稿から学んだコツ ━━\n"
-            + "\n".join(buzz_tips)
-            + "\n上記を参考にして投稿文を生成してください。"
-        )
-
-    learned_section = ""
+        buzz_section += "\n━━ バズり投稿から学んだコツ（参考にすること） ━━\n" + "\n".join(buzz_tips)
     if learned_hints:
-        learned_section += f"\n━━ 学習済みインサイト（過去の高エンゲージメント投稿の傾向） ━━\n{learned_hints}"
-    if buzz_section:
-        learned_section += buzz_section
+        buzz_section += f"\n━━ 学習済みインサイト ━━\n{learned_hints}"
 
+    # ── 記事情報取得 ───────────────────────────────────────────────────────
     with app.app_context():
         article = db.session.get(Article, article_id)
         if not article:
             logger.error("article id=%d が見つかりません", article_id)
             return False
-        title        = article.title
-        stored_body  = (article.raw_content or "")[:3000]
-        url          = article.url
-        feed_source  = article.feed_source or ""
+        title         = article.title
+        stored_body   = (article.raw_content or "")[:3000]
+        url           = article.url
+        feed_source   = article.feed_source or ""
         thumbnail_url = article.thumbnail_url or ""
-        is_ja_src    = _is_japanese_source(feed_source)
+        is_ja_src     = _is_japanese_source(feed_source)
 
+    # ── APIキー確認 ────────────────────────────────────────────────────────
     api_key = _get_api_key(app)
     with app.app_context():
         db_key  = Setting.get("anthropic_api_key", "")
@@ -344,79 +379,53 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
         _save_error(app, article_id, msg)
         return False
 
-    # ── コンテンツ取得 ─────────────────────────────────────────────
+    # ── コンテンツ取得 ─────────────────────────────────────────────────────
     is_youtube = "youtube.com/watch" in url or "youtu.be/" in url
 
     if is_youtube:
-        article_body  = stored_body
+        article_body   = stored_body
         article_images = [thumbnail_url] if thumbnail_url else []
-        fetch_ok      = True
-        fetch_note    = ""
+        fetch_ok       = True
     else:
         fresh_body, article_images, fetch_ok = _fetch_article_page(url)
-        if fetch_ok:
-            article_body = fresh_body
-            fetch_note   = ""
-        else:
-            article_body = stored_body
-            fetch_note   = "\n・元記事にアクセスできていない場合は末尾に「詳細は元記事で」と一言だけ添える"
+        article_body = fresh_body if fetch_ok else stored_body
 
-    # ── ハッシュタグ生成 ───────────────────────────────────────────
-    group_name    = _detect_group_name(feed_source, title)
-    hashtag_text  = _build_hashtags(group_name, is_youtube=is_youtube)
-    source_part   = SOURCE_PREFIX + url
-    # ハッシュタグは本文の直後、ソースURLの前に配置
-    hashtag_part  = "\n" + hashtag_text
-    max_summary_len = THREADS_MAX - len(source_part) - len(hashtag_part) - 5
+    # ── グループ名検出 ─────────────────────────────────────────────────────
+    group_name = _detect_group_name(feed_source, title)
+    group_hint = f"・「{group_name}」の名前を自然に含めること" if group_name else ""
 
-    # ── 共通ルール ─────────────────────────────────────────────────
-    _COMMON_RULES = f"""━━ ルール ━━
-・日本語のみ・本文{BODY_MAX}文字以内（ハッシュタグ・URL除く。厳守）
-・必ず1〜2行に収める（それ以上絶対に書かない。改行も最小限）
-・ハッシュタグ禁止（自動追加されるので絶対に書かない）
-・絵文字は1〜3個（自然な位置に。ハートや推しグループに合うもの選んで）
-・「〜です」「〜ます」口調禁止。自然な口語体で
-・問いかけは入れなくていい
-・出力は本文のみ（前置き・スタイル名・説明不要）
+    # ── 共通ブロック ───────────────────────────────────────────────────────
+    HOOK_SECTION = (
+        f"━━ 冒頭フック（冒頭に必ずいずれかを使うか参考にして書く） ━━\n"
+        f"カテゴリ: {hook_category}\n"
+        f"{hooks_text}\n"
+        f"※「〇〇」部分は実際のグループ名・曲名・イベント名に置き換えること"
+    )
 
-━━ 冒頭は「感情」か「対象＋感情」で始める（必須） ━━
-1行目は感情・発見・衝撃を直接ぶつけること。説明や状況説明から入らない。
+    STRUCTURE_SECTION = (
+        "━━ 投稿構造 ━━\n"
+        "1行目：フックで引き込む\n"
+        "↓本文：グループ名・キーワードを自然に含める\n"
+        "↓末尾（任意）：「知ってた？」「どう思う？」などの問いかけ（なくてもOK）"
+    )
 
-◎ 良い例（1〜2行でこれくらいの短さ）:
-・「IVEのFLUライブ映像やばすぎ😭ウォンヨンのビジュアル最強」
-・「BLACKPINK新曲来たーーー！これ絶対神曲」
-・「えっLE SSERAFIM新アルバム最高すぎ沼った」
-・「KISS OF LIFEのMVやばい🔥もう100回見た」
+    COMMON_RULES = (
+        f"━━ 絶対ルール ━━\n"
+        f"・{BODY_MAX}文字以内（厳守）\n"
+        f"・絵文字なし\n"
+        f"・ハッシュタグなし\n"
+        f"・URLなし\n"
+        f"・「〜です」「〜ます」禁止。自然な口語体で\n"
+        f"・伝聞表現禁止：「〜とのこと」「〜と報じられている」「記事によると」など一切不可\n"
+        f"・説明的書き出し禁止：「〜なんだけど」「〜してたんだけど」「ちょっと聞いて」など\n"
+        f"・具体的な描写禁止（ダンス・歌声・衣装など直接確認できないもの）\n"
+        f"{group_hint}\n"
+        f"・出力は投稿文のみ（前置き・説明・スタイル名不要）"
+    )
 
-✕ NG例（絶対使わない書き出し）:
-・「〜見たんだけどさ」「〜なんだけど」「〜してたんだけど」
-・「ちょっと聞いてほしいんだけど」「実はさ〜」「そういえば〜」
-・「〜について書くと」「〜を見て思ったんだけど」
-・状況説明・前置き・接続詞で始まるもの全般
+    time_section = f"\n━━ 時間帯スタイル ━━\n{time_hint}" if time_hint else ""
 
-━━ 絶対禁止 ━━
-以下の表現・ニュアンスを一切使わない。
-「記事によると」「〜と伝えられている」「〜とのこと」「〜と報じられている」
-「〜と発表された」「記事では」「報道によれば」
-「〜らしい」（伝聞）「〜みたい」（情報を受け取った感じ）
-記事・レビュー・情報源・ニュース・媒体の存在を暗示する言葉すべて
-「〜見たんだけどさ」「〜なんだけど」「〜してたんだけど」など説明的書き出しすべて
-
-━━ 具体的な描写は作らない（重要） ━━
-ダンス・歌声・衣装・振り付け・表情など「直接確認しないとわからない」具体的な描写は一切書かない。
-事実として確認できるもの（グループ名・曲名・アルバム名・イベント名・リリース日）だけを使い、
-それ以外は「やばい」「最高」「神」「沼った」「エモい」「鳥肌」「泣ける」などの感情表現で十分。
-
-✕ NG（推測・作り話になるため禁止）:
-「ダンスが切れすぎ」「歌声が透き通ってる」「衣装が豪華だった」「振り付けがえぐい」「表情がやばい」
-◎ OK（確定情報＋感情のみ）:
-「IVEの新曲まじやばすぎ」「LE SSERAFIMのライブ最高だった」「NewJeansのMV沼った」
-
-━━ 翻訳文にしない ━━
-日本語ネイティブのKPOPファンが最初から日本語で考えて書いた文として仕上げる。
-英語から翻訳したような語順・表現・接続詞の使い方は絶対に避ける。"""
-
-    # ── プロンプト組み立て ─────────────────────────────────────────
+    # ── ランキング記事判定・抽出 ───────────────────────────────────────────
     extracted_rankings: list = []
     if _is_ranking_article(title):
         extracted_rankings = _extract_rankings(article_body)
@@ -425,19 +434,21 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
         else:
             logger.info("ランキング抽出失敗: 通常プロンプトで処理")
 
+    # ── Step1 プロンプト組み立て ───────────────────────────────────────────
+    PERSONA = "あなたは生まれも育ちも日本のKPOPオタクです。日本語が母語。Threadsに投稿する文章を書いてください。"
+
     if is_youtube:
-        prompt = f"""あなたは生まれも育ちも日本のKPOPオタクです。日本語が母語で、英語記事は読んでいない。
-この動画の存在を知って興奮している自分として、親しい友達にLINEで送るメッセージを書いてください。
-動画の内容を詳しく描写するのではなく、グループ名・曲名・イベント名と感情表現だけで書く。
-
-【動画情報】
-タイトル: {title}
-{article_body[:1000]}
-
-━━ スタイル: {style} ━━
-{style_instruction}
-{learned_section}
-{_COMMON_RULES}"""
+        step1_prompt = (
+            f"{PERSONA}\n"
+            f"動画の存在を知って興奮している自分として書く。内容を詳しく説明せず、グループ名・動画タイトルと感情表現だけで伝える。\n\n"
+            f"【動画情報】\nタイトル: {title}\n{article_body[:1000]}\n\n"
+            f"{HOOK_SECTION}\n\n"
+            f"{STRUCTURE_SECTION}\n\n"
+            f"━━ スタイル: {style} ━━\n{style_tone}"
+            f"{time_section}\n"
+            f"{buzz_section}\n\n"
+            f"{COMMON_RULES}"
+        )
 
     elif extracted_rankings:
         top10 = extracted_rankings[:10]
@@ -446,93 +457,88 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
             f"{rank}位 {name}（{group}）" for rank, name, group in top10
         )
         more_note = "\n他は元記事へ" if has_more else ""
-        prompt = f"""あなたは生まれも育ちも日本のKPOPオタクです。日本語が母語で、英語記事は読んでいない。
-このランキングを自分が直接見つけた情報として、友達にLINEで送る感じで書いてください。
-「〜と発表された」など受動的・伝聞的な表現は一切使わない。自分の発見・驚きとして語る。
-
-━━ スタイル: {style} ━━
-{style_instruction}
-{learned_section}
-━━ 出力フォーマット ━━
-・1行目: 感情ワードで始まる導入一言（絵文字1〜2個OK）
-・続き: 下記ランキングデータをそのまま全行出力（順番・内容の変更・省略禁止）
-・末尾: スタイルに合った一言
-
-━━ ルール ━━
-・日本語のみ・{max_summary_len}文字以内（厳守）
-・ハッシュタグ禁止
-・記事・情報源を暗示する表現すべて禁止
-・出力は本文のみ
-
-━━ ランキングデータ ━━
-{ranking_lines}{more_note}"""
-
-    elif is_ja_src:
-        prompt = f"""あなたは生まれも育ちも日本のKPOPオタクです。
-以下の情報は日本語記事からの内容です。翻訳は一切不要。
-この出来事・ニュースを自分がリアルタイムで見聞きしたこととして、親しい友達にLINEで送るメッセージを書いてください。
-情報源・記事の存在は消す。完全に一人称の体験・感情として書く。
-
-【情報】
-タイトル: {title}
-{article_body[:2000]}
-
-━━ スタイル: {style} ━━
-{style_instruction}
-{learned_section}
-{_COMMON_RULES}{fetch_note}"""
+        step1_prompt = (
+            f"{PERSONA}\n"
+            f"このランキングを自分が直接見つけた情報として書く。「〜と発表された」など伝聞表現は一切不可。\n\n"
+            f"{HOOK_SECTION}\n\n"
+            f"━━ 出力フォーマット ━━\n"
+            f"・1行目: フックで始まる導入一言\n"
+            f"・続き: 下記ランキングデータをそのまま全行出力（省略禁止）\n"
+            f"・末尾: 感情の一言\n\n"
+            f"━━ ルール ━━\n"
+            f"・絵文字なし・ハッシュタグなし・URLなし\n"
+            f"・伝聞表現禁止\n"
+            f"・出力は本文のみ\n\n"
+            f"━━ ランキングデータ ━━\n{ranking_lines}{more_note}"
+        )
 
     else:
-        prompt = f"""あなたは生まれも育ちも日本のKPOPオタクです。日本語が母語で、英語記事は読んでいない。
-このニュース・出来事を自分が直接体験・発見したかのように、親しい友達にLINEで送るメッセージを書いてください。
-記事・情報源は存在しない。完全に一人称の自分の意見・感情として書く。
+        step1_prompt = (
+            f"{PERSONA}\n"
+            f"このニュース・出来事を自分が直接体験・発見したかのように書く。記事・情報源は存在しない。完全に一人称の意見・感情として書く。\n\n"
+            f"【情報】\nタイトル: {title}\n{article_body[:2000]}\n\n"
+            f"{HOOK_SECTION}\n\n"
+            f"{STRUCTURE_SECTION}\n\n"
+            f"━━ スタイル: {style} ━━\n{style_tone}"
+            f"{time_section}\n"
+            f"{buzz_section}\n\n"
+            f"{COMMON_RULES}"
+        )
 
-【情報】
-タイトル: {title}
-{article_body[:2000]}
-
-━━ スタイル: {style} ━━
-{style_instruction}
-{learned_section}
-{_COMMON_RULES}{fetch_note}"""
-
-    # ── Claude API 呼び出し（50文字超過時は再生成） ──────────────────
+    # ── Claude API 呼び出し（2段階生成） ───────────────────────────────────
     try:
         client = anthropic.Anthropic(api_key=api_key)
         summary_text = ""
+
+        # Step1: 初期生成
+        msg1 = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": step1_prompt}],
+        )
+        step1_text = msg1.content[0].text.strip()
+        logger.info("Step1生成 (%d文字): article=%d", len(step1_text), article_id)
+
+        # Step2: 人間っぽく変換（リトライ付き）
         for attempt in range(1, BODY_MAX_RETRIES + 1):
-            msg = client.messages.create(
+            step2_prompt = (
+                "次の投稿文を「AIっぽい型を全部捨てて、一番伝えたい核心だけをストレートに書く」スタイルに変換してください。\n"
+                "着飾らない自然な言葉で。説明しすぎない。短く言い切る。\n"
+                f"絵文字なし・ハッシュタグなし・URLなし。必ず{BODY_MAX}文字以内。\n"
+                "出力は変換後の文章のみ。\n\n"
+                f"{step1_text}"
+            )
+            msg2 = client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=150,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": step2_prompt}],
             )
-            summary_text = msg.content[0].text.strip()
+            summary_text = msg2.content[0].text.strip()
             if len(summary_text) <= BODY_MAX:
                 break
             logger.warning(
-                "本文 %d文字（上限 %d）→ 再生成 %d/%d: article=%d",
+                "Step2 本文 %d文字（上限 %d）→ 再生成 %d/%d: article=%d",
                 len(summary_text), BODY_MAX, attempt, BODY_MAX_RETRIES, article_id,
             )
         else:
-            # 全リトライ失敗 → 強制切り詰め
             summary_text = summary_text[:BODY_MAX - 1] + "…"
             logger.warning("再生成上限到達、強制切り詰め: article=%d", article_id)
 
-        # ハッシュタグ + ソースURLを付加
-        post_text = summary_text + hashtag_part + source_part
+        # ── DB保存（ハッシュタグ・URLなし） ──────────────────────────────────
+        post_text = summary_text
 
         with app.app_context():
             art = db.session.get(Article, article_id)
             if art:
-                art.summary    = post_text
-                art.post_style = style
+                art.summary       = post_text
+                art.post_style    = style
                 art.error_message = None
                 if article_images:
                     art.image_urls = json.dumps(article_images, ensure_ascii=False)
                 db.session.commit()
 
         logger.info(
-            "Summarized article %d (%d chars, %d images, fetch=%s, group=%s)",
+            "Summarized article %d (%d文字, %d images, fetch=%s, group=%s)",
             article_id, len(post_text), len(article_images), fetch_ok, group_name or "不明",
         )
         return True

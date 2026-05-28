@@ -23,7 +23,6 @@ DEFAULT_CHANNELS = [
     {"name": "LE SSERAFIM",  "url": "https://www.youtube.com/channel/UCs-QBT4qkj_YiQw1ZntDO3g"},
     {"name": "ILLIT",        "url": "https://www.youtube.com/@ILLIT_official"},
     {"name": "tripleS",      "url": "https://www.youtube.com/channel/UCJnL-TBcsYrF2SLs7tmiC8Q"},
-    {"name": "KISS OF LIFE", "url": "https://www.youtube.com/@KISSofLIFEofficial"},
 ]
 
 # チャンネルURLに試みるタブサフィックス（順番に試す）
@@ -197,7 +196,7 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
         logger.info("[%s] 新着動画なし（過去%d日・未収録）", channel_name, DAYS_LIMIT)
         return []
 
-    # ─── Step 2: 各候補の詳細情報でdurationチェック（最大MAX_VIDEOS_PER_CHANNEL件）
+    # ─── Step 2: 各候補の詳細情報でduration・日付チェック（最大MAX_VIDEOS_PER_CHANNEL件）
     info_opts = {"quiet": True, "no_warnings": True, "ignoreerrors": True}
 
     targets = []
@@ -209,14 +208,42 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
                 full = ydl.extract_info(c["url"], download=False)
             if not full:
                 continue
-            # フラット取得では upload_date が返らないことが多いため Step2 で確認
+
+            # upload_date を確定する（flat取得では空のことが多いためStep2で取得）
             actual_date = full.get("upload_date") or c.get("upload_date", "")
-            if actual_date and actual_date < cutoff_str:
+            # upload_date が空の場合は timestamp から変換を試みる
+            if not actual_date:
+                ts = full.get("timestamp") or full.get("release_timestamp")
+                if ts:
+                    try:
+                        actual_date = datetime.utcfromtimestamp(ts).strftime("%Y%m%d")
+                    except Exception:
+                        pass
+
+            logger.info(
+                "[%s] 日付確認 upload_date=%s timestamp=%s cutoff=%s title=%s",
+                channel_name,
+                full.get("upload_date") or "(空)",
+                full.get("timestamp") or "(空)",
+                cutoff_str,
+                c["title"][:40],
+            )
+
+            # 日付が確認できない動画は取り込まない
+            if not actual_date:
                 logger.info(
-                    "[%s] スキップ（%sは7日以上前）: %s",
-                    channel_name, actual_date, c["title"][:60],
+                    "[%s] スキップ（日付不明）: %s",
+                    channel_name, c["title"][:60],
                 )
                 continue
+
+            if actual_date < cutoff_str:
+                logger.info(
+                    "[%s] スキップ（%sは%d日以上前）: %s",
+                    channel_name, actual_date, DAYS_LIMIT, c["title"][:60],
+                )
+                continue
+
             duration = full.get("duration") or 9999
             if duration > MAX_DURATION:
                 logger.info(
@@ -224,6 +251,7 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
                     channel_name, duration, MAX_DURATION, c["title"][:60],
                 )
                 continue
+
             targets.append({
                 "id":           c["id"],
                 "url":          c["url"],
@@ -232,7 +260,7 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
                 "thumbnail":    full.get("thumbnail", ""),
                 "duration":     duration,
                 "channel_name": full.get("uploader") or channel_name,
-                "upload_date":  full.get("upload_date") or c.get("upload_date", ""),
+                "upload_date":  actual_date,
             })
         except Exception as exc:
             logger.warning("[%s] 動画情報取得エラー %s: %s", channel_name, c["url"], exc)
