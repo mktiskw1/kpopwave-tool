@@ -13,8 +13,9 @@ from database import Article, BuzzPost, Setting, db
 logger = logging.getLogger(__name__)
 
 THREADS_MAX = 500
-BODY_MAX = 50          # 本文の上限文字数
-BODY_MAX_RETRIES = 3   # 超過時の再生成試行回数
+BODY_MAX_VIDEO   = 50   # 動画投稿の文字数上限
+BODY_MAX_ARTICLE = 150  # 記事投稿の文字数上限
+BODY_MAX_RETRIES = 3    # 超過時の再生成試行回数
 
 _RANKING_TITLE_KEYWORDS = frozenset([
     "ranking", "rankings", "ranked", "chart", "charts",
@@ -357,6 +358,10 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
         feed_source   = article.feed_source or ""
         thumbnail_url = article.thumbnail_url or ""
         is_ja_src     = _is_japanese_source(feed_source)
+        content_type  = article.content_type or "article"
+
+    is_video_post = (content_type == "video")
+    body_max = BODY_MAX_VIDEO if is_video_post else BODY_MAX_ARTICLE
 
     # ── APIキー確認 ────────────────────────────────────────────────────────
     api_key = _get_api_key(app)
@@ -413,7 +418,7 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
 
     COMMON_RULES = (
         f"━━ 絶対ルール ━━\n"
-        f"・{BODY_MAX}文字以内（厳守）\n"
+        f"・{body_max}文字以内（厳守）\n"
         f"・絵文字なし\n"
         f"・ハッシュタグなし\n"
         f"・URLなし\n"
@@ -456,7 +461,23 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
     # ── Step1 プロンプト組み立て ───────────────────────────────────────────
     PERSONA = "あなたは生まれも育ちも日本のKPOPオタクです。日本語が母語。Threadsに投稿する文章を書いてください。"
 
-    if is_youtube:
+    if is_video_post:
+        step1_prompt = (
+            f"{PERSONA}\n"
+            f"この動画を見た瞬間の一言リアクションをそのまま書く。動画の内容説明は絶対にしない。感情だけ。\n\n"
+            f"【動画タイトル】{title}\n\n"
+            f"{HOOK_SECTION}\n\n"
+            f"━━ 出力ルール ━━\n"
+            f"・フック（1行目）＋一言だけ。それ以上は書かない\n"
+            f"・{body_max}文字以内（厳守）\n"
+            f"・絵文字なし・ハッシュタグなし・URLなし\n"
+            f"・日本語のみ（グループ名・曲名はアルファベットOK）\n"
+            f"・動画が主役なので説明不要。短く言い切る\n"
+            f"・例：「待って、これやばい。」「何回見ても飽きない。」「なんかすごい。」「なんで次元が違うんだろ。」\n"
+            f"・出力は投稿文のみ（前置き・説明不要）"
+        )
+
+    elif is_youtube:
         step1_prompt = (
             f"{PERSONA}\n"
             f"動画の存在を知って「やばい」と思っている自分として書く。内容を詳しく説明せず、グループ名・動画タイトルと感情表現だけで伝える。\n\n"
@@ -519,28 +540,37 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
         logger.info("Step1生成 (%d文字): article=%d", len(step1_text), article_id)
 
         # Step2: 人間っぽく変換（リトライ付き）
-        for attempt in range(1, BODY_MAX_RETRIES + 1):
-            step2_prompt = (
+        if is_video_post:
+            step2_base = (
+                "次の投稿文を「フック（1行目）＋一言だけ」の超シンプルな形に変換してください。\n"
+                "動画が主役なので説明不要。感情だけ。短く言い切る。\n"
+                f"絵文字なし・ハッシュタグなし・URLなし。必ず{body_max}文字以内。\n"
+                "出力は変換後の文章のみ。\n\n"
+            )
+        else:
+            step2_base = (
                 "次の投稿文を「AIっぽい型を全部捨てて、一番伝えたい核心だけをストレートに書く」スタイルに変換してください。\n"
                 "着飾らない自然な言葉で。説明しすぎない。短く言い切る。\n"
-                f"絵文字なし・ハッシュタグなし・URLなし。必ず{BODY_MAX}文字以内。\n"
+                f"絵文字なし・ハッシュタグなし・URLなし。必ず{body_max}文字以内。\n"
                 "出力は変換後の文章のみ。\n\n"
-                f"{step1_text}"
             )
+
+        for attempt in range(1, BODY_MAX_RETRIES + 1):
+            step2_prompt = step2_base + step1_text
             msg2 = client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=150,
                 messages=[{"role": "user", "content": step2_prompt}],
             )
             summary_text = msg2.content[0].text.strip()
-            if len(summary_text) <= BODY_MAX:
+            if len(summary_text) <= body_max:
                 break
             logger.warning(
                 "Step2 本文 %d文字（上限 %d）→ 再生成 %d/%d: article=%d",
-                len(summary_text), BODY_MAX, attempt, BODY_MAX_RETRIES, article_id,
+                len(summary_text), body_max, attempt, BODY_MAX_RETRIES, article_id,
             )
         else:
-            summary_text = summary_text[:BODY_MAX - 1] + "…"
+            summary_text = summary_text[:body_max - 1] + "…"
             logger.warning("再生成上限到達、強制切り詰め: article=%d", article_id)
 
         # ── DB保存（ハッシュタグ・URLなし） ──────────────────────────────────

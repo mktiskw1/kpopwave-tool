@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
 
 from config import Config
-from database import Article, Comment, Setting, db
+from database import Article, BuzzPost, ChatMessage, Comment, Setting, db
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -1741,6 +1741,128 @@ def debug_threads_video():
         _json.dumps(payload, ensure_ascii=False, indent=2),
         content_type="application/json; charset=utf-8",
     )
+
+
+# ── AIアシスタントチャット ──────────────────────────────────────────────────
+
+
+@app.route("/chat")
+def chat():
+    messages = ChatMessage.query.order_by(ChatMessage.created_at.asc()).all()
+    return render_template("chat.html", messages=messages)
+
+
+@app.route("/api/chat", methods=["POST"])
+def api_chat():
+    import anthropic as _anthropic
+    import json as _json_chat
+
+    data = request.get_json(force=True) or {}
+    user_msg = (data.get("message") or "").strip()
+    if not user_msg:
+        return jsonify({"error": "メッセージを入力してください"}), 400
+
+    api_key = Setting.get("anthropic_api_key", "")
+    if not api_key:
+        return jsonify({"error": "Anthropic APIキーが未設定です"}), 500
+
+    # 会話履歴（最新20件）を先に取得
+    history = ChatMessage.query.order_by(ChatMessage.created_at.desc()).limit(20).all()
+    history = list(reversed(history))
+    messages_for_api = [{"role": m.role, "content": m.content} for m in history]
+    messages_for_api.append({"role": "user", "content": user_msg})
+
+    # ユーザーメッセージをDB保存
+    db.session.add(ChatMessage(role="user", content=user_msg))
+    db.session.commit()
+
+    # ── ContentWave の現在状況を収集 ──────────────────────────────────────
+    pending_cnt = Article.query.filter_by(status="pending").count()
+
+    recent_posted = (
+        Article.query.filter_by(status="posted")
+        .order_by(Article.posted_at.desc())
+        .limit(5)
+        .all()
+    )
+    posted_lines = ""
+    for a in recent_posted:
+        jst_str = ((a.posted_at + timedelta(hours=9)).strftime("%m/%d %H:%M")
+                   if a.posted_at else "不明")
+        posted_lines += f"・{jst_str} 「{a.title[:30]}」\n  投稿文: {(a.summary or '(なし)')[:60]}\n"
+
+    try:
+        from scheduler import next_post_slot as _next_slot
+        ns = _next_slot(app)
+        next_txt = ((ns + timedelta(hours=9)).strftime("%m/%d %H:%M JST")
+                    if ns else "未定")
+    except Exception:
+        next_txt = "不明"
+
+    buzz_tips: list[str] = []
+    try:
+        buzz_rows = (BuzzPost.query
+                     .filter(BuzzPost.analysis.isnot(None))
+                     .order_by(BuzzPost.created_at.desc())
+                     .limit(3).all())
+        for row in buzz_rows:
+            try:
+                tip = _json_chat.loads(row.analysis).get("tips", "")
+                if tip:
+                    buzz_tips.append(f"・{tip}")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    cw_status = (
+        f"承認待ち記事: {pending_cnt}件\n\n"
+        f"直近5件の投稿済み記事:\n{posted_lines or '（なし）'}\n"
+        f"次の投稿予定: {next_txt}\n\n"
+        f"バズり投稿から学んだコツ:\n"
+        + ("\n".join(buzz_tips) if buzz_tips else "（まだ学習データなし）")
+    )
+
+    system_prompt = (
+        "あなたはContentWaveというSNS自動投稿ツールの専任AIアシスタントです。\n"
+        "KPOPと美容の情報を発信するThreadsアカウント(@kpopwave.daily)の運用をサポートします。\n\n"
+        "【Threads投稿のルール】\n"
+        "- URLなし・タグなし・絵文字なし\n"
+        "- フックで始める（例：「待って、これやばい。」「これガチなんですけど、」）\n"
+        "- 日本語のみ・韓国語不使用\n"
+        "- 人間っぽい口語体・説明しすぎない・短く言い切る\n"
+        "- 記事投稿：フック+150文字以内\n"
+        "- 動画投稿：フック+一言（50文字以内）\n"
+        "- 時間帯別：朝=学び系・昼=共感系・夜=感情系\n\n"
+        f"【現在のContentWave状況】\n{cw_status}\n\n"
+        "フック提案・投稿文改善・ネタ出しなど何でも相談に乗ってください。\n"
+        "返答は簡潔に・口語体で。"
+    )
+
+    try:
+        client = _anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=600,
+            system=system_prompt,
+            messages=messages_for_api,
+        )
+        reply = resp.content[0].text.strip()
+    except Exception as exc:
+        logger.error("Chat API error: %s", exc)
+        return jsonify({"error": f"APIエラー: {exc}"}), 500
+
+    db.session.add(ChatMessage(role="assistant", content=reply))
+    db.session.commit()
+
+    return jsonify({"reply": reply})
+
+
+@app.route("/api/chat/clear", methods=["POST"])
+def api_chat_clear():
+    ChatMessage.query.delete()
+    db.session.commit()
+    return jsonify({"ok": True})
 
 
 # ── 起動 ───────────────────────────────────────────────────────────────────

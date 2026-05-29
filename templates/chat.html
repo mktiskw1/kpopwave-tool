@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="d-flex flex-column" style="height:calc(100vh - 7rem)">
+
+  <!-- ヘッダー -->
+  <div class="d-flex align-items-center mb-3">
+    <div>
+      <h4 class="mb-0" style="font-weight:900">
+        <i class="bi bi-robot me-2" style="color:var(--accent)"></i>AIアシスタント
+      </h4>
+      <p class="mb-0" style="font-size:.78rem;color:var(--text-muted)">
+        フック案・投稿文改善・ネタ出しなど何でも相談できます
+      </p>
+    </div>
+    <button class="btn btn-outline-secondary btn-sm ms-auto" onclick="clearHistory()"
+            style="font-size:.78rem">
+      <i class="bi bi-trash3"></i> 履歴削除
+    </button>
+  </div>
+
+  <!-- サジェストボタン -->
+  <div class="d-flex flex-wrap gap-2 mb-3">
+    {% for s in [
+      "今日の投稿ネタを5つ出して",
+      "21時の夜投稿に合うフックを3つ出して",
+      "バズりやすいフックパターンを教えて",
+      "動画投稿用の一言を3つ出して"
+    ] %}
+    <button type="button" onclick="setInput('{{ s }}')"
+            style="background:var(--surface2);border:1.5px solid var(--border);color:var(--text);
+                   border-radius:20px;font-size:.76rem;font-weight:700;padding:4px 12px;
+                   cursor:pointer;transition:all .15s"
+            onmouseover="this.style.borderColor='var(--accent)';this.style.color='var(--accent)'"
+            onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text)'">
+      {{ s }}
+    </button>
+    {% endfor %}
+  </div>
+
+  <!-- チャット履歴エリア -->
+  <div id="chat-messages" class="flex-grow-1 overflow-auto mb-3"
+       style="background:var(--surface);border:1.5px solid var(--border);border-radius:18px;
+              padding:16px 14px;min-height:0">
+
+    {% if not messages %}
+    <div id="empty-msg" class="text-center py-5" style="color:var(--text-muted)">
+      <i class="bi bi-chat-dots" style="font-size:2.5rem;color:var(--accent-light)"></i>
+      <p class="mt-2 mb-1" style="font-size:.88rem;font-weight:700">何でも相談してください</p>
+      <p style="font-size:.76rem">上のサジェストボタンや自由入力でスタートできます</p>
+    </div>
+    {% endif %}
+
+    {% for msg in messages %}
+    <div class="d-flex mb-3 {% if msg.role == 'user' %}justify-content-end{% endif %}">
+      {% if msg.role == 'assistant' %}
+      <div class="me-2 flex-shrink-0"
+           style="width:28px;height:28px;background:linear-gradient(135deg,var(--accent),var(--accent2));
+                  border-radius:50%;display:flex;align-items:center;justify-content:center">
+        <i class="bi bi-robot" style="color:#fff;font-size:.7rem"></i>
+      </div>
+      {% endif %}
+      <div style="max-width:78%;padding:9px 13px;word-break:break-word;white-space:pre-wrap;font-size:.84rem;
+                  border-radius:{% if msg.role == 'user' %}18px 4px 18px 18px{% else %}4px 18px 18px 18px{% endif %};
+                  background:{% if msg.role == 'user' %}linear-gradient(135deg,var(--accent),var(--accent2)){% else %}var(--surface2){% endif %};
+                  color:{% if msg.role == 'user' %}#fff{% else %}var(--text){% endif %};
+                  border:1.5px solid {% if msg.role == 'user' %}transparent{% else %}var(--border){% endif %}">
+        {{ msg.content }}
+      </div>
+      {% if msg.role == 'user' %}
+      <div class="ms-2 flex-shrink-0"
+           style="width:28px;height:28px;background:var(--surface2);border:1.5px solid var(--border);
+                  border-radius:50%;display:flex;align-items:center;justify-content:center">
+        <i class="bi bi-person-fill" style="color:var(--accent);font-size:.7rem"></i>
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+
+    <!-- ローディングバブル -->
+    <div id="loading-msg" class="d-none d-flex mb-3">
+      <div class="me-2 flex-shrink-0"
+           style="width:28px;height:28px;background:linear-gradient(135deg,var(--accent),var(--accent2));
+                  border-radius:50%;display:flex;align-items:center;justify-content:center">
+        <i class="bi bi-robot" style="color:#fff;font-size:.7rem"></i>
+      </div>
+      <div style="padding:9px 13px;border-radius:4px 18px 18px 18px;background:var(--surface2);
+                  border:1.5px solid var(--border);color:var(--text-muted);font-size:.84rem">
+        <span class="spinner-border spinner-border-sm me-2" style="width:.8rem;height:.8rem;border-width:2px"></span>考え中...
+      </div>
+    </div>
+  </div>
+
+  <!-- 入力エリア -->
+  <div class="d-flex gap-2 align-items-end">
+    <textarea id="chat-input" class="form-control"
+              placeholder="メッセージを入力… (Enterで送信・Shift+Enterで改行)"
+              rows="2"
+              style="border-radius:16px!important;resize:none;font-size:.86rem;line-height:1.5"></textarea>
+    <button id="send-btn" onclick="sendMessage()" class="btn btn-accent"
+            style="border-radius:14px;padding:10px 16px;flex-shrink:0">
+      <i class="bi bi-send-fill"></i>
+    </button>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+var chatEl = document.getElementById('chat-messages');
+
+function scrollToBottom() {
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+scrollToBottom();
+
+function setInput(text) {
+  var inp = document.getElementById('chat-input');
+  inp.value = text;
+  inp.focus();
+}
+
+document.getElementById('chat-input').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+function sendMessage() {
+  var inp  = document.getElementById('chat-input');
+  var btn  = document.getElementById('send-btn');
+  var msg  = inp.value.trim();
+  if (!msg) return;
+
+  inp.value    = '';
+  inp.disabled = true;
+  btn.disabled = true;
+
+  // 空状態メッセージを削除
+  var empty = document.getElementById('empty-msg');
+  if (empty) empty.remove();
+
+  appendBubble('user', msg);
+  document.getElementById('loading-msg').classList.remove('d-none');
+  scrollToBottom();
+
+  fetch('/api/chat', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ message: msg })
+  })
+  .then(function (r) { return r.json(); })
+  .then(function (data) {
+    document.getElementById('loading-msg').classList.add('d-none');
+    appendBubble('assistant', data.error ? ('エラー: ' + data.error) : data.reply);
+    scrollToBottom();
+  })
+  .catch(function () {
+    document.getElementById('loading-msg').classList.add('d-none');
+    appendBubble('assistant', 'エラーが発生しました。もう一度お試しください。');
+    scrollToBottom();
+  })
+  .finally(function () {
+    inp.disabled = false;
+    btn.disabled = false;
+    inp.focus();
+  });
+}
+
+function appendBubble(role, content) {
+  var loading = document.getElementById('loading-msg');
+  var wrapper = document.createElement('div');
+  wrapper.className = 'd-flex mb-3' + (role === 'user' ? ' justify-content-end' : '');
+
+  var escaped = content
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  var avatarLeft = role === 'assistant'
+    ? '<div class="me-2 flex-shrink-0" style="width:28px;height:28px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:50%;display:flex;align-items:center;justify-content:center"><i class="bi bi-robot" style="color:#fff;font-size:.7rem"></i></div>'
+    : '';
+  var avatarRight = role === 'user'
+    ? '<div class="ms-2 flex-shrink-0" style="width:28px;height:28px;background:var(--surface2);border:1.5px solid var(--border);border-radius:50%;display:flex;align-items:center;justify-content:center"><i class="bi bi-person-fill" style="color:var(--accent);font-size:.7rem"></i></div>'
+    : '';
+
+  var bg     = role === 'user' ? 'linear-gradient(135deg,var(--accent),var(--accent2))' : 'var(--surface2)';
+  var color  = role === 'user' ? '#fff' : 'var(--text)';
+  var radius = role === 'user' ? '18px 4px 18px 18px' : '4px 18px 18px 18px';
+  var border = role === 'user' ? 'transparent' : 'var(--border)';
+
+  wrapper.innerHTML = avatarLeft
+    + '<div style="max-width:78%;padding:9px 13px;word-break:break-word;white-space:pre-wrap;font-size:.84rem;'
+    + 'border-radius:' + radius + ';background:' + bg + ';color:' + color + ';'
+    + 'border:1.5px solid ' + border + '">' + escaped + '</div>'
+    + avatarRight;
+
+  chatEl.insertBefore(wrapper, loading);
+}
+
+function clearHistory() {
+  if (!confirm('会話履歴を全て削除しますか？')) return;
+  fetch('/api/chat/clear', { method: 'POST' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { if (d.ok) location.reload(); });
+}
+</script>
+{% endblock %}

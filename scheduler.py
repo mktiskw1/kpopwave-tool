@@ -18,7 +18,7 @@ _JITTER_SECONDS = 1800  # ±30分
 _JST = ZoneInfo("Asia/Tokyo")
 _UTC = ZoneInfo("UTC")
 _DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-_DEFAULT_TIMES = ["09:00", "15:00", "21:00"]
+_DEFAULT_TIMES = ["07:00", "12:00", "15:00", "18:00", "21:00"]
 
 
 # ── ユーティリティ ─────────────────────────────────────────────────────────────
