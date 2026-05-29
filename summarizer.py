@@ -44,47 +44,25 @@ _FETCH_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# フックパターン（カテゴリ別）
-_HOOK_PATTERNS: dict[str, list[str]] = {
-    "逆張り・有益系": [
-        "それ、逆です。",
-        "待って、〇〇やばいわ。",
-        "結局、〇〇しか勝たんのよ。",
-        "まだバレてませんが",
-        "無双したいひとは",
-    ],
-    "こっそり・暴露系": [
-        "ここだけの話。",
-        "勘がいい人は気づいてるけど、",
-        "これガチなんですけど、",
-        "嘘みたいな本当の話なんですけど、",
-        "なぜ気づかなかった…。",
-    ],
-    "つかみ・警告系": [
-        "断言します。",
-        "知らないと普通にヤバいです。",
-        "今すぐやめてください。",
-        "これ知らないと一生変わりません。",
-        "当てはまったらヤバイ",
-    ],
+# フックパターン（時間帯別・各3個）
+_HOOK_PATTERNS_BY_TIME: dict[str, list[str]] = {
+    "朝": ["知らないと損する、", "これ見て損はない。", "まだ知らない人いる？"],
+    "昼": ["わかる人にはわかる、", "これ好きな人と友達になりたい。", "なんでみんな話題にしないんだろ。"],
+    "夜": ["待って、これやばい。", "これガチなんですけど、", "嘘みたいな本当の話なんですけど、"],
 }
 
-# スタイルごとのフックカテゴリとトーン
+# スタイルごとのトーン
 _STYLE_PROMPTS: dict = {
     "つぶやき型": {
-        "hook_category": "こっそり・暴露系",
         "tone": "感情をぶつける・驚き・発見を1〜2行に凝縮。問いかけは不要。勢いとテンションが伝わる短さで。",
     },
     "情報型": {
-        "hook_category": "逆張り・有益系",
         "tone": "有益な発見・驚きのファクトを1〜2行で届ける。グループ名・曲名など固有名詞は正確に。",
     },
     "体験談型": {
-        "hook_category": "こっそり・暴露系",
         "tone": "感情を最初にぶつけて、グループ名・曲名・イベント名と感情表現だけで1〜2行まとめる。",
     },
     "バズり型": {
-        "hook_category": "つかみ・警告系",
         "tone": "強烈なフックで引き込む。興奮と勢いを凝縮。熱量MAX。大げさなくらいでOK。",
     },
 }
@@ -101,6 +79,23 @@ def _get_time_style_hint() -> str:
     if 20 <= h <= 23:
         return "【夜の投稿（20〜23時）】感情系・ストーリー・深い共感。「泣けるんだけど」「ちょっと聞いて」系のトーンで。"
     return ""
+
+
+def _get_time_hooks(scheduled_at: str | None = None) -> list[str]:
+    """JST時刻に応じたフックパターンリストを返す。scheduled_atがあればその時刻で判定、なければ現在時刻。"""
+    JST = timezone(timedelta(hours=9))
+    if scheduled_at:
+        try:
+            h = datetime.fromisoformat(scheduled_at).hour
+        except ValueError:
+            h = datetime.now(JST).hour
+    else:
+        h = datetime.now(JST).hour
+    if 6 <= h <= 9:
+        return _HOOK_PATTERNS_BY_TIME["朝"]
+    if 11 <= h <= 13:
+        return _HOOK_PATTERNS_BY_TIME["昼"]
+    return _HOOK_PATTERNS_BY_TIME["夜"]
 
 # ハッシュタグ生成用KPOPグループリスト（長いグループ名を先に並べて誤検出防止）
 _KPOP_GROUPS = [
@@ -309,13 +304,12 @@ def _save_error(app, article_id: int, message: str) -> None:
             db.session.commit()
 
 
-def summarize_article(app, article_id: int, style: str = "つぶやき型") -> bool:
+def summarize_article(app, article_id: int, style: str = "つぶやき型", scheduled_at: str | None = None) -> bool:
     """1 記事の日本語投稿テキストを生成して DB に保存する。成功なら True。"""
-    style_conf    = _STYLE_PROMPTS.get(style, _STYLE_PROMPTS["つぶやき型"])
-    hook_category = style_conf["hook_category"]
-    style_tone    = style_conf["tone"]
-    hooks_text    = "\n".join(f"・{h}" for h in _HOOK_PATTERNS[hook_category])
-    time_hint     = _get_time_style_hint()
+    style_conf = _STYLE_PROMPTS.get(style, _STYLE_PROMPTS["つぶやき型"])
+    style_tone = style_conf["tone"]
+    hooks_text = "\n".join(f"・{h}" for h in _get_time_hooks(scheduled_at))
+    time_hint  = _get_time_style_hint()
 
     # ── buzz_posts から AI 分析済みの tips を最大5件取得 ──────────────────
     with app.app_context():
@@ -404,7 +398,6 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
         f"━━ 冒頭フック（厳守） ━━\n"
         f"投稿文の1行目は必ず以下のフックパターンのいずれかで始めること。\n"
         f"フックなしで始まる投稿文は絶対に生成しないこと。\n\n"
-        f"カテゴリ: {hook_category}\n"
         f"{hooks_text}\n"
         f"※「〇〇」部分は実際のグループ名・曲名・イベント名に置き換えること"
     )
@@ -459,7 +452,14 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
             logger.info("ランキング抽出失敗: 通常プロンプトで処理")
 
     # ── Step1 プロンプト組み立て ───────────────────────────────────────────
-    PERSONA = "あなたは生まれも育ちも日本のKPOPオタクです。日本語が母語。Threadsに投稿する文章を書いてください。"
+    PERSONA = (
+        "あなたは25歳の日本人女性。KPOPオタク歴8年。"
+        "推しはaespa。普段からThreadsでKPOP情報を発信している。"
+        "友達にLINEで送るような感覚で書く。"
+        "テンションは高すぎず・低すぎず。"
+        "語尾は「〜だわ」「〜やん」などの関西弁は使わない。"
+        "説明しすぎない。感じたことをそのまま書く。"
+    )
 
     if is_video_post:
         step1_prompt = (
@@ -542,16 +542,18 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型") -> b
         # Step2: 人間っぽく変換（リトライ付き）
         if is_video_post:
             step2_base = (
-                "次の投稿文を「フック（1行目）＋一言だけ」の超シンプルな形に変換してください。\n"
-                "動画が主役なので説明不要。感情だけ。短く言い切る。\n"
+                "この文章から余計な説明を全部削って、感情だけ残してください。\n"
+                "一言で言い切る。フック+感情の一言だけ。\n"
                 f"絵文字なし・ハッシュタグなし・URLなし。必ず{body_max}文字以内。\n"
                 "出力は変換後の文章のみ。\n\n"
             )
         else:
             step2_base = (
-                "次の投稿文を「AIっぽい型を全部捨てて、一番伝えたい核心だけをストレートに書く」スタイルに変換してください。\n"
-                "着飾らない自然な言葉で。説明しすぎない。短く言い切る。\n"
-                f"絵文字なし・ハッシュタグなし・URLなし。必ず{body_max}文字以内。\n"
+                "この文章を25歳の日本人女性が友達にLINEで送るメッセージに変換してください。\n"
+                "・説明文を感情に変える\n"
+                "・長い文を短く切る\n"
+                "・AIっぽい言い回しを口語に変える\n"
+                f"・絵文字なし・タグなし・URLなし。必ず{body_max}文字以内。\n"
                 "出力は変換後の文章のみ。\n\n"
             )
 

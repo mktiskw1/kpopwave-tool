@@ -522,7 +522,8 @@ def resummary_article(id):
     from summarizer import summarize_article
 
     style = (request.form.get("style") or "つぶやき型").strip()
-    success = summarize_article(app, id, style=style)
+    scheduled_at = (request.form.get("scheduled_at") or "").strip() or None
+    success = summarize_article(app, id, style=style, scheduled_at=scheduled_at)
     # summarize_article は内部で別 app_context を開くため、セッションを明示的にリフレッシュ
     db.session.expire_all()
     article = db.session.get(Article, id)

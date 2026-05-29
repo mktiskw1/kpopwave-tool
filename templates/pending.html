@@ -235,16 +235,9 @@
                     onclick="toggleEdit({{ a.id }})" style="font-size:.78rem">
               <i class="bi bi-pencil"></i> 編集
             </button>
-            <select id="style-{{ a.id }}"
-                    style="font-size:.74rem;padding:2px 4px;background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);border-radius:8px;height:26px;cursor:pointer">
-              <option value="つぶやき型">つぶやき型</option>
-              <option value="情報型">情報型</option>
-              <option value="体験談型">体験談型</option>
-              <option value="バズり型">バズり型</option>
-            </select>
             <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2"
                     onclick="resummary({{ a.id }}, this)" style="font-size:.78rem">
-              <i class="bi bi-magic"></i> 再生成
+              ✍️ 要約を生成
             </button>
           </div>
         </div>
@@ -264,16 +257,9 @@
       {% else %}
       <div class="mt-2 d-flex align-items-center gap-2 flex-wrap">
         <span style="font-size:.82rem;color:var(--text-muted)"><i class="bi bi-dash-circle"></i> 要約未生成</span>
-        <select id="style-{{ a.id }}"
-                style="font-size:.74rem;padding:2px 4px;background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);border-radius:8px;height:26px;cursor:pointer">
-          <option value="つぶやき型">つぶやき型</option>
-          <option value="情報型">情報型</option>
-          <option value="体験談型">体験談型</option>
-          <option value="バズり型">バズり型</option>
-        </select>
         <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2"
                 onclick="resummary({{ a.id }}, this)" style="font-size:.78rem">
-          <i class="bi bi-magic"></i> 要約を生成
+          ✍️ 要約を生成
         </button>
         {% if a.error_message %}
         <span class="text-danger" style="font-size:.75rem" title="{{ a.error_message }}">
@@ -522,7 +508,7 @@ function trimVideo(id, btn) {
 }
 
 function resummary(id, btn) {
-  const style = document.getElementById('style-' + id)?.value || 'つぶやき型';
+  const style = 'つぶやき型';
   const orig = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';

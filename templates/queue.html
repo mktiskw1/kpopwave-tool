@@ -47,8 +47,12 @@
           </a>
         </div>
         {% if a.summary %}
-        <div style="font-size:.78rem;color:var(--text-muted);margin-top:.3rem">
+        <div class="summary-preview" style="font-size:.78rem;color:var(--text-muted);margin-top:.3rem">
           {{ a.summary[:120] }}…
+        </div>
+        {% else %}
+        <div class="summary-preview" style="font-size:.78rem;color:var(--text-muted);margin-top:.3rem;opacity:.5">
+          未生成
         </div>
         {% endif %}
       </div>
@@ -64,6 +68,10 @@
         <button class="btn btn-outline-info btn-sm" style="font-size:.8rem"
                 onclick="toggleSchedule({{ a.id }})">
           <i class="bi bi-calendar3"></i> 日時指定
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" style="font-size:.8rem"
+                onclick="toggleSummaryPanel({{ a.id }})">
+          ✍️ 投稿文を生成
         </button>
         <form action="{{ url_for('unqueue_article', id=a.id) }}" method="post">
           <button type="submit" class="btn btn-outline-secondary btn-sm w-100" style="font-size:.8rem">
@@ -82,6 +90,23 @@
                value="{{ (a.scheduled_at | utc_to_jst).strftime('%Y-%m-%dT%H:%M') }}"
                {% endif %}>
         <button class="btn btn-info btn-sm" onclick="setSchedule({{ a.id }})">設定 (JST)</button>
+      </div>
+    </div>
+
+    <!-- 投稿文パネル (非表示) -->
+    <div id="summary-form-{{ a.id }}" class="d-none mt-2">
+      <textarea id="queue-ta-{{ a.id }}" class="form-control form-control-sm" rows="4"
+                style="font-size:.82rem;resize:vertical"
+                placeholder="まだ投稿文が生成されていません">{{ a.summary or '' }}</textarea>
+      <div class="d-flex gap-2 mt-1 justify-content-end">
+        <button class="btn btn-outline-secondary btn-sm" style="font-size:.8rem"
+                onclick="generateQueueSummary({{ a.id }}, this)">
+          ✍️ 生成
+        </button>
+        <button class="btn btn-sm btn-accent" style="font-size:.8rem"
+                onclick="saveQueueSummary({{ a.id }}, this)">
+          💾 保存
+        </button>
       </div>
     </div>
   </div>
@@ -162,6 +187,71 @@
 <script>
 function toggleSchedule(id) {
   document.getElementById('schedule-form-' + id).classList.toggle('d-none');
+}
+
+function toggleSummaryPanel(id) {
+  document.getElementById('summary-form-' + id).classList.toggle('d-none');
+}
+
+function generateQueueSummary(id, btn) {
+  const scheduledAt = document.getElementById('dt-' + id)?.value || '';
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  let body = 'style=' + encodeURIComponent('つぶやき型');
+  if (scheduledAt) body += '&scheduled_at=' + encodeURIComponent(scheduledAt);
+  fetch('/articles/' + id + '/resummary', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: body
+  }).then(r => r.json()).then(d => {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+    if (d.success) {
+      const ta = document.getElementById('queue-ta-' + id);
+      if (ta) ta.value = d.summary;
+      const preview = document.querySelector('#qcard-' + id + ' .summary-preview');
+      if (preview) {
+        preview.textContent = d.summary.slice(0, 120) + (d.summary.length > 120 ? '…' : '');
+        preview.style.opacity = '1';
+      }
+    } else {
+      alert('生成失敗: ' + d.error);
+    }
+  }).catch(() => {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+    alert('通信エラーが発生しました');
+  });
+}
+
+function saveQueueSummary(id, btn) {
+  const ta = document.getElementById('queue-ta-' + id);
+  if (!ta || !ta.value.trim()) { alert('投稿文が空です'); return; }
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  fetch('/articles/' + id + '/edit', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'summary=' + encodeURIComponent(ta.value.trim())
+  }).then(r => r.json()).then(d => {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+    if (d.success) {
+      const preview = document.querySelector('#qcard-' + id + ' .summary-preview');
+      if (preview) {
+        preview.textContent = d.summary.slice(0, 120) + (d.summary.length > 120 ? '…' : '');
+        preview.style.opacity = '1';
+      }
+    } else {
+      alert('保存失敗: ' + d.error);
+    }
+  }).catch(() => {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+    alert('通信エラーが発生しました');
+  });
 }
 
 function setSchedule(id) {
