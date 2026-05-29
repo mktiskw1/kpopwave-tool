@@ -19,7 +19,7 @@
 
   <div id="queue-list">
   {% for a in queued %}
-  <div class="card-body border-bottom" style="border-color:var(--border)!important" id="qcard-{{ a.id }}" data-id="{{ a.id }}">
+  <div class="card-body border-bottom" style="border-color:var(--border)!important" id="qcard-{{ a.id }}" data-id="{{ a.id }}" data-scheduled-at="{{ (a.scheduled_at | utc_to_jst).strftime('%Y-%m-%dT%H:%M') if a.scheduled_at else '' }}">
     <div class="d-flex justify-content-between align-items-start gap-3">
 
       <!-- ドラッグハンドル -->
@@ -194,7 +194,11 @@ function toggleSummaryPanel(id) {
 }
 
 function generateQueueSummary(id, btn) {
-  const scheduledAt = document.getElementById('dt-' + id)?.value || '';
+  // data-scheduled-at（サーバー値）優先、ユーザーが変更した場合は dt-{id} を使用
+  const card = document.getElementById('qcard-' + id);
+  const scheduledAt = document.getElementById('dt-' + id)?.value
+                   || card?.dataset.scheduledAt
+                   || '';
   const orig = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';

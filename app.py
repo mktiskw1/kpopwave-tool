@@ -523,6 +523,7 @@ def resummary_article(id):
 
     style = (request.form.get("style") or "つぶやき型").strip()
     scheduled_at = (request.form.get("scheduled_at") or "").strip() or None
+    logger.info("[resummary] article=%d style=%r scheduled_at=%r", id, style, scheduled_at)
     success = summarize_article(app, id, style=style, scheduled_at=scheduled_at)
     # summarize_article は内部で別 app_context を開くため、セッションを明示的にリフレッシュ
     db.session.expire_all()

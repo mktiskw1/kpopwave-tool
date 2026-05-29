@@ -87,15 +87,23 @@ def _get_time_hooks(scheduled_at: str | None = None) -> list[str]:
     if scheduled_at:
         try:
             h = datetime.fromisoformat(scheduled_at).hour
-        except ValueError:
+            logger.info("[_get_time_hooks] scheduled_at=%r → hour=%d (JST)", scheduled_at, h)
+        except ValueError as e:
             h = datetime.now(JST).hour
+            logger.warning("[_get_time_hooks] scheduled_at=%r 解析失敗(%s) → 現在時刻 hour=%d を使用", scheduled_at, e, h)
     else:
         h = datetime.now(JST).hour
+        logger.info("[_get_time_hooks] scheduled_at=None → 現在時刻 hour=%d (JST) を使用", h)
+
     if 6 <= h <= 9:
-        return _HOOK_PATTERNS_BY_TIME["朝"]
-    if 11 <= h <= 13:
-        return _HOOK_PATTERNS_BY_TIME["昼"]
-    return _HOOK_PATTERNS_BY_TIME["夜"]
+        slot, hooks = "朝", _HOOK_PATTERNS_BY_TIME["朝"]
+    elif 11 <= h <= 13:
+        slot, hooks = "昼", _HOOK_PATTERNS_BY_TIME["昼"]
+    else:
+        slot, hooks = "夜", _HOOK_PATTERNS_BY_TIME["夜"]
+
+    logger.info("[_get_time_hooks] hour=%d → %sフック選択: %s", h, slot, hooks)
+    return hooks
 
 # ハッシュタグ生成用KPOPグループリスト（長いグループ名を先に並べて誤検出防止）
 _KPOP_GROUPS = [
@@ -306,9 +314,11 @@ def _save_error(app, article_id: int, message: str) -> None:
 
 def summarize_article(app, article_id: int, style: str = "つぶやき型", scheduled_at: str | None = None) -> bool:
     """1 記事の日本語投稿テキストを生成して DB に保存する。成功なら True。"""
+    logger.info("[summarize_article] article=%d style=%r scheduled_at=%r", article_id, style, scheduled_at)
     style_conf = _STYLE_PROMPTS.get(style, _STYLE_PROMPTS["つぶやき型"])
     style_tone = style_conf["tone"]
     hooks_text = "\n".join(f"・{h}" for h in _get_time_hooks(scheduled_at))
+    logger.info("[summarize_article] hooks_text=%r", hooks_text)
     time_hint  = _get_time_style_hint()
 
     # ── buzz_posts から AI 分析済みの tips を最大5件取得 ──────────────────
@@ -395,8 +405,9 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
 
     # ── 共通ブロック ───────────────────────────────────────────────────────
     HOOK_SECTION = (
-        f"━━ 冒頭フック（厳守） ━━\n"
-        f"投稿文の1行目は必ず以下のフックパターンのいずれかで始めること。\n"
+        f"━━ 冒頭フック（厳守・最重要） ━━\n"
+        f"【必須】必ず以下のフックのいずれかで文章を始めること。\n"
+        f"投稿文の1行目はフックの1文だけ。フックより前に何も置かない。\n"
         f"フックなしで始まる投稿文は絶対に生成しないこと。\n\n"
         f"{hooks_text}\n"
         f"※「〇〇」部分は実際のグループ名・曲名・イベント名に置き換えること"
@@ -543,6 +554,7 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
         if is_video_post:
             step2_base = (
                 "この文章から余計な説明を全部削って、感情だけ残してください。\n"
+                "【厳守】1行目のフックフレーズは絶対に変えないこと。そのまま残す。\n"
                 "一言で言い切る。フック+感情の一言だけ。\n"
                 f"絵文字なし・ハッシュタグなし・URLなし。必ず{body_max}文字以内。\n"
                 "出力は変換後の文章のみ。\n\n"
@@ -550,6 +562,7 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
         else:
             step2_base = (
                 "この文章を25歳の日本人女性が友達にLINEで送るメッセージに変換してください。\n"
+                "【厳守】1行目のフックフレーズは絶対に変えないこと。そのまま残す。\n"
                 "・説明文を感情に変える\n"
                 "・長い文を短く切る\n"
                 "・AIっぽい言い回しを口語に変える\n"
