@@ -1757,10 +1757,17 @@ def api_chat():
     import anthropic as _anthropic
     import json as _json_chat
 
+    _ALLOWED_IMG_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+
     data = request.get_json(force=True) or {}
-    user_msg = (data.get("message") or "").strip()
-    if not user_msg:
-        return jsonify({"error": "メッセージを入力してください"}), 400
+    user_msg        = (data.get("message") or "").strip()
+    image_base64    = (data.get("image_base64") or "").strip()
+    image_media_type = (data.get("image_media_type") or "image/jpeg").strip()
+    if image_media_type not in _ALLOWED_IMG_TYPES:
+        image_media_type = "image/jpeg"
+
+    if not user_msg and not image_base64:
+        return jsonify({"error": "メッセージまたは画像を入力してください"}), 400
 
     api_key = Setting.get("anthropic_api_key", "")
     if not api_key:
@@ -1770,14 +1777,37 @@ def api_chat():
     history = ChatMessage.query.order_by(ChatMessage.created_at.desc()).limit(20).all()
     history = list(reversed(history))
     messages_for_api = [{"role": m.role, "content": m.content} for m in history]
-    messages_for_api.append({"role": "user", "content": user_msg})
 
-    # ユーザーメッセージをDB保存
-    db.session.add(ChatMessage(role="user", content=user_msg))
+    # 画像ありの場合はマルチコンテンツ形式
+    if image_base64:
+        current_content = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image_media_type,
+                    "data": image_base64,
+                },
+            },
+            {
+                "type": "text",
+                "text": user_msg or "(この画像を見てアドバイスしてください)",
+            },
+        ]
+    else:
+        current_content = user_msg
+
+    messages_for_api.append({"role": "user", "content": current_content})
+
+    # ユーザーメッセージをDB保存（画像は保存しない・テキストのみ）
+    db_content = user_msg or "(画像を送信しました)"
+    db.session.add(ChatMessage(role="user", content=db_content))
     db.session.commit()
 
     # ── ContentWave の現在状況を収集 ──────────────────────────────────────
     pending_cnt = Article.query.filter_by(status="pending").count()
+    pending_video_cnt = (Article.query.filter_by(status="pending")
+                         .filter(Article.content_type == "video").count())
 
     recent_posted = (
         Article.query.filter_by(status="posted")
@@ -1799,6 +1829,19 @@ def api_chat():
     except Exception:
         next_txt = "不明"
 
+    # キュー中記事の内訳
+    queued_articles = Article.query.filter_by(status="queued").all()
+    queued_cnt       = len(queued_articles)
+    queued_thumb_cnt = sum(1 for a in queued_articles if a.thumbnail_url)
+    queued_img_cnt   = sum(
+        1 for a in queued_articles
+        if a.image_urls and a.image_urls not in ("", "[]", "null")
+    )
+    queued_video_cnt = sum(
+        1 for a in queued_articles
+        if (a.content_type or "article") == "video"
+    )
+
     buzz_tips: list[str] = []
     try:
         buzz_rows = (BuzzPost.query
@@ -1816,7 +1859,9 @@ def api_chat():
         pass
 
     cw_status = (
-        f"承認待ち記事: {pending_cnt}件\n\n"
+        f"承認待ち: {pending_cnt}件（うち動画: {pending_video_cnt}件）\n\n"
+        f"投稿キュー: {queued_cnt}件\n"
+        f"  └ サムネあり: {queued_thumb_cnt}件 / 複数画像あり: {queued_img_cnt}件 / 動画: {queued_video_cnt}件\n\n"
         f"直近5件の投稿済み記事:\n{posted_lines or '（なし）'}\n"
         f"次の投稿予定: {next_txt}\n\n"
         f"バズり投稿から学んだコツ:\n"
@@ -1835,6 +1880,11 @@ def api_chat():
         "- 動画投稿：フック+一言（50文字以内）\n"
         "- 時間帯別：朝=学び系・昼=共感系・夜=感情系\n\n"
         f"【現在のContentWave状況】\n{cw_status}\n\n"
+        "【回答スタンス】\n"
+        "- 持っている情報をもとに最善の答えを出す\n"
+        "- 「管理画面で確認してください」とは言わない\n"
+        "- 確認を求めすぎない。情報が不足していても推測で具体的な答えを出す\n"
+        "- 迷ったらとにかく答えを出す。ユーザーに聞き返すのは最小限に\n\n"
         "フック提案・投稿文改善・ネタ出しなど何でも相談に乗ってください。\n"
         "返答は簡潔に・口語体で。"
     )
