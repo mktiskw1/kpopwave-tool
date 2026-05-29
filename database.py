@@ -114,12 +114,3 @@ class BuzzPost(db.Model):
     memo = db.Column(db.Text, nullable=True)
     analysis = db.Column(db.Text, nullable=True)  # JSON文字列
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-
-class ChatMessage(db.Model):
-    __tablename__ = "chat_messages"
-
-    id = db.Column(db.Integer, primary_key=True)
-    role = db.Column(db.String(20), nullable=False)   # 'user' or 'assistant'
-    content = db.Column(db.Text, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)

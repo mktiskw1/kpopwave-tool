@@ -45,85 +45,28 @@ CHROME_PATHS = [
 
 
 def run_claude():
-    """VS Code をプロジェクトフォルダで開き、手順ポップアップを表示する"""
+    """VS Code をプロジェクトフォルダで開き、Simple Browser で claude.ai を開く"""
+    from urllib.parse import quote
+
+    # ① VSCode をプロジェクトフォルダで起動
     try:
         subprocess.Popen(["cmd.exe", "/c", "code", PROJECT_DIR])
+        set_status("VSCode を起動しました。claude.ai を開いています...")
     except Exception:
-        pass  # VS Code が PATH にない場合は無視してポップアップだけ表示
+        set_status("VSCode が見つかりません（PATH を確認してください）")
+        return
 
-    # ── ポップアップ ──────────────────────────────────────────
-    popup = tk.Toplevel(root)
-    popup.title("Claude Code 起動手順")
-    popup.resizable(False, False)
-    popup.configure(bg=BG)
-    popup.grab_set()  # モーダル
+    # ② バックグラウンドで待機してから Simple Browser を開く
+    def _open_simple_browser():
+        time.sleep(3)  # VSCode の起動を待つ
+        try:
+            target_url = "https://claude.ai"
+            vscode_uri = f"vscode://vscode.simple-browser/open?url={quote(target_url, safe='')}"
+            subprocess.Popen(["cmd.exe", "/c", "code", "--open-url", vscode_uri])
+        except Exception:
+            pass
 
-    tk.Label(
-        popup,
-        text="VSCode のターミナルで順番に入力してください",
-        font=("Segoe UI", 11, "bold"),
-        bg=BG, fg=FG,
-        padx=20, pady=14,
-    ).pack()
-
-    STEPS = [
-        ("① ディレクトリ移動", r"cd C:\Users\mktis\kpopwave-tool"),
-        ("② Claude Code 起動", "claude"),
-    ]
-
-    def copy_to_clipboard(text, lbl):
-        popup.clipboard_clear()
-        popup.clipboard_append(text)
-        lbl.config(text="コピーしました ✓")
-        popup.after(1500, lambda: lbl.config(text="📋 コピー"))
-
-    for step_title, cmd_text in STEPS:
-        row = tk.Frame(popup, bg=PANEL, padx=16, pady=10)
-        row.pack(fill="x", padx=20, pady=4)
-
-        tk.Label(
-            row, text=step_title,
-            font=("Segoe UI", 9),
-            bg=PANEL, fg=STATUS_FG,
-            anchor="w",
-        ).pack(anchor="w")
-
-        cmd_row = tk.Frame(row, bg=PANEL)
-        cmd_row.pack(fill="x", pady=(4, 0))
-
-        tk.Label(
-            cmd_row, text=cmd_text,
-            font=("Consolas", 12, "bold"),
-            bg=PANEL, fg="#7ec8e3",
-            anchor="w",
-        ).pack(side="left", fill="x", expand=True)
-
-        copy_lbl = tk.Label(
-            cmd_row, text="📋 コピー",
-            font=("Segoe UI", 9),
-            bg="#0f3460", fg=FG,
-            padx=8, pady=2,
-            cursor="hand2",
-        )
-        copy_lbl.pack(side="right")
-        copy_lbl.bind("<Button-1>", lambda e, t=cmd_text, l=copy_lbl: copy_to_clipboard(t, l))
-
-    tk.Button(
-        popup,
-        text="閉じる",
-        font=("Segoe UI", 10),
-        bg=ACCENT, fg=FG,
-        activebackground="#c73652", activeforeground=FG,
-        relief="flat", padx=20, pady=6,
-        cursor="hand2",
-        command=popup.destroy,
-    ).pack(pady=14)
-
-    # ポップアップを画面中央に配置
-    popup.update_idletasks()
-    x = root.winfo_x() + (root.winfo_width() - popup.winfo_width()) // 2
-    y = root.winfo_y() + (root.winfo_height() - popup.winfo_height()) // 2
-    popup.geometry(f"+{x}+{y}")
+    threading.Thread(target=_open_simple_browser, daemon=True).start()
 
     set_status("VS Code を開きました")
 
@@ -360,7 +303,7 @@ BUTTONS = [
     ("② 管理画面を開く",        "🌐  Chrome で localhost:5000 を開く",     open_admin, "#2d1b69"),
     ("③ GitHub に保存",         "⬆  add → commit → push",               git_push,   "#1a472a"),
     ("④ GitHub から最新版取得",  "⬇  git pull",                           git_pull,   "#1a472a"),
-    ("⑤ Claude Code 起動",     "🤖  VS Code を開いて手順を表示",          run_claude, "#0f3460"),
+    ("⑤ Claude Code 起動",     "🤖  VS Code + claude.ai を開く",          run_claude, "#0f3460"),
     ("⑦ ngrok 起動",           "🌐  トンネル起動 → URL を設定に反映",     run_ngrok,  "#0d4d4d"),
 ]
 

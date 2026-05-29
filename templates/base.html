@@ -385,11 +385,6 @@
           </a>
         </li>
         <li class="nav-item">
-          <a class="nav-link {% if request.endpoint=='chat' %}active{% endif %}" href="{{ url_for('chat') }}">
-            <i class="bi bi-robot"></i> AIアシスタント
-          </a>
-        </li>
-        <li class="nav-item">
           <a class="nav-link {% if request.endpoint=='settings' %}active{% endif %}" href="{{ url_for('settings') }}">
             <i class="bi bi-gear-fill"></i> 設定
           </a>
