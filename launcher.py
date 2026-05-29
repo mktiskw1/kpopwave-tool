@@ -1,5 +1,5 @@
 """
-KPOPwave Tool Launcher
+ContentWave Launcher
 起動方法: launcher.bat をダブルクリック
 """
 
@@ -279,7 +279,7 @@ def toggle_sleep():
 
 # ── GUI ────────────────────────────────────────────────────
 root = tk.Tk()
-root.title("KPOPwave ランチャー")
+root.title("ContentWave ランチャー")
 root.resizable(False, False)
 
 BG        = "#1a1a2e"
@@ -293,18 +293,18 @@ root.configure(bg=BG)
 tk.Frame(root, bg=ACCENT, pady=8).pack(fill="x")
 tk.Label(
     root.winfo_children()[-1],
-    text="🌊  KPOPwave Tool",
+    text="🌊  ContentWave",
     font=("Segoe UI", 18, "bold"),
     bg=ACCENT, fg=FG,
 ).pack()
 
 BUTTONS = [
-    ("① ツール起動",            "▶  コマンドプロンプトで run.py を実行",   run_tool,   "#0f3460"),
-    ("② 管理画面を開く",        "🌐  Chrome で localhost:5000 を開く",     open_admin, "#2d1b69"),
-    ("③ GitHub に保存",         "⬆  add → commit → push",               git_push,   "#1a472a"),
-    ("④ GitHub から最新版取得",  "⬇  git pull",                           git_pull,   "#1a472a"),
-    ("⑤ Claude Code 起動",     "🤖  VS Code + claude.ai を開く",          run_claude, "#0f3460"),
-    ("⑦ ngrok 起動",           "🌐  トンネル起動 → URL を設定に反映",     run_ngrok,  "#0d4d4d"),
+    ("① ツール起動",        "▶  コマンドプロンプトで run.py を実行",   run_tool,   "#0f3460"),
+    ("② Claude Code 起動", "🤖  VS Code + claude.ai を開く",          run_claude, "#0f3460"),
+    ("③ ngrok 起動",       "🌐  トンネル起動 → URL を設定に反映",     run_ngrok,  "#0d4d4d"),
+    ("④ 管理画面を開く",    "🌐  Chrome で localhost:5000 を開く",     open_admin, "#2d1b69"),
+    ("⑤ GitHub 保存",      "⬆  add → commit → push",                 git_push,   "#1a472a"),
+    ("⑥ GitHub 取得",      "⬇  git pull",                            git_pull,   "#1a472a"),
 ]
 
 frame = tk.Frame(root, bg=BG, padx=20, pady=15)
