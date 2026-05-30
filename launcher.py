@@ -90,7 +90,7 @@ def _show_claude_instructions():
 
     tk.Label(popup, text=SEP, font=("Consolas", 11), bg=BG, fg=ACCENT).pack(pady=(10, 6))
 
-    tk.Button(popup, text="OK（VSCode を起動）", font=("Segoe UI", 10),
+    tk.Button(popup, text="OK", font=("Segoe UI", 10),
               bg=ACCENT, fg=FG, relief="flat", bd=0, padx=20, pady=6,
               cursor="hand2", command=popup.destroy).pack()
 
@@ -98,11 +98,8 @@ def _show_claude_instructions():
 
 
 def run_claude():
-    """起動手順ポップアップを表示してから VS Code を開く"""
+    """VS Code を起動すると同時に起動手順ポップアップを表示する"""
     from urllib.parse import quote
-
-    popup = _show_claude_instructions()
-    root.wait_window(popup)
 
     # ① VSCode をプロジェクトフォルダで起動
     try:
@@ -124,6 +121,9 @@ def run_claude():
 
     threading.Thread(target=_open_simple_browser, daemon=True).start()
     set_status("VS Code を開きました")
+
+    # ③ 起動手順ポップアップを表示（OK で閉じるだけ）
+    _show_claude_instructions()
 
 
 def open_admin():
