@@ -19,7 +19,7 @@
 
   <div id="queue-list">
   {% for a in queued %}
-  <div class="card-body border-bottom" style="border-color:var(--border)!important" id="qcard-{{ a.id }}" data-id="{{ a.id }}" data-scheduled-at="{{ (a.scheduled_at | utc_to_jst).strftime('%Y-%m-%dT%H:%M') if a.scheduled_at else '' }}">
+  <div class="card-body border-bottom" style="border-color:var(--border)!important" id="qcard-{{ a.id }}" data-id="{{ a.id }}" data-scheduled-at="{{ (a.scheduled_at | utc_to_jst).strftime('%Y-%m-%dT%H:%M') if a.scheduled_at else '' }}" data-thumbnail="{{ a.thumbnail_url or '' }}" data-content-type="{{ a.content_type or 'article' }}" data-url="{{ a.url }}">
     <div class="d-flex justify-content-between align-items-start gap-3">
 
       <!-- ドラッグハンドル -->
@@ -70,7 +70,11 @@
           <i class="bi bi-calendar3"></i> 日時指定
         </button>
         <button class="btn btn-outline-secondary btn-sm" style="font-size:.8rem"
-                onclick="toggleSummaryPanel({{ a.id }})">
+                onclick="showPreview({{ a.id }})">
+          👁 プレビュー
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" style="font-size:.8rem"
+                onclick="openAndGenerate({{ a.id }}, this)">
           ✍️ 投稿文を生成
         </button>
         <form action="{{ url_for('unqueue_article', id=a.id) }}" method="post">
@@ -175,6 +179,39 @@
   {% endfor %}
 </div>
 
+<!-- Threads プレビューモーダル -->
+<div id="preview-modal" class="d-none"
+     style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;"
+     onclick="if(event.target===this)closePreview()">
+  <div style="background:#fff;border-radius:16px;width:min(480px,94vw);max-height:85vh;overflow-y:auto;padding:20px 20px 16px;position:relative;"
+       onclick="event.stopPropagation()">
+
+    <!-- 閉じるボタン -->
+    <button onclick="closePreview()"
+            style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:1.3rem;cursor:pointer;color:#888;line-height:1;padding:0">✕</button>
+
+    <!-- アカウントヘッダー -->
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+      <div style="width:42px;height:42px;border-radius:50%;background:#e94560;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:.82rem;flex-shrink:0;letter-spacing:.04em">KW</div>
+      <div>
+        <div style="font-weight:700;font-size:.95rem;color:#000;line-height:1.3">kpopwave.daily</div>
+        <div style="font-size:.78rem;color:#888">@kpopwave.daily</div>
+      </div>
+    </div>
+
+    <!-- 投稿文 -->
+    <div id="preview-text"
+         style="font-size:.93rem;color:#111;white-space:pre-wrap;line-height:1.65;margin-bottom:14px;word-break:break-all"></div>
+
+    <!-- 画像 / 動画 -->
+    <div id="preview-media" style="margin-bottom:12px"></div>
+
+    <!-- 投稿予定時刻 -->
+    <div id="preview-schedule"
+         style="font-size:.78rem;color:#aaa;border-top:1px solid #f0f0f0;padding-top:10px"></div>
+  </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
@@ -191,6 +228,16 @@ function toggleSchedule(id) {
 
 function toggleSummaryPanel(id) {
   document.getElementById('summary-form-' + id).classList.toggle('d-none');
+}
+
+function openAndGenerate(id, _btn) {
+  const panel = document.getElementById('summary-form-' + id);
+  panel.classList.remove('d-none');
+  const ta = document.getElementById('queue-ta-' + id);
+  if (ta && ta.value.trim()) return;
+  // スピナーをパネル内の「生成」ボタンに表示する
+  const innerBtn = panel.querySelector('button');
+  generateQueueSummary(id, innerBtn || _btn);
 }
 
 function generateQueueSummary(id, btn) {
@@ -240,15 +287,21 @@ function saveQueueSummary(id, btn) {
     headers: {'Content-Type': 'application/x-www-form-urlencoded'},
     body: 'summary=' + encodeURIComponent(ta.value.trim())
   }).then(r => r.json()).then(d => {
-    btn.disabled = false;
-    btn.innerHTML = orig;
     if (d.success) {
       const preview = document.querySelector('#qcard-' + id + ' .summary-preview');
       if (preview) {
         preview.textContent = d.summary.slice(0, 120) + (d.summary.length > 120 ? '…' : '');
         preview.style.opacity = '1';
       }
+      btn.innerHTML = '✅ 保存しました！';
+      setTimeout(() => {
+        document.getElementById('summary-form-' + id).classList.add('d-none');
+        btn.disabled = false;
+        btn.innerHTML = orig;
+      }, 1000);
     } else {
+      btn.disabled = false;
+      btn.innerHTML = orig;
       alert('保存失敗: ' + d.error);
     }
   }).catch(() => {
@@ -256,6 +309,47 @@ function saveQueueSummary(id, btn) {
     btn.innerHTML = orig;
     alert('通信エラーが発生しました');
   });
+}
+
+function showPreview(id) {
+  const card = document.getElementById('qcard-' + id);
+  const ta = document.getElementById('queue-ta-' + id);
+  const summary = (ta && ta.value.trim())
+    ? ta.value.trim()
+    : (card.querySelector('.summary-preview')?.textContent?.replace(/…$/, '').trim() || '（投稿文未生成）');
+  const thumbnail   = card.dataset.thumbnail   || '';
+  const contentType = card.dataset.contentType || 'article';
+  const url         = card.dataset.url         || '';
+  const scheduledAt = document.getElementById('dt-' + id)?.value || card.dataset.scheduledAt || '';
+
+  document.getElementById('preview-text').textContent = summary;
+
+  const mediaEl = document.getElementById('preview-media');
+  if (contentType === 'video' && url) {
+    mediaEl.innerHTML = `<video src="${url}" controls style="width:100%;border-radius:10px;max-height:280px;background:#000"></video>`;
+  } else if (thumbnail) {
+    mediaEl.innerHTML = `<img src="${thumbnail}" alt="" style="width:100%;border-radius:10px;max-height:320px;object-fit:cover;display:block" onerror="this.style.display='none'">`;
+  } else {
+    mediaEl.innerHTML = '';
+  }
+
+  const schedEl = document.getElementById('preview-schedule');
+  if (scheduledAt) {
+    const dt = new Date(scheduledAt);
+    const m  = String(dt.getMonth() + 1).padStart(2, '0');
+    const d  = String(dt.getDate()).padStart(2, '0');
+    const hh = String(dt.getHours()).padStart(2, '0');
+    const mm = String(dt.getMinutes()).padStart(2, '0');
+    schedEl.textContent = `🕐 ${m}/${d} ${hh}:${mm} JST 投稿予定`;
+  } else {
+    schedEl.textContent = '🕐 投稿時刻未設定';
+  }
+
+  document.getElementById('preview-modal').classList.remove('d-none');
+}
+
+function closePreview() {
+  document.getElementById('preview-modal').classList.add('d-none');
 }
 
 function setSchedule(id) {
