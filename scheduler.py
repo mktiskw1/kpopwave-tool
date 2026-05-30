@@ -267,26 +267,6 @@ def _setup_weekly_post_jobs(app):
 
 def setup_scheduler(app):
     """スケジューラを初期化して起動する。"""
-    with app.app_context():
-        interval_h = int(Setting.get("collect_interval_hours", "2"))
-        yt_interval_h = int(Setting.get("youtube_collect_interval_hours", "6"))
-
-    scheduler.add_job(
-        _collect_job,
-        IntervalTrigger(hours=interval_h),
-        args=[app],
-        id="collect_rss",
-        replace_existing=True,
-    )
-
-    scheduler.add_job(
-        _collect_youtube_job,
-        IntervalTrigger(hours=yt_interval_h),
-        args=[app],
-        id="collect_youtube",
-        replace_existing=True,
-    )
-
     _setup_weekly_post_jobs(app)
 
     # バックアップ投稿ジョブ: CronTrigger が missed/競合した場合でも5分以内に投稿を実行する
@@ -318,8 +298,5 @@ def setup_scheduler(app):
     app.reschedule_post_jobs = lambda: _setup_weekly_post_jobs(app)
 
     scheduler.start()
-    logger.info(
-        "Scheduler started (RSS every %dh, YouTube every %dh, post backup every 5min)",
-        interval_h, yt_interval_h,
-    )
+    logger.info("Scheduler started (post backup every 5min, comments/rollover every 30min)")
     return scheduler
