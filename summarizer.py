@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import random
 import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -50,6 +51,61 @@ _HOOK_PATTERNS_BY_TIME: dict[str, list[str]] = {
     "昼": ["わかる人にはわかる、", "これ好きな人と友達になりたい。", "なんでみんな話題にしないんだろ。"],
     "夜": ["待って、これやばい。", "これガチなんですけど、", "嘘みたいな本当の話なんですけど、"],
 }
+
+# ランダム表現選択リスト（カテゴリ別）
+EXPRESSIONS_VISUAL = [
+    "顔が反則すぎる", "目が離せない", "画面から出てきそう",
+    "空気が変わる", "オーラが次元違う", "見るたびに新鮮",
+    "こんな顔していていいの", "存在が芸術", "光ってる",
+    "カメラが好きすぎる", "角度全部勝ち", "現実にいる人じゃない",
+    "スクリーンが狭い", "顔面偏差値がバグってる", "この世に存在していいの",
+    "重力に逆らってる", "余白がない", "完成されすぎてて怖い",
+    "この子だけ解像度が違う", "見るたびに発見がある",
+    "引きでも寄りでも勝ち", "表情の作り方が天才",
+    "何着ても着こなす", "髪型変えるたびに正解",
+    "笑顔が武器すぎる", "目力で全部持っていく",
+]
+
+EXPRESSIONS_PERFORMANCE = [
+    "この完成度どうなってるの", "練習量が見える", "ライブでこれは無理",
+    "鳥肌が止まらない", "どこで覚えたんこの表現力", "全員主役",
+    "センターの引力がやばい", "視線が釘付けになる",
+    "この子だけ時間軸が違う", "踊りながら歌えるの普通に無理",
+    "ステージが似合いすぎる", "生まれながらのパフォーマー",
+    "これを無料で見ていいの", "息の合い方が人間じゃない",
+    "指先まで気が抜けてない", "音楽と体が一体化してる",
+    "表情管理が完璧すぎる", "キレとしなやかさが共存してる",
+    "この子のパート毎回鳥肌", "感情の乗せ方が違う",
+    "技術より先に感情が来る", "見てる側が疲れる密度",
+    "アドリブっぽいのに完璧", "楽しそうに踊るのが一番強い",
+]
+
+EXPRESSIONS_REACTION = [
+    "声出た", "二度見した", "スクロール止まった", "これ知らなかった人かわいそう",
+    "タイムラインに感謝", "見て後悔しないやつ", "心臓に悪い",
+    "見終わった後に放心した", "しばらく他のこと考えられない",
+    "これ見た後の現実がつらい", "沼に落ちる音がした",
+    "好きになる瞬間ってこういうことか", "また好きが更新された",
+    "語彙力が死んだ", "言葉が追いつかない",
+    "画面前で固まった", "気づいたら3回見てた",
+    "これ布教していいですか", "周りに布教したくなる",
+    "一人で抱えるには重い", "好きすぎて語彙力が消えた",
+    "見終わった瞬間また見たくなった", "これが無料でいいの本当に",
+    "何も言えなくて夏", "感想が出てこないタイプのやつ",
+    "ロスになる前に覚悟してください", "これが沼の入り口です",
+]
+
+EXPRESSIONS_MONOLOGUE = [
+    "なんで知らなかったんだろ", "もっと早く教えてほしかった",
+    "布教していい？", "これ好きな人と話したい",
+    "一人で抱えるには重い", "誰かに言いたかっただけ", "見てよかった",
+]
+
+EXPRESSIONS_QUIRKY = [
+    "何も言えなくて夏", "もう優勝でいいよ", "殿堂入りってこういうこと",
+    "好きって言っていいですか", "待って心の準備ができてない",
+    "これ現実？夢？", "審査員全員10点出してください",
+]
 
 # スタイルごとのトーン
 _STYLE_PROMPTS: dict = {
@@ -298,6 +354,27 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
     hooks_text = "\n".join(f"・{h}" for h in all_hooks)
     logger.info("[summarize_article] hooks_text=%r", hooks_text)
     time_hint  = _get_time_style_hint()
+
+    # ── 今回使う表現をランダムに選択 ────────────────────────────────────────
+    picked_monologue   = random.choice(EXPRESSIONS_MONOLOGUE)
+    picked_visual      = random.choice(EXPRESSIONS_VISUAL)
+    picked_performance = random.choice(EXPRESSIONS_PERFORMANCE)
+    picked_reaction    = random.choice(EXPRESSIONS_REACTION)
+    picked_quirky      = random.choice(EXPRESSIONS_QUIRKY)
+    EXPRESSION_PICK_SECTION = (
+        f"━━ 今回必ず使う表現 ━━\n"
+        f"以下からいずれか1〜2つを本文に自然に組み込むこと：\n"
+        f"・{picked_monologue}（独り言系・最優先）\n"
+        f"・{picked_visual}（ビジュアル系）\n"
+        f"・{picked_performance}（パフォーマンス系）\n"
+        f"・{picked_reaction}（感情・反応系）\n"
+        f"・{picked_quirky}（ちょっとズレた系）\n"
+        f"【必須】上記の「今回必ず使う表現」を本文に自然に組み込むこと"
+    )
+    logger.info(
+        "[summarize_article] 今回の表現: 独り言=%r 視覚=%r パフォーマンス=%r 反応=%r ズレ=%r",
+        picked_monologue, picked_visual, picked_performance, picked_reaction, picked_quirky,
+    )
 
     # ── buzz_posts から AI 分析済みの tips を最大5件取得 ──────────────────
     with app.app_context():
@@ -548,7 +625,8 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
             f"・日本語のみ（グループ名・曲名はアルファベットOK）\n"
             f"・動画が主役なので説明不要。短く言い切る\n"
             f"・例：「待って、これやばい。」「何回見ても飽きない。」「なんかすごい。」「なんで次元が違うんだろ。」\n"
-            f"・出力は投稿文のみ（前置き・説明不要）"
+            f"・出力は投稿文のみ（前置き・説明不要）\n\n"
+            f"{EXPRESSION_PICK_SECTION}"
         )
 
     elif is_youtube:
@@ -561,6 +639,7 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
             f"━━ スタイル: {style} ━━\n{style_tone}"
             f"{time_section}\n"
             f"{buzz_section}\n\n"
+            f"{EXPRESSION_PICK_SECTION}\n\n"
             f"{COMMON_RULES}"
         )
 
@@ -586,6 +665,7 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
             f"・投稿文は必ず日本語のみで書くこと（韓国語禁止）\n"
             f"・グループ名・メンバー名はアルファベット表記でOK\n"
             f"・出力は本文のみ\n\n"
+            f"{EXPRESSION_PICK_SECTION}\n\n"
             f"━━ ランキングデータ ━━\n{ranking_lines}{more_note}"
         )
 
@@ -599,6 +679,7 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
             f"━━ スタイル: {style} ━━\n{style_tone}"
             f"{time_section}\n"
             f"{buzz_section}\n\n"
+            f"{EXPRESSION_PICK_SECTION}\n\n"
             f"{COMMON_RULES}"
         )
 
