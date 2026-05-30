@@ -44,9 +44,65 @@ CHROME_PATHS = [
 ]
 
 
+def _show_claude_instructions():
+    """Claude Code 起動手順をポップアップで表示する"""
+    popup = tk.Toplevel(root)
+    popup.title("Claude Code 起動手順")
+    popup.resizable(False, False)
+    popup.configure(bg=BG)
+    popup.grab_set()
+
+    # 中央寄せ
+    popup.update_idletasks()
+    pw, ph = 420, 300
+    rx = root.winfo_x() + (root.winfo_width() - pw) // 2
+    ry = root.winfo_y() + (root.winfo_height() - ph) // 2
+    popup.geometry(f"{pw}x{ph}+{rx}+{ry}")
+
+    SEP = "━" * 24
+
+    def copy_text(text, btn):
+        popup.clipboard_clear()
+        popup.clipboard_append(text)
+        orig = btn.cget("text")
+        btn.config(text="✓ コピー済み", bg="#1a6a1a")
+        popup.after(1500, lambda: btn.config(text=orig, bg="#0f3460"))
+
+    tk.Label(popup, text=SEP, font=("Consolas", 11), bg=BG, fg=ACCENT).pack(pady=(14, 0))
+    tk.Label(popup, text="Claude Code 起動手順", font=("Segoe UI", 13, "bold"), bg=BG, fg=FG).pack()
+    tk.Label(popup, text=SEP, font=("Consolas", 11), bg=BG, fg=ACCENT).pack(pady=(0, 6))
+
+    tk.Label(popup, text="VSCode のターミナルで以下を順番に入力：",
+             font=("Segoe UI", 10), bg=BG, fg=STATUS_FG).pack(pady=(0, 10))
+
+    for step, cmd in [("Step 1", r".\venv\Scripts\activate"), ("Step 2", "claude")]:
+        row = tk.Frame(popup, bg=BG)
+        row.pack(fill="x", padx=30, pady=4)
+        tk.Label(row, text=f"{step}:", font=("Segoe UI", 10, "bold"), bg=BG, fg=FG,
+                 width=7, anchor="w").pack(side="left")
+        tk.Label(row, text=cmd, font=("Consolas", 11), bg=PANEL, fg="#7ec8e3",
+                 padx=8, pady=4, relief="flat").pack(side="left", expand=True, fill="x")
+        copy_btn = tk.Button(row, text="コピー", font=("Segoe UI", 9),
+                             bg="#0f3460", fg=FG, relief="flat", bd=0,
+                             padx=10, cursor="hand2")
+        copy_btn.config(command=lambda t=cmd, b=copy_btn: copy_text(t, b))
+        copy_btn.pack(side="left", padx=(6, 0))
+
+    tk.Label(popup, text=SEP, font=("Consolas", 11), bg=BG, fg=ACCENT).pack(pady=(10, 6))
+
+    tk.Button(popup, text="OK（VSCode を起動）", font=("Segoe UI", 10),
+              bg=ACCENT, fg=FG, relief="flat", bd=0, padx=20, pady=6,
+              cursor="hand2", command=popup.destroy).pack()
+
+    return popup
+
+
 def run_claude():
-    """VS Code をプロジェクトフォルダで開き、Simple Browser で claude.ai を開く"""
+    """起動手順ポップアップを表示してから VS Code を開く"""
     from urllib.parse import quote
+
+    popup = _show_claude_instructions()
+    root.wait_window(popup)
 
     # ① VSCode をプロジェクトフォルダで起動
     try:
@@ -58,7 +114,7 @@ def run_claude():
 
     # ② バックグラウンドで待機してから Simple Browser を開く
     def _open_simple_browser():
-        time.sleep(3)  # VSCode の起動を待つ
+        time.sleep(3)
         try:
             target_url = "https://claude.ai"
             vscode_uri = f"vscode://vscode.simple-browser/open?url={quote(target_url, safe='')}"
@@ -67,7 +123,6 @@ def run_claude():
             pass
 
     threading.Thread(target=_open_simple_browser, daemon=True).start()
-
     set_status("VS Code を開きました")
 
 
