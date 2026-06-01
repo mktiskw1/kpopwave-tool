@@ -87,6 +87,7 @@ def _migrate_db():
         ("image_urls", "TEXT"),
         ("content_type", "VARCHAR(20) DEFAULT 'article'"),
         ("video_file_path", "VARCHAR(500)"),
+        ("is_fancam", "INTEGER DEFAULT 0"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -1191,17 +1192,39 @@ def trim_video(article_id):
 def requeue_article(article_id):
     import shutil, tempfile
 
+    logger.info("[requeue] リクエスト受信: article_id=%d", article_id)
     article = Article.query.get_or_404(article_id)
+    logger.info("[requeue] 取得: id=%d status=%r content_type=%r scheduled_at=%s title=%.50s",
+                article_id, article.status, article.content_type, article.scheduled_at, article.title)
+
+    # 動画以外はステータスをpendingに戻すだけ
     if (article.content_type or "article") != "video":
-        return jsonify({"ok": False, "error": "動画記事のみ再投稿できます"}), 400
+        prev_status = article.status
+        article.status = "pending"
+        article.scheduled_at = None   # ← unqueue_article と同様にリセット（バグ修正）
+        article.error_message = None
+        try:
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            logger.error("[requeue] DBコミット失敗: id=%d %s", article_id, exc)
+            return jsonify({"ok": False, "error": f"DB更新失敗: {exc}"}), 500
+        logger.info("[requeue] 完了(記事): id=%d %s→pending scheduled_at=None", article_id, prev_status)
+        return jsonify({"ok": True})
+
+    logger.info("[requeue] 動画処理開始: id=%d video_file_path=%r", article_id, article.video_file_path)
 
     # 動画ファイルが存在しない場合は再ダウンロード
     needs_download = False
     if article.video_file_path:
         vpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", article.video_file_path)
         if not os.path.exists(vpath):
+            logger.info("[requeue] 動画ファイル不在、再ダウンロード必要: %s", vpath)
             needs_download = True
+        else:
+            logger.info("[requeue] 動画ファイル確認OK: %s", vpath)
     else:
+        logger.info("[requeue] video_file_path未設定、再ダウンロード必要")
         needs_download = True
 
     if needs_download:
@@ -1255,11 +1278,19 @@ def requeue_article(article_id):
             return jsonify({"ok": False, "error": f"ファイルコピーエラー: {str(exc)[:120]}"}), 500
 
         article.video_file_path = f"videos/{dest_filename}"
-        logger.info("再投稿: 動画再ダウンロード完了 id=%d %s", article_id, dest_filename)
+        logger.info("[requeue] 動画再ダウンロード完了: id=%d %s", article_id, dest_filename)
 
+    prev_status = article.status
     article.status = "pending"
-    db.session.commit()
-    logger.info("再投稿キュー: id=%d title=%s", article_id, article.title[:60])
+    article.scheduled_at = None   # ← バグ修正: 過去のスケジュール時刻をクリア
+    article.error_message = None
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        logger.error("[requeue] DBコミット失敗(動画): id=%d %s", article_id, exc)
+        return jsonify({"ok": False, "error": f"DB更新失敗: {exc}"}), 500
+    logger.info("[requeue] 完了(動画): id=%d %s→pending", article_id, prev_status)
     return jsonify({"ok": True})
 
 

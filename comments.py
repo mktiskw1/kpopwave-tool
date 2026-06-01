@@ -8,6 +8,9 @@ logger = logging.getLogger(__name__)
 
 _BASE = "https://graph.threads.net/v1.0"
 _FIELDS = "id,text,username,timestamp,has_replies,replied_to{id},root_post{id}"
+_OWN_USERNAME = "kpopwave.daily"
+_POSTS_TO_CHECK = 10    # 返信を確認する最近の投稿数
+_REPLIES_PER_POST = 20  # 1投稿あたりの取得返信数
 
 
 def _creds(app):
@@ -16,35 +19,59 @@ def _creds(app):
 
 
 def fetch_comments(app):
-    """Threads API から最新50件のコメントを取得して DB に保存。"""
+    """Threads API から自分の投稿への他者コメントを取得して DB に保存。"""
     token, user_id = _creds(app)
     if not token or not user_id:
         return {"error": "Threadsの認証情報が設定されていません", "fetched": 0, "new": 0}
 
+    # Step 1: 自分の最近の投稿IDを取得
     try:
         resp = requests.get(
-            f"{_BASE}/{user_id}/replies",
-            params={"fields": _FIELDS, "limit": 50, "access_token": token},
+            f"{_BASE}/{user_id}/threads",
+            params={"fields": "id", "limit": _POSTS_TO_CHECK, "access_token": token},
             timeout=30,
         )
         resp.raise_for_status()
-        items = resp.json().get("data", [])
+        posts = resp.json().get("data", [])
     except Exception as e:
-        logger.exception("コメント取得APIエラー")
+        logger.exception("投稿一覧取得APIエラー")
         return {"error": str(e), "fetched": 0, "new": 0}
+
+    # Step 2: 各投稿の返信を取得し、自分のコメントを除外
+    items_with_post: list[tuple[dict, str]] = []
+    for post in posts:
+        parent_post_id = post.get("id")
+        if not parent_post_id:
+            continue
+        try:
+            r = requests.get(
+                f"{_BASE}/{parent_post_id}/replies",
+                params={"fields": _FIELDS, "limit": _REPLIES_PER_POST, "access_token": token},
+                timeout=30,
+            )
+            r.raise_for_status()
+            for reply in r.json().get("data", []):
+                if not reply.get("id"):
+                    continue
+                if reply.get("username") == _OWN_USERNAME:
+                    continue
+                items_with_post.append((reply, parent_post_id))
+        except Exception as e:
+            logger.warning("返信取得APIエラー post_id=%s: %s", parent_post_id, e)
 
     with app.app_context():
         new_count = 0
-        for c in items:
+        for c, parent_post_id in items_with_post:
             cid = c.get("id")
             if not cid:
                 continue
 
-            # root_post があればそれを、なければ replied_to を post_id として使用
+            # root_post → replied_to → 親投稿ID の順で post_id を解決
             root = c.get("root_post") or {}
             replied = c.get("replied_to") or {}
             post_id = (root.get("id") if isinstance(root, dict) else None) or \
-                      (replied.get("id") if isinstance(replied, dict) else None)
+                      (replied.get("id") if isinstance(replied, dict) else None) or \
+                      parent_post_id
 
             existing = Comment.query.filter_by(id=cid).first()
             if existing:
@@ -72,8 +99,9 @@ def fetch_comments(app):
             logger.exception("コメントDB保存エラー")
             return {"error": "DB保存に失敗しました", "fetched": 0, "new": 0}
 
-    logger.info("コメント取得: %d件取得 / %d件新規", len(items), new_count)
-    return {"fetched": len(items), "new": new_count}
+    total = len(items_with_post)
+    logger.info("コメント取得: %d件取得 / %d件新規", total, new_count)
+    return {"fetched": total, "new": new_count}
 
 
 def like_comment(app, reply_id):

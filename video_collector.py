@@ -34,6 +34,14 @@ _URL_SUFFIXES = ["/videos", ""]
 # ダウンロード後に無視する一時拡張子
 _SKIP_EXTS = {".part", ".ytdl", ".temp", ".tmp", ".jpg", ".png", ".webp"}
 
+# ファンカム判定キーワード
+_FANCAM_KEYWORDS = frozenset(["fancam", "직캠", "focus"])
+
+
+def _is_fancam(title: str) -> bool:
+    t = title.lower()
+    return any(kw in t for kw in _FANCAM_KEYWORDS) or "[4k]" in t
+
 
 def _get_channel_list(app) -> list:
     with app.app_context():
@@ -234,6 +242,12 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
     if not candidates:
         logger.info("[%s] 新着動画なし（過去%d日・未収録）", channel_name, DAYS_LIMIT)
         return []
+
+    # ファンカムを先頭に優先ソート
+    candidates.sort(key=lambda c: not _is_fancam(c["title"]))
+    fancam_in_candidates = sum(1 for c in candidates if _is_fancam(c["title"]))
+    if fancam_in_candidates:
+        logger.info("[%s] ファンカム候補 %d件（優先取得）", channel_name, fancam_in_candidates)
 
     # ─── Step 2: 各候補の詳細情報でduration・日付チェック（最大MAX_VIDEOS_PER_CHANNEL件）
     info_opts = {"quiet": True, "no_warnings": True, "ignoreerrors": True}
@@ -549,7 +563,12 @@ def collect_youtube_videos(app) -> int:
         logger.info("動画収集開始: %s（フィルター: %s）", channel_name, "あり" if apply_filter else "スキップ")
 
         videos = _collect_channel_videos(ch, tmp_dir, existing_urls, api_key, apply_filter)
-        shorts = _collect_channel_shorts(ch, tmp_dir, existing_urls, api_key, apply_filter)
+        fancam_count = sum(1 for v in videos if _is_fancam(v["title"]))
+        if fancam_count >= 3:
+            logger.info("[%s] ファンカム%d件確保 → Shortsをスキップ", channel_name, fancam_count)
+            shorts = []
+        else:
+            shorts = _collect_channel_shorts(ch, tmp_dir, existing_urls, api_key, apply_filter)
 
         # (コンテンツ種別フラグ, videoデータ) のリストに統合
         all_content = [("video", v) for v in videos] + [("short", s) for s in shorts]
@@ -591,6 +610,10 @@ def collect_youtube_videos(app) -> int:
                 title_default = "YouTube Shorts" if is_short else "YouTube動画"
                 label         = "Shorts" if is_short else "動画"
 
+                fancam = _is_fancam(video["title"])
+                if fancam:
+                    logger.info("[%s] ファンカム検出: %s", channel_name, video["title"][:60])
+
                 article = Article(
                     feed_source=feed_src,
                     title=video["title"] or title_default,
@@ -601,6 +624,7 @@ def collect_youtube_videos(app) -> int:
                     status="pending",
                     content_type="video",
                     video_file_path=f"videos/{dest_filename}",
+                    is_fancam=fancam,
                 )
                 db.session.add(article)
                 db.session.commit()
@@ -608,8 +632,9 @@ def collect_youtube_videos(app) -> int:
                 existing_urls.add(yt_url)
                 new_count += 1
                 logger.info(
-                    "[%s] DB追加(%s): %s (%ds)",
-                    channel_name, label, video["title"][:60], video.get("duration", 0),
+                    "[%s] DB追加(%s%s): %s (%ds)",
+                    channel_name, label, "/FANCAM" if fancam else "",
+                    video["title"][:60], video.get("duration", 0),
                 )
 
     logger.info("動画収集完了: %d件追加", new_count)

@@ -158,8 +158,8 @@
   {% endif %}
   {% for a in posted %}
   <div class="card-body border-bottom py-2" style="border-color:var(--border)!important">
-    <div class="d-flex justify-content-between align-items-center">
-      <div style="min-width:0">
+    <div class="d-flex justify-content-between align-items-center gap-2">
+      <div style="min-width:0;flex:1">
         <span style="font-size:.82rem">
           <a href="{{ a.url }}" target="_blank" class="text-decoration-none" style="color:var(--text-muted)">
             {{ a.title[:65] }}{% if a.title|length > 65 %}…{% endif %}
@@ -171,9 +171,16 @@
         <span class="badge bg-secondary ms-1" style="font-size:.65rem">テスト</span>
         {% endif %}
       </div>
-      <span style="font-size:.75rem;color:var(--text-muted);white-space:nowrap;margin-left:.5rem">
-        {{ a.posted_at.strftime('%m/%d %H:%M') if a.posted_at }}
-      </span>
+      <div class="d-flex align-items-center gap-2 flex-shrink-0">
+        <span style="font-size:.75rem;color:var(--text-muted);white-space:nowrap">
+          {{ (a.posted_at | utc_to_jst).strftime('%m/%d %H:%M') if a.posted_at }}
+        </span>
+        <button class="btn btn-outline-secondary btn-sm" style="font-size:.76rem;white-space:nowrap"
+                data-content-type="{{ a.content_type or 'article' }}"
+                onclick="requeuePostedArticle({{ a.id }}, this)">
+          🔄 再投稿
+        </button>
+      </div>
     </div>
   </div>
   {% endfor %}
@@ -362,6 +369,37 @@ function setSchedule(id) {
   }).then(r => r.json()).then(d => {
     if (d.success) { location.reload(); }
     else { alert('エラー: ' + d.error); }
+  });
+}
+
+// ── 投稿済み → 再投稿 ────────────────────────────────────────────────────
+function requeuePostedArticle(id, btn) {
+  const isVideo = btn.dataset.contentType === 'video';
+  const msg = isVideo
+    ? 'この動画を承認待ちに戻しますか？\n（ファイルが消えている場合は再ダウンロードします）'
+    : 'この記事を承認待ちに戻しますか？';
+  if (!confirm(msg)) return;
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  fetch('/api/articles/' + id + '/requeue', {
+    method: 'POST',
+    headers: {'X-Requested-With': 'fetch'}
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      window.location.href = '/pending';  // 承認待ち画面へ遷移
+    } else {
+      alert('再投稿に失敗しました: ' + (d.error || ''));
+      btn.disabled = false;
+      btn.innerHTML = orig;
+    }
+  })
+  .catch(() => {
+    alert('通信エラーが発生しました');
+    btn.disabled = false;
+    btn.innerHTML = orig;
   });
 }
 

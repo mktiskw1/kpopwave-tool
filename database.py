@@ -38,6 +38,7 @@ class Article(db.Model):
     # 動画投稿用
     content_type = db.Column(db.String(20), nullable=True, default='article')  # 'article' or 'video'
     video_file_path = db.Column(db.String(500), nullable=True)  # static/videos/xxxx.mp4 形式
+    is_fancam = db.Column(db.Boolean, nullable=True, default=False)
 
     def to_dict(self):
         return {
