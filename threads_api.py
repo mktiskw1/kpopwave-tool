@@ -254,6 +254,18 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
         article = Article.query.get(article_id)
         if not article:
             return False, "記事が見つかりません"
+
+        # 冪等ガード: 既に投稿済み or 想定外ステータスなら即リターン
+        if article.status == "posted":
+            logger.warning("[post_to_threads] id=%d は既にposted → スキップ（二重投稿防止）", article_id)
+            return False, "既に投稿済みです"
+        if article.status not in ("queued", "posting"):
+            logger.warning(
+                "[post_to_threads] id=%d status=%r → 投稿不可ステータスのためスキップ",
+                article_id, article.status,
+            )
+            return False, f"投稿不可のステータス: {article.status}"
+
         if not article.summary:
             return False, "要約がありません。先に要約を生成してください"
         post_text      = article.summary

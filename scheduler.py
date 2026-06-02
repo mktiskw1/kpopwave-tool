@@ -1,12 +1,13 @@
 import json
 import logging
+import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 
 from database import Article, Setting, db
 
@@ -15,6 +16,8 @@ logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler(timezone="Asia/Tokyo")
 
 _JITTER_SECONDS = 1800  # ±30分
+# CronジョブとIntervalジョブが同時に _post_job を起動したときの二重投稿防止
+_post_job_lock = threading.Lock()
 _JST = ZoneInfo("Asia/Tokyo")
 _UTC = ZoneInfo("UTC")
 _DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -95,6 +98,18 @@ def _collect_comments_job(app):
 
 
 def _post_job(app):
+    # ── 第1防衛: スレッドロック ─────────────────────────────────────────────
+    # CronジョブとIntervalバックアップジョブが同時起動しても1つだけ実行する
+    if not _post_job_lock.acquire(blocking=False):
+        logger.info("[_post_job] 別ジョブ実行中 → スキップ（二重投稿防止）")
+        return
+    try:
+        _run_post_job(app)
+    finally:
+        _post_job_lock.release()
+
+
+def _run_post_job(app):
     from threads_api import post_to_threads
 
     with app.app_context():
@@ -114,7 +129,6 @@ def _post_job(app):
             len(all_queued),
         )
 
-        # 各キュー記事の判定を1件ずつログ出力（タイムゾーン問題の診断用）
         for a in all_queued:
             if a.scheduled_at is None:
                 eligible = True
@@ -143,20 +157,35 @@ def _post_job(app):
             .first()
         )
 
-        if article:
-            logger.info(
-                "[_post_job] 投稿対象決定: id=%d scheduled_at(UTC)=%s has_summary=%s",
-                article.id, article.scheduled_at, bool(article.summary),
-            )
-        else:
+        if not article:
             logger.info("[_post_job] 投稿対象なし（全%d件が未来スロット or キュー空）", len(all_queued))
+            return
 
-        article_id = article.id if article else None
+        article_id = article.id
+        logger.info(
+            "[_post_job] 投稿対象決定: id=%d scheduled_at(UTC)=%s has_summary=%s",
+            article_id, article.scheduled_at, bool(article.summary),
+        )
 
-    if article_id:
-        logger.info("[_post_job] 投稿実行: article_id=%d", article_id)
-        success, msg = post_to_threads(app, article_id, test_mode=test_mode)
-        logger.info("[_post_job] 投稿結果: success=%s msg=%s", success, msg)
+        # ── 第2防衛: DBレベルのアトミックロック ─────────────────────────────
+        # UPDATE WHERE status='queued' が成功した場合のみ投稿を実行する。
+        # 万が一スレッドロックをすり抜けた別ジョブも、rowcount==0 でスキップされる。
+        result = db.session.execute(
+            text("UPDATE articles SET status='posting' WHERE id=:id AND status='queued'"),
+            {"id": article_id},
+        )
+        db.session.commit()
+
+        if result.rowcount == 0:
+            logger.warning(
+                "[_post_job] id=%d のDBロック取得失敗（他ジョブが処理中）→ スキップ", article_id
+            )
+            return
+
+        logger.info("[_post_job] id=%d status→'posting' ロック完了、投稿実行", article_id)
+
+    success, msg = post_to_threads(app, article_id, test_mode=test_mode)
+    logger.info("[_post_job] 投稿結果: id=%d success=%s msg=%s", article_id, success, msg)
 
 
 def _rollover_overdue_job(app):
@@ -165,11 +194,28 @@ def _rollover_overdue_job(app):
     scheduled_at から90分以上経過した記事のみ繰り越す。"""
     with app.app_context():
         now_utc = datetime.utcnow()
-        # 90分の猶予を設けることで、CronTrigger+jitterの投稿ウィンドウ内の記事を誤って繰り越さない
         rollover_threshold = now_utc - timedelta(minutes=90)
 
         logger.info("[_rollover_overdue_job] 実行 UTC=%s threshold(UTC)=%s",
                     now_utc.strftime("%H:%M:%S"), rollover_threshold.strftime("%H:%M:%S"))
+
+        # ── 'posting' スタック回復 ────────────────────────────────────────────
+        # クラッシュなどで 'posting' のまま10分以上経過した記事を 'queued' に戻す
+        stuck_threshold = now_utc - timedelta(minutes=10)
+        stuck = (
+            Article.query
+            .filter(Article.status == "posting")
+            .filter(Article.updated_at < stuck_threshold)
+            .all()
+        )
+        if stuck:
+            for a in stuck:
+                logger.warning(
+                    "[_rollover_overdue_job] 投稿スタック回復: id=%d updated_at=%s → queued に戻す",
+                    a.id, a.updated_at,
+                )
+                a.status = "queued"
+            db.session.commit()
 
         overdue = (
             Article.query.filter_by(status="queued")
