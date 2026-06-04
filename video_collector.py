@@ -243,11 +243,19 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
         logger.info("[%s] 新着動画なし（過去%d日・未収録）", channel_name, DAYS_LIMIT)
         return []
 
+    # ── 診断ログ: 全候補タイトルとファンカム判定結果を出力 ─────────────────────
+    logger.info("[%s] Step1取得: %d件候補", channel_name, len(candidates))
+    for i, c in enumerate(candidates):
+        fc = _is_fancam(c["title"])
+        logger.info(
+            "[%s]   候補[%d] fancam=%s date=%s title=%s",
+            channel_name, i, fc, c.get("upload_date", "?"), c["title"][:80],
+        )
+
     # ファンカムを先頭に優先ソート
     candidates.sort(key=lambda c: not _is_fancam(c["title"]))
     fancam_in_candidates = sum(1 for c in candidates if _is_fancam(c["title"]))
-    if fancam_in_candidates:
-        logger.info("[%s] ファンカム候補 %d件（優先取得）", channel_name, fancam_in_candidates)
+    logger.info("[%s] ファンカム候補: %d件 / 全%d件", channel_name, fancam_in_candidates, len(candidates))
 
     # ─── Step 2: 各候補の詳細情報でduration・日付チェック（最大MAX_VIDEOS_PER_CHANNEL件）
     info_opts = {"quiet": True, "no_warnings": True, "ignoreerrors": True}
@@ -262,6 +270,9 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
             if not full:
                 continue
 
+            full_title = full.get("title") or c["title"]
+            fc = _is_fancam(full_title)
+
             # upload_date を確定する（flat取得では空のことが多いためStep2で取得）
             actual_date = full.get("upload_date") or c.get("upload_date", "")
             # upload_date が空の場合は timestamp から変換を試みる
@@ -273,63 +284,68 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
                     except Exception:
                         pass
 
+            duration = full.get("duration") or 9999
             logger.info(
-                "[%s] 日付確認 upload_date=%s timestamp=%s cutoff=%s title=%s",
-                channel_name,
-                full.get("upload_date") or "(空)",
-                full.get("timestamp") or "(空)",
+                "[%s] Step2確認 fancam=%s date=%s duration=%ds cutoff=%s title=%s",
+                channel_name, fc,
+                actual_date or "(空)",
+                duration,
                 cutoff_str,
-                c["title"][:40],
+                full_title[:60],
             )
 
             # 日付が確認できない動画は取り込まない
             if not actual_date:
-                logger.info(
-                    "[%s] スキップ（日付不明）: %s",
-                    channel_name, c["title"][:60],
-                )
+                logger.info("[%s] スキップ理由=日付不明 title=%s", channel_name, full_title[:60])
                 continue
 
             if actual_date < cutoff_str:
                 logger.info(
-                    "[%s] スキップ（%sは%d日以上前）: %s",
-                    channel_name, actual_date, DAYS_LIMIT, c["title"][:60],
+                    "[%s] スキップ理由=古い(%s < %s) fancam=%s title=%s",
+                    channel_name, actual_date, cutoff_str, fc, full_title[:60],
                 )
                 continue
 
-            duration = full.get("duration") or 9999
             if duration > MAX_DURATION:
                 logger.info(
-                    "[%s] スキップ（%ds > %ds）: %s",
-                    channel_name, duration, MAX_DURATION, c["title"][:60],
+                    "[%s] スキップ理由=長すぎる(%ds > %ds) fancam=%s title=%s",
+                    channel_name, duration, MAX_DURATION, fc, full_title[:60],
                 )
                 continue
 
             # 複合チャンネルのみ女性アイドルフィルターを適用
             if apply_filter:
-                title_to_check = full.get("title") or c["title"]
+                title_to_check = full_title
                 if not _is_female_idol_video(title_to_check, api_key):
-                    logger.info("[%s] スキップ（女性アイドル以外）: %s", channel_name, title_to_check[:60])
+                    logger.info(
+                        "[%s] スキップ理由=女性アイドル以外 fancam=%s title=%s",
+                        channel_name, fc, title_to_check[:60],
+                    )
                     continue
 
             targets.append({
                 "id":           c["id"],
                 "url":          c["url"],
-                "title":        (full.get("title") or c["title"])[:500],
+                "title":        full_title[:500],
                 "description":  (full.get("description") or "")[:5000],
                 "thumbnail":    full.get("thumbnail", ""),
                 "duration":     duration,
                 "channel_name": full.get("uploader") or channel_name,
                 "upload_date":  actual_date,
             })
+            logger.info("[%s] ダウンロード追加: fancam=%s title=%s", channel_name, fc, full_title[:60])
         except Exception as exc:
             logger.warning("[%s] 動画情報取得エラー %s: %s", channel_name, c["url"], exc)
 
     if not targets:
-        logger.info("[%s] 条件に合う動画なし（%ds以内）", channel_name, MAX_DURATION)
+        logger.info("[%s] 条件に合う動画なし（全%d候補を確認）", channel_name, len(candidates))
         return []
 
-    logger.info("[%s] ダウンロード対象: %d件", channel_name, len(targets))
+    fancam_targets = sum(1 for t in targets if _is_fancam(t["title"]))
+    logger.info(
+        "[%s] ダウンロード対象: %d件（うちファンカム %d件）",
+        channel_name, len(targets), fancam_targets,
+    )
 
     # ─── Step 3: ダウンロード（各ターゲット） ────────────────────────────────
     dl_opts_base = {

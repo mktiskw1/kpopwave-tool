@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 
 import requests
+from sqlalchemy import text
 
 from database import Article, Setting, db  # Setting は動画URL生成に使用
 
@@ -255,9 +256,14 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
         if not article:
             return False, "記事が見つかりません"
 
+        logger.info(
+            "[post_to_threads] 開始: id=%d status=%r test=%s",
+            article_id, article.status, test_mode,
+        )
+
         # 冪等ガード: 既に投稿済み or 想定外ステータスなら即リターン
         if article.status == "posted":
-            logger.warning("[post_to_threads] id=%d は既にposted → スキップ（二重投稿防止）", article_id)
+            logger.warning("[post_to_threads] id=%d は既にposted → スキップ", article_id)
             return False, "既に投稿済みです"
         if article.status not in ("queued", "posting"):
             logger.warning(
@@ -265,6 +271,23 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
                 article_id, article.status,
             )
             return False, f"投稿不可のステータス: {article.status}"
+
+        # status='queued' の場合はここでアトミックにロックを取得する。
+        # _run_post_job から呼ばれた場合は既に 'posting' なので何もしない。
+        # これにより post_now・requeue など全ての呼び出し経路を保護する。
+        if article.status == "queued":
+            result = db.session.execute(
+                text("UPDATE articles SET status='posting' WHERE id=:id AND status='queued'"),
+                {"id": article_id},
+            )
+            db.session.commit()
+            if result.rowcount == 0:
+                logger.warning(
+                    "[post_to_threads] id=%d 同時リクエスト競合 → スキップ（二重投稿防止）",
+                    article_id,
+                )
+                return False, "別のリクエストが処理中です（二重投稿防止）"
+            logger.info("[post_to_threads] id=%d status→'posting' ロック取得", article_id)
 
         if not article.summary:
             return False, "要約がありません。先に要約を生成してください"

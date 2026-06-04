@@ -1781,5 +1781,8 @@ def debug_threads_video():
 if __name__ == "__main__":
     from scheduler import setup_scheduler
 
+    logger.info(
+        "====== ContentWave 起動 (二重投稿防止v2: post_to_threads内アトミックロック) ======"
+    )
     setup_scheduler(app)
     app.run(debug=False, use_reloader=False, host="0.0.0.0", port=5000)
