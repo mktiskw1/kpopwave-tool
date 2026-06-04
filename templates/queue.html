@@ -376,8 +376,8 @@ function setSchedule(id) {
 function requeuePostedArticle(id, btn) {
   const isVideo = btn.dataset.contentType === 'video';
   const msg = isVideo
-    ? 'この動画を承認待ちに戻しますか？\n（ファイルが消えている場合は再ダウンロードします）'
-    : 'この記事を承認待ちに戻しますか？';
+    ? 'この動画をキューに戻して再投稿しますか？\n（ファイルが消えている場合は再ダウンロードします）'
+    : 'この記事をキューに戻して再投稿しますか？';
   if (!confirm(msg)) return;
   const orig = btn.innerHTML;
   btn.disabled = true;
@@ -389,7 +389,7 @@ function requeuePostedArticle(id, btn) {
   .then(r => r.json())
   .then(d => {
     if (d.ok) {
-      window.location.href = '/pending';  // 承認待ち画面へ遷移
+      window.location.href = '/queue?tab=queued';
     } else {
       alert('再投稿に失敗しました: ' + (d.error || ''));
       btn.disabled = false;

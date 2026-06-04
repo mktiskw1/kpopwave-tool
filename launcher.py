@@ -12,6 +12,7 @@ import sys
 import re
 import json
 import sqlite3
+import shutil
 import threading
 import time
 import urllib.request
@@ -21,8 +22,7 @@ VENV_PYTHON = os.path.join(PROJECT_DIR, "venv", "Scripts", "python.exe")
 if not os.path.exists(VENV_PYTHON):
     VENV_PYTHON = sys.executable
 
-NGROK_EXE = os.path.join(PROJECT_DIR, "ngrok", "ngrok.exe")
-DB_PATH    = os.path.join(PROJECT_DIR, "instance", "rock_metal.db")
+DB_PATH = os.path.join(PROJECT_DIR, "instance", "rock_metal.db")
 
 
 def run_tool():
@@ -188,22 +188,21 @@ def set_status(msg):
     status_var.set(msg)
 
 
-# ── ngrok ──────────────────────────────────────────────────
-def _get_ngrok_url() -> str | None:
-    """localhost:4040/api/tunnels から HTTPS URL を取得する"""
-    try:
-        with urllib.request.urlopen("http://localhost:4040/api/tunnels", timeout=2) as resp:
-            data = json.loads(resp.read())
-        for t in data.get("tunnels", []):
-            if t.get("proto") == "https":
-                return t["public_url"]
-    except Exception:
-        pass
+# ── Cloudflare Tunnel ─────────────────────────────────────────
+_tunnel_proc = None
+
+
+def _find_cloudflared() -> str | None:
+    found = shutil.which("cloudflared")
+    if found:
+        return found
+    winget_link = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links\cloudflared.exe")
+    if os.path.exists(winget_link):
+        return winget_link
     return None
 
 
-def _update_ngrok_url_in_db(url: str) -> bool:
-    """SQLite の app_base_url を ngrok URL に更新する"""
+def _update_url_in_db(url: str) -> bool:
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -213,60 +212,74 @@ def _update_ngrok_url_in_db(url: str) -> bool:
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except Exception:
         return False
 
 
-def run_ngrok():
-    # すでに起動中かチェック
-    existing_url = _get_ngrok_url()
-    if existing_url:
-        messagebox.showinfo("ngrok", f"すでに起動中です\n\n{existing_url}")
-        set_status(f"ngrok 起動中: {existing_url}")
+def run_tunnel():
+    global _tunnel_proc
+
+    if _tunnel_proc is not None and _tunnel_proc.poll() is None:
+        messagebox.showinfo("Cloudflare Tunnel", "すでに起動中です。\nステータスバーのURLを確認してください。")
         return
 
-    if not os.path.exists(NGROK_EXE):
+    exe = _find_cloudflared()
+    if not exe:
         messagebox.showerror(
             "エラー",
-            "ngrok.exe が見つかりません。\nsetup_ngrok.bat を先に実行してください。\n\n"
-            f"Expected: {NGROK_EXE}",
+            "cloudflared が見つかりません。\n"
+            "winget install --id Cloudflare.cloudflared でインストールしてください。",
         )
-        set_status("ngrok: setup が必要")
+        set_status("cloudflared: インストールが必要")
         return
 
-    # 残存プロセスを終了してから起動
-    subprocess.run(["taskkill", "/f", "/im", "ngrok.exe"], capture_output=True)
-    subprocess.Popen(
-        [NGROK_EXE, "http", "5000"],
-        creationflags=subprocess.CREATE_NEW_CONSOLE,
-    )
-    set_status("ngrok を起動中... (最大20秒)")
+    subprocess.run(["taskkill", "/f", "/im", "cloudflared.exe"], capture_output=True)
 
-    def _wait_for_ngrok():
+    _tunnel_proc = subprocess.Popen(
+        [exe, "tunnel", "--url", "http://localhost:5000"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    set_status("Cloudflare Tunnel を起動中... (最大30秒)")
+
+    def _monitor():
+        url_re = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
         url = None
-        for _ in range(10):
-            time.sleep(2)
-            url = _get_ngrok_url()
-            if url:
-                break
+        start = time.time()
+
+        try:
+            for line in _tunnel_proc.stdout:
+                m = url_re.search(line)
+                if m:
+                    url = m.group(0)
+                    break
+                if time.time() - start > 30:
+                    break
+        except Exception:
+            pass
 
         def _on_done():
             if not url:
-                messagebox.showerror(
-                    "エラー",
-                    "ngrok の起動がタイムアウトしました（20秒）。\n"
-                    "ngrok ウィンドウのエラーを確認してください。",
-                )
-                set_status("ngrok 起動タイムアウト")
+                messagebox.showerror("エラー", "Cloudflare Tunnel の起動がタイムアウトしました（30秒）。")
+                set_status("Cloudflare Tunnel 起動タイムアウト")
                 return
-            ok = _update_ngrok_url_in_db(url)
-            db_msg = "app_base_url を更新しました。" if ok else "DB 更新に失敗しました。手動で設定してください。"
-            messagebox.showinfo("ngrok 起動完了", f"URL: {url}\n\n{db_msg}")
-            set_status(f"ngrok: {url}")
+            ok = _update_url_in_db(url)
+            db_msg = "app_base_url を更新しました。" if ok else "DB 更新に失敗しました。"
+            messagebox.showinfo("Cloudflare Tunnel 起動完了", f"URL: {url}\n\n{db_msg}")
+            set_status(f"Cloudflare: {url}")
 
         root.after(0, _on_done)
 
-    threading.Thread(target=_wait_for_ngrok, daemon=True).start()
+        if url:
+            try:
+                for _ in _tunnel_proc.stdout:
+                    pass
+            except Exception:
+                pass
+
+    threading.Thread(target=_monitor, daemon=True).start()
 
 
 # ── スリープ制御 ────────────────────────────────────────────
@@ -356,7 +369,7 @@ tk.Label(
 BUTTONS = [
     ("① ツール起動",        "▶  コマンドプロンプトで run.py を実行",   run_tool,   "#0f3460"),
     ("② Claude Code 起動", "🤖  VS Code + claude.ai を開く",          run_claude, "#0f3460"),
-    ("③ ngrok 起動",       "🌐  トンネル起動 → URL を設定に反映",     run_ngrok,  "#0d4d4d"),
+    ("③ トンネル起動",      "🌐  Cloudflare Tunnel → URL を設定に反映", run_tunnel, "#0d4d4d"),
     ("④ 管理画面を開く",    "🌐  Chrome で localhost:5000 を開く",     open_admin, "#2d1b69"),
     ("⑤ GitHub 保存",      "⬆  add → commit → push",                 git_push,   "#1a472a"),
     ("⑥ GitHub 取得",      "⬇  git pull",                            git_pull,   "#1a472a"),

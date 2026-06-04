@@ -37,10 +37,124 @@ _SKIP_EXTS = {".part", ".ytdl", ".temp", ".tmp", ".jpg", ".png", ".webp"}
 # ファンカム判定キーワード
 _FANCAM_KEYWORDS = frozenset(["fancam", "직캠", "focus"])
 
+# Threads API動画要件チェック・変換用
+_FFMPEG_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin")
+_FFMPEG_EXE  = os.path.join(_FFMPEG_DIR, "ffmpeg.exe")
+_FFPROBE_EXE = os.path.join(_FFMPEG_DIR, "ffprobe.exe")
+_MAX_VIDEO_SIZE_MB = 95  # Threads API上限100MBに対し余裕を持たせる
+
 
 def _is_fancam(title: str) -> bool:
     t = title.lower()
     return any(kw in t for kw in _FANCAM_KEYWORDS) or "[4k]" in t
+
+
+def _probe_video(file_path: str) -> dict:
+    """ffprobeで動画スペックを取得する。失敗時は空dictを返す。"""
+    import subprocess
+    import json as _json
+    if not os.path.exists(_FFPROBE_EXE):
+        logger.warning("ffprobe が見つかりません: %s", _FFPROBE_EXE)
+        return {}
+    try:
+        result = subprocess.run(
+            [_FFPROBE_EXE, "-v", "quiet", "-print_format", "json",
+             "-show_streams", "-show_format", file_path],
+            capture_output=True, text=True, timeout=30, encoding="utf-8",
+        )
+        if result.returncode != 0:
+            logger.warning("ffprobe失敗 rc=%d: %s", result.returncode, result.stderr[:200])
+            return {}
+        info = _json.loads(result.stdout)
+        vstream = next((s for s in info.get("streams", []) if s.get("codec_type") == "video"), {})
+        astream = next((s for s in info.get("streams", []) if s.get("codec_type") == "audio"), {})
+        size_bytes = int(info.get("format", {}).get("size", 0))
+        return {
+            "video_codec": vstream.get("codec_name", ""),
+            "audio_codec": astream.get("codec_name", ""),
+            "width":    int(vstream.get("width", 0)),
+            "height":   int(vstream.get("height", 0)),
+            "size_mb":  size_bytes / (1024 * 1024),
+            "duration": float(info.get("format", {}).get("duration", 0)),
+        }
+    except Exception as exc:
+        logger.warning("ffprobe例外: %s — %s", os.path.basename(file_path), exc)
+        return {}
+
+
+def _transcode_to_h264(file_path: str) -> bool:
+    """H.264+AACにインプレース変換する（元ファイルを上書き）。成功したらTrueを返す。"""
+    import subprocess
+    if not os.path.exists(_FFMPEG_EXE):
+        logger.error("ffmpeg が見つかりません: %s", _FFMPEG_EXE)
+        return False
+    tmp_path = file_path + ".converting.mp4"
+    cmd = [
+        _FFMPEG_EXE, "-y", "-i", file_path,
+        "-vcodec", "libx264", "-crf", "23", "-preset", "fast",
+        "-acodec", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        tmp_path,
+    ]
+    logger.info("H.264+AAC変換開始: %s", os.path.basename(file_path))
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=600)
+        if result.returncode != 0:
+            err = result.stderr.decode("utf-8", errors="replace")[-400:]
+            logger.error("ffmpeg変換失敗 rc=%d: %s", result.returncode, err)
+            return False
+        os.replace(tmp_path, file_path)
+        size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        logger.info("H.264+AAC変換完了: %s (%.1fMB)", os.path.basename(file_path), size_mb)
+        return True
+    except Exception as exc:
+        logger.error("ffmpeg変換例外: %s", exc)
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        return False
+
+
+def _ensure_threads_compatible(file_path: str, channel_name: str = "") -> bool:
+    """
+    動画ファイルがThreads API要件を満たすか確認し、
+    必要ならH.264+AACにインプレース変換する。
+    Threads要件: H.264コーデック・AAC音声・MP4コンテナ・最大100MB
+    変換不要または変換成功ならTrueを返す。
+    """
+    specs = _probe_video(file_path)
+    if not specs:
+        logger.info("[%s] ffprobe取得失敗 → そのまま使用: %s", channel_name, os.path.basename(file_path))
+        return True
+
+    video_codec = specs.get("video_codec", "")
+    audio_codec = specs.get("audio_codec", "")
+    size_mb     = specs.get("size_mb", 0)
+    width       = specs.get("width", 0)
+    height      = specs.get("height", 0)
+    duration    = specs.get("duration", 0)
+
+    logger.info(
+        "[%s] 動画スペック: codec=%s/%s size=%.1fMB %dx%d dur=%.1fs",
+        channel_name, video_codec, audio_codec, size_mb, width, height, duration,
+    )
+
+    reasons = []
+    if video_codec != "h264":
+        reasons.append(f"videoCodec={video_codec}（H.264必須）")
+    if audio_codec and audio_codec not in ("aac", "mp3"):
+        reasons.append(f"audioCodec={audio_codec}（AAC必須）")
+    if size_mb > _MAX_VIDEO_SIZE_MB:
+        reasons.append(f"size={size_mb:.1f}MB（上限{_MAX_VIDEO_SIZE_MB}MB）")
+
+    if reasons:
+        logger.warning("[%s] Threads非互換: %s → H.264+AACに変換", channel_name, ", ".join(reasons))
+        return _transcode_to_h264(file_path)
+
+    logger.info("[%s] Threads互換OK: %s", channel_name, os.path.basename(file_path))
+    return True
 
 
 def _get_channel_list(app) -> list:
@@ -607,6 +721,9 @@ def collect_youtube_videos(app) -> int:
             except Exception as exc:
                 logger.error("[%s] ファイルコピーエラー: %s", channel_name, exc)
                 continue
+
+            # Threads API要件チェック・H.264+AAC変換（非互換コーデックを変換）
+            _ensure_threads_compatible(dest_path, channel_name)
 
             yt_url = video["url"]
             with app.app_context():

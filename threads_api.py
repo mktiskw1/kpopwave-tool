@@ -127,8 +127,11 @@ def _post_video(user_id: str, token: str, post_text: str, video_url: str, articl
         if status == "FINISHED":
             break
         if status == "ERROR":
-            err_msg = st.get("error_message", "動画処理エラー")
-            logger.warning("動画処理エラー、テキスト投稿にフォールバック: %s", err_msg)
+            err_msg = st.get("error_message", "UNKNOWN")
+            logger.warning(
+                "動画処理エラー: err_msg=%r full_response=%s → テキスト投稿にフォールバック",
+                err_msg, st,
+            )
             return _post_text_only(user_id, token, post_text, article_id, app)
     else:
         logger.warning("動画処理タイムアウト、テキスト投稿にフォールバック")
@@ -346,8 +349,39 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
         if content_type == "video" and video_file_path:
             with app.app_context():
                 base_url = Setting.get("app_base_url", "http://localhost:5000").rstrip("/")
-            video_url = f"{base_url}/static/{video_file_path}"
+            # /video/ エンドポイント経由で配信（ngrok-skip-browser-warning ヘッダーをレスポンスに付与）
+            # video_file_path は "videos/xxxx.mp4" 形式なので basename のみ使う
+            video_filename = os.path.basename(video_file_path)
+            video_url = f"{base_url}/video/{video_filename}"
             logger.info("動画URL: %s", video_url)
+
+            # 投稿前にコーデックチェック・H.264変換
+            # collect_youtube_videos() より前に保存されたファイルも変換対象にする
+            local_video_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "static", video_file_path
+            )
+            if os.path.exists(local_video_path):
+                from video_collector import _ensure_threads_compatible
+                _ensure_threads_compatible(local_video_path, "post")
+            else:
+                logger.warning("動画ファイルが見つかりません: %s", local_video_path)
+
+            # 公開URL（ngrok等）からThreads APIが到達できるか確認
+            try:
+                head_res = requests.head(video_url, timeout=10, allow_redirects=True)
+                logger.info(
+                    "動画URL到達確認: HTTP %d content-length=%s",
+                    head_res.status_code,
+                    head_res.headers.get("content-length", "不明"),
+                )
+                if head_res.status_code != 200:
+                    logger.warning(
+                        "動画URL HTTP %d → Threads APIがファイルを取得できない可能性あり",
+                        head_res.status_code,
+                    )
+            except Exception as url_exc:
+                logger.warning("動画URL到達確認失敗: %s → Threads APIが取得できない可能性あり", url_exc)
+
             return _post_video(user_id, token, post_text, video_url, article_id, app)
 
         # 記事投稿（画像なし・1枚・複数）

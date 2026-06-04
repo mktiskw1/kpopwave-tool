@@ -8,7 +8,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, flash, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 
 from config import Config
 from database import Article, BuzzPost, Comment, Setting, db
@@ -534,6 +534,18 @@ def resummary_article(id):
         return jsonify({"success": True, "summary": article.summary, "length": len(article.summary or "")})
     error_msg = (article.error_message if article else None) or "要約の生成に失敗しました（サーバーログを確認してください）"
     return jsonify({"success": False, "error": error_msg})
+
+
+# ── 動画配信（ngrokブラウザ警告バイパス） ──────────────────────────────────
+
+
+@app.route("/video/<path:filename>")
+def serve_video(filename):
+    """ngrok経由でThreads APIが動画を取得できるよう専用エンドポイントで配信する。"""
+    response = send_from_directory("static/videos", filename)
+    response.headers["ngrok-skip-browser-warning"] = "true"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
 
 
 # ── 投稿キュー ─────────────────────────────────────────────────────────────
@@ -1197,11 +1209,10 @@ def requeue_article(article_id):
     logger.info("[requeue] 取得: id=%d status=%r content_type=%r scheduled_at=%s title=%.50s",
                 article_id, article.status, article.content_type, article.scheduled_at, article.title)
 
-    # 動画以外はステータスをpendingに戻すだけ
     if (article.content_type or "article") != "video":
         prev_status = article.status
-        article.status = "pending"
-        article.scheduled_at = None   # ← unqueue_article と同様にリセット（バグ修正）
+        article.status = "queued"
+        article.scheduled_at = None
         article.error_message = None
         try:
             db.session.commit()
@@ -1209,7 +1220,7 @@ def requeue_article(article_id):
             db.session.rollback()
             logger.error("[requeue] DBコミット失敗: id=%d %s", article_id, exc)
             return jsonify({"ok": False, "error": f"DB更新失敗: {exc}"}), 500
-        logger.info("[requeue] 完了(記事): id=%d %s→pending scheduled_at=None", article_id, prev_status)
+        logger.info("[requeue] 完了(記事): id=%d %s→queued scheduled_at=None", article_id, prev_status)
         return jsonify({"ok": True})
 
     logger.info("[requeue] 動画処理開始: id=%d video_file_path=%r", article_id, article.video_file_path)
@@ -1281,8 +1292,8 @@ def requeue_article(article_id):
         logger.info("[requeue] 動画再ダウンロード完了: id=%d %s", article_id, dest_filename)
 
     prev_status = article.status
-    article.status = "pending"
-    article.scheduled_at = None   # ← バグ修正: 過去のスケジュール時刻をクリア
+    article.status = "queued"
+    article.scheduled_at = None
     article.error_message = None
     try:
         db.session.commit()
@@ -1290,7 +1301,7 @@ def requeue_article(article_id):
         db.session.rollback()
         logger.error("[requeue] DBコミット失敗(動画): id=%d %s", article_id, exc)
         return jsonify({"ok": False, "error": f"DB更新失敗: {exc}"}), 500
-    logger.info("[requeue] 完了(動画): id=%d %s→pending", article_id, prev_status)
+    logger.info("[requeue] 完了(動画): id=%d %s→queued", article_id, prev_status)
     return jsonify({"ok": True})
 
 
