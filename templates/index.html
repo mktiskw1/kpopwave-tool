@@ -27,7 +27,7 @@
 
 <!-- URL手動追加 -->
 <div class="card mb-4">
-  <div class="card-header"><i class="bi bi-link-45deg me-2"></i>URLから記事を追加</div>
+  <div class="card-header"><i class="bi bi-link-45deg me-2"></i>ニュース記事URLを追加（動画不可）</div>
   <div class="card-body">
     <div class="d-flex gap-2">
       <input type="url" id="add-url-input" class="form-control" placeholder="https://... （記事URL または YouTube URL）"
@@ -42,7 +42,7 @@
 
 <!-- YouTube動画手動追加 -->
 <div class="card mb-4">
-  <div class="card-header"><i class="bi bi-camera-video-fill me-2"></i>YouTubeから動画を追加</div>
+  <div class="card-header"><i class="bi bi-camera-video-fill me-2"></i>YouTube動画URLを追加（動画投稿用）</div>
   <div class="card-body">
     <div class="d-flex gap-2">
       <input type="url" id="add-video-input" class="form-control"
@@ -111,6 +111,14 @@ function addFromUrl() {
   var result = document.getElementById('add-url-result');
   var url = input.value.trim();
   if (!url) { input.focus(); return; }
+
+  if (/youtube\.com|youtu\.be/i.test(url)) {
+    result.innerHTML =
+      '<span style="color:#E65100"><i class="bi bi-exclamation-triangle-fill me-1"></i>' +
+      'YouTubeのURLは下の「YouTube動画URLを追加（動画投稿用）」フォームを使ってください。</span>';
+    input.focus();
+    return;
+  }
 
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
