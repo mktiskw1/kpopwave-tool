@@ -328,14 +328,82 @@
 
     /* ─── Spinner ──────────────────────────────────────────────── */
     .spinner-border { color: var(--accent); }
+
+    /* ─── Mobile ───────────────────────────────────────────────── */
+    @media (max-width: 767.98px) {
+      /* iOSズーム防止 */
+      .form-control, .form-select,
+      input[type=text], input[type=number],
+      input[type=datetime-local], textarea, select {
+        font-size: 16px !important;
+      }
+      /* タップターゲットを44px以上に */
+      .btn:not(.btn-close) { min-height: 40px; }
+      .btn-sm { min-height: 36px !important; }
+    }
+
+    /* ─── Mobile Nav Bar ────────────────────────────────────────── */
+    .mobile-nav-bar {
+      overflow-x: auto;
+      white-space: nowrap;
+      -webkit-overflow-scrolling: touch;
+      background: linear-gradient(135deg, #f5fbf7, #ecf6ef);
+      border-bottom: 2px solid var(--border);
+      scrollbar-width: none;
+    }
+    .mobile-nav-bar::-webkit-scrollbar { display: none; }
+    .mobile-nav-bar a {
+      display: inline-block;
+      padding: .55rem .8rem;
+      color: var(--text-muted);
+      font-weight: 700;
+      font-size: .82rem;
+      text-decoration: none;
+      border-bottom: 3px solid transparent;
+      white-space: nowrap;
+    }
+    .mobile-nav-bar a.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      background: rgba(74, 158, 107, .06);
+    }
   </style>
 </head>
 <body>
+
+<!-- モバイル：横スクロールナビバー（JS不使用） -->
+<nav class="d-md-none mobile-nav-bar">
+  <a href="{{ url_for('index') }}" class="{% if request.endpoint=='index' %}active{% endif %}">
+    <i class="bi bi-speedometer2"></i> ダッシュボード
+  </a>
+  <a href="{{ url_for('pending') }}" class="{% if request.endpoint=='pending' %}active{% endif %}">
+    <i class="bi bi-inbox-fill"></i> 承認待ち{% if pending_count > 0 %} <span class="badge badge-pending" style="font-size:.65rem;vertical-align:middle">{{ pending_count }}</span>{% endif %}
+  </a>
+  <a href="{{ url_for('queue') }}" class="{% if request.endpoint=='queue' %}active{% endif %}">
+    <i class="bi bi-collection-fill"></i> 投稿キュー{% if queued_count > 0 %} <span class="badge badge-queued" style="font-size:.65rem;vertical-align:middle">{{ queued_count }}</span>{% endif %}
+  </a>
+  <a href="{{ url_for('schedule') }}" class="{% if request.endpoint=='schedule' %}active{% endif %}">
+    <i class="bi bi-calendar-week-fill"></i> スケジュール
+  </a>
+  <a href="{{ url_for('comments_page') }}" class="{% if request.endpoint=='comments_page' %}active{% endif %}">
+    <i class="bi bi-chat-dots-fill"></i> コメント{% if unread_comments_count > 0 %} <span class="badge badge-pending" style="font-size:.65rem;vertical-align:middle">{{ unread_comments_count }}</span>{% endif %}
+  </a>
+  <a href="{{ url_for('follow_candidates') }}" class="{% if request.endpoint=='follow_candidates' %}active{% endif %}">
+    <i class="bi bi-person-plus-fill"></i> フォロー
+  </a>
+  <a href="{{ url_for('learning') }}" class="{% if request.endpoint=='learning' %}active{% endif %}">
+    <i class="bi bi-lightning-charge-fill"></i> 学習
+  </a>
+  <a href="{{ url_for('settings') }}" class="{% if request.endpoint=='settings' %}active{% endif %}">
+    <i class="bi bi-gear-fill"></i> 設定
+  </a>
+</nav>
+
 <div class="container-fluid p-0">
   <div class="row g-0">
 
     <!-- サイドバー -->
-    <div class="col-auto sidebar p-3" style="width:225px">
+    <div class="col-auto sidebar d-none d-md-block p-3" style="width:225px">
       <div class="brand mb-4 ps-1">
         <i class="bi bi-music-note-beamed me-1" style="-webkit-text-fill-color:var(--accent);background:none;background-clip:unset"></i>Content<br><span style="font-size:1rem">Wave</span>
       </div>
@@ -439,7 +507,7 @@
     </div>
 
     <!-- メインコンテンツ -->
-    <div class="col p-4" style="min-width:0">
+    <div class="col p-3 p-md-4" style="min-width:0">
 
       {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}

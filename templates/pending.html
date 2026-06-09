@@ -9,7 +9,7 @@
 </div>
 
 <!-- フィルタータブ -->
-<ul class="nav mb-3" style="gap:4px;border-bottom:1.5px solid var(--border);padding-bottom:0">
+<ul class="nav mb-3" style="gap:4px;border-bottom:1.5px solid var(--border);padding-bottom:0;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch">
   {% set tabs = [
     ('all',     'すべて',       counts.all,     'var(--accent)'),
     ('rss',     'RSS記事',      counts.rss,     '#6c757d'),

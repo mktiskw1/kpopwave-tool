@@ -1,7 +1,9 @@
 import json
 import logging
 import os
+import re
 import time
+import urllib.request
 from datetime import datetime
 
 import requests
@@ -84,6 +86,34 @@ def _publish(user_id: str, token: str, container_id: str) -> tuple[bool, str]:
         err = data.get("error", {}).get("message", res.text[:200])
         return False, f"公開失敗: {err}"
     return True, data.get("id", "")
+
+
+_TUNNEL_URL_PAT = re.compile(r'https://[a-z0-9-]+\.trycloudflare\.com')
+
+
+def _try_refresh_tunnel_url(app) -> tuple[bool, str]:
+    """cloudflaredメトリクスから最新のTunnel URLを取得してDBに上書き保存する。
+    trycloudflare.com のURLが見つかった場合のみ成功。
+    Returns: (成功, URL or エラーメッセージ)
+    """
+    for port in (2480, 2000, 20241):
+        for path in ("metrics", "readyz", "ready"):
+            try:
+                with urllib.request.urlopen(
+                    f"http://localhost:{port}/{path}", timeout=3
+                ) as resp:
+                    body = resp.read().decode("utf-8", errors="ignore")
+                m = _TUNNEL_URL_PAT.search(body)
+                if m:
+                    new_url = m.group(0)
+                    with app.app_context():
+                        Setting.set("app_base_url", new_url)
+                        db.session.commit()
+                    logger.info("[tunnel] URL更新: %s (port=%d /%s)", new_url, port, path)
+                    return True, new_url
+            except Exception:
+                continue
+    return False, "cloudflaredメトリクスに到達できませんでした"
 
 
 def _post_video(user_id: str, token: str, post_text: str, video_url: str, article_id: int, app) -> tuple[bool, str]:
@@ -348,9 +378,22 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
         # 動画投稿
         if content_type == "video" and video_file_path:
             with app.app_context():
-                base_url = Setting.get("app_base_url", "http://localhost:5000").rstrip("/")
-            # /video/ エンドポイント経由で配信（ngrok-skip-browser-warning ヘッダーをレスポンスに付与）
-            # video_file_path は "videos/xxxx.mp4" 形式なので basename のみ使う
+                stored_url = Setting.get("app_base_url", "http://localhost:5000").rstrip("/")
+
+            # Cloudflare Tunnel使用時は毎回最新URLをメトリクスから取得して更新
+            if "trycloudflare.com" in stored_url:
+                ok, result = _try_refresh_tunnel_url(app)
+                if not ok:
+                    logger.error(
+                        "Tunnel URL取得失敗・投稿スキップ: article_id=%d reason=%s",
+                        article_id, result,
+                    )
+                    _mark_failed(app, article_id, "Tunnel URL取得失敗・投稿スキップ")
+                    return False, "Tunnel URL取得失敗・投稿スキップ"
+                base_url = result.rstrip("/")
+            else:
+                base_url = stored_url
+
             video_filename = os.path.basename(video_file_path)
             video_url = f"{base_url}/video/{video_filename}"
             logger.info("動画URL: %s", video_url)

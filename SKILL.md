@@ -32,8 +32,10 @@ kpopwave-tool/
 ├── learning.py          # バズ投稿分析（BuzzPost → AI tips）
 ├── video_collector.py   # YouTube動画収集（yt-dlp）
 ├── get_token.py         # OAuthトークン取得ヘルパー
+├── launcher.py          # tkinter製GUIランチャー（ツール起動・Cloudflare Tunnel・Git操作）
+├── start_cloudflare.bat # Cloudflare Tunnel起動＋URL自動取得→DB保存バッチ
 ├── templates/
-│   ├── base.html        # レイアウト・サイドバー・CSSカスタム変数
+│   ├── base.html        # レイアウト・サイドバー・CSSカスタム変数・スマホ用横ナビバー
 │   ├── index.html       # ダッシュボード
 │   ├── pending.html     # 承認待ち画面（記事・動画タブ）
 │   ├── queue.html       # 投稿キュー・投稿済みリスト
@@ -79,7 +81,7 @@ pending → queued → posted
 pending → rejected
 queued  → failed
 ```
-再投稿: posted/failed → pending（`/api/articles/<id>/requeue`）
+再投稿: posted/failed → **queued**（`/api/articles/<id>/requeue`）※pendingを経由せず直接キューに入る
 
 ### `settings` — キーバリュー設定
 
@@ -134,6 +136,12 @@ queued  → failed
 - ボタン: `btn-accent`（グリーングラデーション）、`btn-sm` は `border-radius: 16px`
 - バッジ色: pending=橙、queued=緑、posted=ティール、rejected=薄緑、failed=緑
 
+### スマホ対応（768px以下）
+- デスクトップのサイドバーは `d-none d-md-block` で非表示
+- 代わりに `.mobile-nav-bar` クラスの横スクロール可能なナビバーを `base.html` 上部に表示（JS不使用・純粋な `<a>` タグのみ）
+- フォーム入力は `font-size: 16px` 以上でiOSのズームを防止
+- ボタンは最低高さ40px（`.btn`）/ 36px（`.btn-sm`）を確保
+
 ---
 
 ## 5. Threads API 注意点（重要）
@@ -165,8 +173,11 @@ queued  → failed
 | エンゲージメント追跡 | `engagement_tracker.py` | いいね・リプライ・リポスト数 |
 | バズ投稿学習 | `learning.py` | 高エンゲージメント投稿を分析→tips化 |
 | フォロー候補管理 | `follow_candidates.html` | 優先度設定、フォロー済みマーク |
-| 再投稿 | `/api/articles/<id>/requeue` | 記事=status→pending、動画=ファイル確認+再DL |
+| 再投稿 | `/api/articles/<id>/requeue` | 記事・動画ともに status→**queued** で直接キュー入り。動画はファイル確認+再DL |
 | スケジュール表示 | `schedule.html` | カレンダー形式 |
+| Cloudflare Tunnel連携 | `launcher.py` + `start_cloudflare.bat` | トンネル起動時にURLを取得してDBの`app_base_url`に自動保存 |
+| 動画投稿前URL自動更新 | `threads_api.py` `_try_refresh_tunnel_url()` | 動画投稿直前にlocalhost:2480/metricsなどからTunnel URLを再取得・DB更新。取得失敗時は投稿スキップ |
+| スマホ対応UI | `base.html` | 768px以下で横スクロールナビバーを表示。JS不使用の純粋HTML実装 |
 
 ---
 
@@ -178,8 +189,13 @@ queued  → failed
 - **必ずフックで始める**（フック前に何も置かない）
 - 「〜です」「〜ます」禁止 → 口語体
 - 伝聞表現禁止:「〜とのこと」「記事によると」「〜と報じられている」
-- グループ名またはメンバー名を必ず1つ以上含める
+- **グループ名またはメンバー名を必ず1つ以上含める**（Step1・Step2両方で厳守）
+- Step2（口語化）でも固有名詞を削らないこと。固有名詞ゼロなら出力禁止
 - 日本語のみ（グループ名・曲名はアルファベットOK）
+
+### 投稿文の手本
+> 「好きにならない方が無理じゃない？BABYMONSTERのSUGAR HONEY ICE TEAマジやばい。曲も映像も完璧だし、何回見ても沼にハマる。一緒にハマってる人いない？」
+→ グループ名・曲名・感情・問いかけがすべて入っている密度を目指す
 
 ### 禁止ワード（誤解・炎上リスク）
 `興奮` / `止まらん` / `頭おかしい` / `事件` / `事故` / `心臓に悪い` / `狂ってる` / `これガチなんですけど` / `絶対バズる`
@@ -222,6 +238,8 @@ queued  → failed
 | フックがビジネス系・ノウハウ系になる | 旧 `_HOOK_PATTERNS_BY_TIME` の名残 | `_KPOP_HOOKS`（カテゴリ別）に全面差し替え済み |
 | SQLiteでカラム追加エラー | `ALTER TABLE` の構文差異 | `_migrate_db()` パターンを使う（`ADD COLUMN` のみ可） |
 | 投稿文が文字数超過する | Step2の再生成上限に達した | `BODY_MAX_RETRIES=3` 後は末尾切り詰め（`…`付加） |
+| 動画投稿が静止画になる | Cloudflare TunnelのURLが変わったまま古いURLで投稿 | `_try_refresh_tunnel_url()` が投稿直前にURL再取得する。cloudflaredが停止中の場合は投稿スキップ |
+| 投稿文に固有名詞が入らない | Step2の口語化でグループ名・曲名が削除される | Step2プロンプトに「固有名詞が一つもない場合は出力禁止」を明記済み |
 
 ---
 
