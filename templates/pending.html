@@ -18,10 +18,10 @@
     ('posted',  '投稿済み動画', counts.posted,  '#2e7d32'),
   ] %}
   {% for key, label, count, badge_color in tabs %}
-  <li class="nav-item">
+  <li class="nav-item" style="flex-shrink:0">
     <a href="{{ url_for('pending', tab=key) }}"
        class="nav-link px-3 py-2 {% if active_tab == key %}active{% endif %}"
-       style="border-radius:8px 8px 0 0;font-size:.88rem;
+       style="border-radius:8px 8px 0 0;font-size:.88rem;white-space:nowrap;
               {% if active_tab == key %}
                 background:var(--surface2);color:var(--text);border:1.5px solid var(--border);border-bottom:2px solid var(--accent);
               {% else %}

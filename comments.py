@@ -59,7 +59,9 @@ def fetch_comments(app):
         except Exception as e:
             logger.warning("返信取得APIエラー post_id=%s: %s", parent_post_id, e)
 
+    new_ids: list[str] = []
     with app.app_context():
+        auto_like = Setting.get("auto_like_comments", "false") == "true"
         new_count = 0
         for c, parent_post_id in items_with_post:
             cid = c.get("id")
@@ -89,8 +91,10 @@ def fetch_comments(app):
                     timestamp=c.get("timestamp") or "",
                     is_read=0,
                     is_replied=0,
+                    is_liked=0,
                 ))
                 new_count += 1
+                new_ids.append(cid)
 
         try:
             db.session.commit()
@@ -99,13 +103,20 @@ def fetch_comments(app):
             logger.exception("コメントDB保存エラー")
             return {"error": "DB保存に失敗しました", "fetched": 0, "new": 0}
 
+    if auto_like and new_ids:
+        liked_count = 0
+        for cid in new_ids:
+            if like_comment(app, cid).get("ok"):
+                liked_count += 1
+        logger.info("自動いいね: %d件", liked_count)
+
     total = len(items_with_post)
     logger.info("コメント取得: %d件取得 / %d件新規", total, new_count)
     return {"fetched": total, "new": new_count}
 
 
 def like_comment(app, reply_id):
-    """コメントにいいね。"""
+    """コメントにいいね。成功時は DB の is_liked を 1 に更新。"""
     token, _ = _creds(app)
     if not token:
         return {"error": "Threadsの認証情報が設定されていません"}
@@ -116,10 +127,18 @@ def like_comment(app, reply_id):
             timeout=15,
         )
         resp.raise_for_status()
-        return {"ok": True}
     except Exception as e:
         logger.error("いいねエラー reply_id=%s: %s", reply_id, e)
         return {"error": str(e)}
+
+    with app.app_context():
+        comment = Comment.query.filter_by(id=reply_id).first()
+        if comment:
+            comment.is_liked = 1
+            comment.is_read = 1
+            db.session.commit()
+
+    return {"ok": True}
 
 
 def post_reply(app, reply_id, text):

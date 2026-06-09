@@ -4,11 +4,22 @@
 <!-- ヘッダー -->
 <div class="d-flex justify-content-between align-items-center mb-4">
   <h4 class="fw-bold mb-0">💬 コメント管理</h4>
-  <form action="{{ url_for('api_fetch_comments') }}" method="post">
-    <button type="submit" class="btn btn-accent btn-sm">
-      <i class="bi bi-arrow-repeat me-1"></i> コメントを取得
+  <div class="d-flex gap-2 align-items-center flex-wrap">
+    <button class="btn btn-sm {% if auto_like_enabled %}btn-danger{% else %}btn-outline-secondary{% endif %}"
+            id="btn-auto-like-toggle"
+            data-current="{{ 'true' if auto_like_enabled else 'false' }}"
+            title="新着コメントを取得した時に自動でハートをつける">
+      ❤️ 自動ハート: {% if auto_like_enabled %}ON{% else %}OFF{% endif %}
     </button>
-  </form>
+    <button class="btn btn-sm btn-outline-danger" id="btn-delete-all-comments">
+      <i class="bi bi-trash3 me-1"></i> 全件削除
+    </button>
+    <form action="{{ url_for('api_fetch_comments') }}" method="post">
+      <button type="submit" class="btn btn-accent btn-sm">
+        <i class="bi bi-arrow-repeat me-1"></i> コメントを取得
+      </button>
+    </form>
+  </div>
 </div>
 
 <!-- フィルタータブ -->
@@ -78,11 +89,17 @@
         <button class="btn btn-sm btn-outline-secondary btn-generate-ai" data-id="{{ comment.id }}">
           ✨ AI返信生成
         </button>
-        <button class="btn btn-sm btn-outline-danger btn-like" data-id="{{ comment.id }}">
-          ❤️ いいね
+        <button class="btn btn-sm {% if comment.is_liked %}btn-danger{% else %}btn-outline-danger{% endif %} btn-like"
+                data-id="{{ comment.id }}"
+                {% if comment.is_liked %}disabled{% endif %}>
+          ❤️ {% if comment.is_liked %}いいね済み{% else %}いいね{% endif %}
         </button>
         <button class="btn btn-sm btn-primary btn-reply-toggle" data-id="{{ comment.id }}">
           📤 返信する
+        </button>
+        <button class="btn btn-sm btn-outline-secondary btn-delete-comment" data-id="{{ comment.id }}"
+                style="margin-left:auto">
+          <i class="bi bi-trash3"></i>
         </button>
       </div>
 
@@ -134,6 +151,76 @@
 <script>
 (function () {
   'use strict';
+
+  /* ── 個別削除 ──────────────────────────── */
+  document.querySelectorAll('.btn-delete-comment').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = this.dataset.id;
+      var card = this.closest('.card');
+      if (!confirm('このコメントをDBから削除しますか？\n（Threads上のコメントは削除されません）')) return;
+      var self = this;
+      self.disabled = true;
+      fetch('/api/comments/' + id + '/delete', { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.ok) {
+            if (card) card.remove();
+          } else {
+            alert('削除に失敗しました: ' + (data.error || ''));
+            self.disabled = false;
+          }
+        })
+        .catch(function () {
+          alert('通信エラーが発生しました');
+          self.disabled = false;
+        });
+    });
+  });
+
+  /* ── 全件削除 ──────────────────────────── */
+  var deleteAllBtn = document.getElementById('btn-delete-all-comments');
+  if (deleteAllBtn) {
+    deleteAllBtn.addEventListener('click', function () {
+      if (!confirm('本当に全件削除しますか？\nDBのコメントデータがすべて削除されます。\n（Threads上のコメントは削除されません）')) return;
+      var self = this;
+      self.disabled = true;
+      fetch('/api/comments/delete-all', { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.ok) {
+            window.location.reload();
+          } else {
+            alert('削除に失敗しました: ' + (data.error || ''));
+            self.disabled = false;
+          }
+        })
+        .catch(function () {
+          alert('通信エラーが発生しました');
+          self.disabled = false;
+        });
+    });
+  }
+
+  /* ── 自動いいねトグル ────────────────────── */
+  var autoLikeBtn = document.getElementById('btn-auto-like-toggle');
+  if (autoLikeBtn) {
+    autoLikeBtn.addEventListener('click', function () {
+      var self = this;
+      var newVal = self.dataset.current === 'true' ? 'false' : 'true';
+      self.disabled = true;
+      fetch('/api/quick-setting', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'auto_like_comments', value: newVal })
+      })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.ok) { window.location.reload(); }
+        else { self.disabled = false; }
+      })
+      .catch(function () { self.disabled = false; });
+    });
+  }
 
   /* ── AI返信生成 ─────────────────────────── */
   document.querySelectorAll('.btn-generate-ai').forEach(function (btn) {

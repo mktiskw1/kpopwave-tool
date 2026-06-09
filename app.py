@@ -109,6 +109,18 @@ def _migrate_db():
                 conn.commit()
                 logger.info("DB migration: follow_candidates.%s added", col)
 
+    # comments テーブル
+    existing_comments = {c["name"] for c in inspector.get_columns("comments")}
+    comment_cols = [
+        ("is_liked", "INTEGER DEFAULT 0"),
+    ]
+    with db.engine.connect() as conn:
+        for col, typedef in comment_cols:
+            if col not in existing_comments:
+                conn.execute(text(f"ALTER TABLE comments ADD COLUMN {col} {typedef}"))
+                conn.commit()
+                logger.info("DB migration: comments.%s added", col)
+
 
 def _init_default_settings():
     defaults = {
@@ -1051,6 +1063,7 @@ def comments_page():
         comments=comments_list,
         filter_tab=filter_tab,
         post_titles=post_titles,
+        auto_like_enabled=(Setting.get("auto_like_comments", "false") == "true"),
     )
 
 
@@ -1067,6 +1080,11 @@ def api_fetch_comments():
 
 @app.route("/api/comments/<reply_id>/like", methods=["POST"])
 def api_like_comment(reply_id):
+    comment = Comment.query.filter_by(id=reply_id).first()
+    if not comment:
+        return jsonify({"error": "コメントが見つかりません"}), 404
+    if comment.is_liked:
+        return jsonify({"ok": True, "already_liked": True})
     from comments import like_comment
     return jsonify(like_comment(app, reply_id))
 
@@ -1085,6 +1103,24 @@ def api_reply_comment(reply_id):
 def api_generate_reply(reply_id):
     from comments import generate_ai_reply
     return jsonify(generate_ai_reply(app, reply_id))
+
+
+@app.route("/api/comments/<reply_id>/delete", methods=["POST"])
+def api_delete_comment(reply_id):
+    comment = Comment.query.filter_by(id=reply_id).first()
+    if not comment:
+        return jsonify({"error": "コメントが見つかりません"}), 404
+    db.session.delete(comment)
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/comments/delete-all", methods=["POST"])
+def api_delete_all_comments():
+    count = Comment.query.count()
+    Comment.query.delete()
+    db.session.commit()
+    return jsonify({"ok": True, "deleted": count})
 
 
 @app.route("/api/comments/<reply_id>/mark-read", methods=["POST"])

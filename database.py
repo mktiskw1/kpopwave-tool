@@ -99,6 +99,7 @@ class Comment(db.Model):
     timestamp = db.Column(db.String(50), nullable=True)
     is_read = db.Column(db.Integer, default=0)
     is_replied = db.Column(db.Integer, default=0)
+    is_liked = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
