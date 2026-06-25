@@ -1350,7 +1350,7 @@ def add_video_manual():
 
     if not yt_url:
         return jsonify({"ok": False, "error": "URLを入力してください"}), 400
-    if "youtube.com/watch" not in yt_url and "youtu.be/" not in yt_url:
+    if "youtube.com/watch" not in yt_url and "youtu.be/" not in yt_url and "youtube.com/shorts/" not in yt_url:
         return jsonify({"ok": False, "error": "YouTube動画のURLを入力してください"}), 400
 
     if Article.query.filter(

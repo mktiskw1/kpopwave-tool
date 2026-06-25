@@ -480,7 +480,7 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
         return False
 
     # ── コンテンツ取得 ─────────────────────────────────────────────────────
-    is_youtube = "youtube.com/watch" in url or "youtu.be/" in url
+    is_youtube = "youtube.com/watch" in url or "youtu.be/" in url or "youtube.com/shorts/" in url
 
     if is_youtube:
         article_body   = stored_body
