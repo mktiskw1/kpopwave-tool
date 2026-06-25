@@ -37,6 +37,12 @@ _SKIP_EXTS = {".part", ".ytdl", ".temp", ".tmp", ".jpg", ".png", ".webp"}
 # ファンカム判定キーワード
 _FANCAM_KEYWORDS = frozenset(["fancam", "직캠", "focus"])
 
+# Shorts判定キーワード（タイトル小文字で照合）
+_SHORTS_TITLE_KEYWORDS = frozenset(["shorts", "#shorts"])
+
+# Shorts判定の最大動画時間（この秒数以下はShortsとして除外）
+_SHORTS_MAX_DURATION = 60
+
 # Threads API動画要件チェック・変換用
 _FFMPEG_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin")
 _FFMPEG_EXE  = os.path.join(_FFMPEG_DIR, "ffmpeg.exe")
@@ -427,6 +433,17 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
                 )
                 continue
 
+            if any(kw in full_title.lower() for kw in _SHORTS_TITLE_KEYWORDS):
+                logger.info("[%s] スキップ理由=Shortsタイトル title=%s", channel_name, full_title[:60])
+                continue
+
+            if duration <= _SHORTS_MAX_DURATION:
+                logger.info(
+                    "[%s] スキップ理由=Shorts短時間(%ds) title=%s",
+                    channel_name, duration, full_title[:60],
+                )
+                continue
+
             # 複合チャンネルのみ女性アイドルフィルターを適用
             if apply_filter:
                 title_to_check = full_title
@@ -693,12 +710,7 @@ def collect_youtube_videos(app) -> int:
         logger.info("動画収集開始: %s（フィルター: %s）", channel_name, "あり" if apply_filter else "スキップ")
 
         videos = _collect_channel_videos(ch, tmp_dir, existing_urls, api_key, apply_filter)
-        fancam_count = sum(1 for v in videos if _is_fancam(v["title"]))
-        if fancam_count >= 3:
-            logger.info("[%s] ファンカム%d件確保 → Shortsをスキップ", channel_name, fancam_count)
-            shorts = []
-        else:
-            shorts = _collect_channel_shorts(ch, tmp_dir, existing_urls, api_key, apply_filter)
+        shorts = []  # Shorts収集は無効化
 
         # (コンテンツ種別フラグ, videoデータ) のリストに統合
         all_content = [("video", v) for v in videos] + [("short", s) for s in shorts]

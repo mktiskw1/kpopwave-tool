@@ -587,7 +587,11 @@ def queue():
         .all()
     )
     failed = Article.query.filter_by(status="failed").order_by(Article.updated_at.desc()).limit(10).all()
-    return render_template("queue.html", queued=queued, posted=posted, failed=failed)
+    images_map = {}
+    for a in queued:
+        if (a.content_type or "article") != "video":
+            images_map[a.id] = _build_image_list(a.thumbnail_url, a.image_urls)
+    return render_template("queue.html", queued=queued, posted=posted, failed=failed, images_map=images_map)
 
 
 @app.route("/queue/<int:id>/schedule", methods=["POST"])
@@ -1215,10 +1219,16 @@ def trim_video(article_id):
     cmd = [ffmpeg_exe, "-y", "-i", video_path, "-ss", str(start)]
     if end is not None:
         cmd += ["-to", str(int(end))]
-    cmd += ["-c", "copy", clip_path]
+    cmd += [
+        "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+        "-c:a", "aac", "-b:a", "128k",
+        "-avoid_negative_ts", "make_zero",
+        "-movflags", "+faststart",
+        clip_path,
+    ]
 
     try:
-        result = _sp.run(cmd, capture_output=True, timeout=300)
+        result = _sp.run(cmd, capture_output=True, timeout=600)
         if result.returncode != 0:
             err = result.stderr.decode("utf-8", errors="replace")[-500:]
             return jsonify({"ok": False, "error": err}), 500
