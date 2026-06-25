@@ -88,6 +88,7 @@ def _migrate_db():
         ("content_type", "VARCHAR(20) DEFAULT 'article'"),
         ("video_file_path", "VARCHAR(500)"),
         ("is_fancam", "INTEGER DEFAULT 0"),
+        ("view_count", "INTEGER"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -414,6 +415,15 @@ def _extract_youtube_id(url: str) -> str:
     elif host == "youtu.be":
         return parsed.path.lstrip("/").split("?")[0]
     return ""
+
+
+def _parse_iso_duration(s: str) -> int:
+    """PT#H#M#S 形式を秒数に変換する。"""
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", s or "")
+    if not m:
+        return 0
+    h, mi, sec = (int(x or 0) for x in m.groups())
+    return h * 3600 + mi * 60 + sec
 
 
 def _fetch_youtube_info(video_id: str) -> tuple:
@@ -1341,6 +1351,75 @@ def requeue_article(article_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/videos/fill-view-counts", methods=["POST"])
+def fill_video_view_counts():
+    api_key = Setting.get("youtube_api_key", "") or os.getenv("YOUTUBE_API_KEY", "")
+    if not api_key:
+        return jsonify({"ok": False, "error": "YouTube APIキーが設定されていません"}), 400
+
+    SHORT_KEYWORDS = ["shorts", "#shorts"]
+    candidates = (
+        Article.query
+        .filter(
+            Article.status == "pending",
+            Article.content_type == "video",
+            db.or_(Article.view_count.is_(None), Article.view_count == 0),
+        )
+        .all()
+    )
+
+    targets = []
+    for a in candidates:
+        if any(kw in (a.title or "").lower() for kw in SHORT_KEYWORDS):
+            continue
+        vid_id = _extract_youtube_id(a.url)
+        if not vid_id:
+            continue
+        targets.append((a, vid_id))
+
+    if not targets:
+        return jsonify({"ok": True, "updated": 0, "skipped": 0, "message": "対象動画がありません"})
+
+    vid_ids = [vid_id for _, vid_id in targets]
+    stats = {}
+    for i in range(0, len(vid_ids), 50):
+        batch = vid_ids[i : i + 50]
+        try:
+            resp = requests.get(
+                "https://www.googleapis.com/youtube/v3/videos",
+                params={"part": "statistics,contentDetails", "id": ",".join(batch), "key": api_key},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            for item in resp.json().get("items", []):
+                vid = item["id"]
+                try:
+                    vc = int(item.get("statistics", {}).get("viewCount", 0))
+                except (ValueError, TypeError):
+                    vc = 0
+                dur = _parse_iso_duration(item.get("contentDetails", {}).get("duration", ""))
+                stats[vid] = {"view_count": vc, "duration": dur}
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"YouTube APIエラー: {str(exc)[:120]}"}), 500
+
+    updated = 0
+    skipped = 0
+    for article, vid_id in targets:
+        info = stats.get(vid_id)
+        if not info:
+            skipped += 1
+            continue
+        if 0 < info["duration"] <= 60:
+            skipped += 1
+            continue
+        article.view_count = info["view_count"]
+        updated += 1
+
+    db.session.commit()
+    logger.info("再生数補完: %d件更新 %d件スキップ", updated, skipped)
+    return jsonify({"ok": True, "updated": updated, "skipped": skipped})
+
+
 @app.route("/api/videos/add-manual", methods=["POST"])
 def add_video_manual():
     import shutil, tempfile
@@ -1439,6 +1518,7 @@ def add_video_manual():
         status="pending",
         content_type="video",
         video_file_path=f"videos/{dest_filename}",
+        view_count=full.get("view_count"),
     )
     db.session.add(article)
     db.session.commit()

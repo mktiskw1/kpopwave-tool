@@ -28,6 +28,7 @@ class Article(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     # エンゲージメント指標
     like_count = db.Column(db.Integer, nullable=True)
+    view_count = db.Column(db.Integer, nullable=True)
     reply_count = db.Column(db.Integer, nullable=True)
     repost_count = db.Column(db.Integer, nullable=True)
     quote_count = db.Column(db.Integer, nullable=True)

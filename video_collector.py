@@ -758,6 +758,7 @@ def collect_youtube_videos(app) -> int:
                     content_type="video",
                     video_file_path=f"videos/{dest_filename}",
                     is_fancam=fancam,
+                    view_count=video.get("view_count"),
                 )
                 db.session.add(article)
                 db.session.commit()

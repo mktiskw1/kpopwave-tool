@@ -39,6 +39,34 @@
   {% endfor %}
 </ul>
 
+{% if active_tab == 'video' and articles %}
+<!-- 動画ソートバー -->
+<div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+  <span style="font-size:.82rem;color:var(--text-muted);flex-shrink:0">並び替え:</span>
+  <button type="button" class="btn btn-sm sort-btn"
+          style="border-radius:14px;border:1.5px solid var(--accent);background:var(--accent-soft);color:var(--accent);font-weight:600"
+          onclick="sortCards('date', this)">
+    📅 投稿日が新しい順
+  </button>
+  <button type="button" class="btn btn-sm sort-btn"
+          style="border-radius:14px;border:1.5px solid var(--border);background:#fff;color:var(--text-muted)"
+          onclick="sortCards('views', this)">
+    👁 再生数が多い順
+  </button>
+  <button type="button" class="btn btn-sm sort-btn"
+          style="border-radius:14px;border:1.5px solid var(--border);background:#fff;color:var(--text-muted)"
+          onclick="sortCards('member', this)">
+    ⭐ 強メンバー含む順
+  </button>
+  <button type="button" class="btn btn-sm ms-auto flex-shrink-0" id="btn-fill-views"
+          style="border-radius:14px;border:1.5px solid var(--border);background:#fff;color:var(--text-muted)"
+          onclick="fillViewCounts(this)">
+    📊 再生数を補完
+  </button>
+  <span id="fill-views-result" style="font-size:.8rem;flex-shrink:0"></span>
+</div>
+{% endif %}
+
 {% if articles %}
 <!-- 一括操作ツールバー -->
 <form id="bulk-form" action="{{ url_for('bulk_delete_articles') }}" method="post">
@@ -60,7 +88,10 @@
 
   <!-- 記事カード -->
   {% for a in articles %}
-  <div class="card mb-3 article-card" id="card-{{ a.id }}">
+  <div class="card mb-3 article-card" id="card-{{ a.id }}"
+       data-view-count="{{ a.view_count or 0 }}"
+       data-published="{{ a.published_at.strftime('%Y%m%d%H%M%S') if a.published_at else '0' }}"
+       data-title="{{ a.title }}">
     <div class="card-body pb-2">
 
       <!-- ヘッダー行 -->
@@ -510,6 +541,89 @@ function trimVideo(id, btn) {
     btn.disabled = false;
     btn.innerHTML = orig;
   });
+}
+
+// ── 動画ソート ────────────────────────────────────────────────────────────
+const PRIORITY_MEMBERS = [
+  'カリナ', 'Karina',
+  'ウィンター', 'Winter',
+  'MOKA',
+  'Rei',
+  'カズハ', 'Kazuha',
+  'サクラ', 'Sakura',
+  'チェウォン', 'Chaewon',
+  'ウォニョン', 'Wonyoung',
+  'アヒョン', 'Ahyeon',
+  'アサ', 'Asa',
+];
+
+function sortCards(mode, btn) {
+  document.querySelectorAll('.sort-btn').forEach(function(b) {
+    b.style.borderColor = 'var(--border)';
+    b.style.background = '#fff';
+    b.style.color = 'var(--text-muted)';
+    b.style.fontWeight = '';
+  });
+  if (btn) {
+    btn.style.borderColor = 'var(--accent)';
+    btn.style.background = 'var(--accent-soft)';
+    btn.style.color = 'var(--accent)';
+    btn.style.fontWeight = '600';
+  }
+
+  var form = document.getElementById('bulk-form');
+  if (!form) return;
+  var cards = Array.prototype.slice.call(form.querySelectorAll('.article-card'));
+
+  cards.sort(function(a, b) {
+    if (mode === 'views') {
+      return parseInt(b.dataset.viewCount || 0) - parseInt(a.dataset.viewCount || 0);
+    }
+    if (mode === 'date') {
+      var pa = a.dataset.published || '0';
+      var pb = b.dataset.published || '0';
+      return pb > pa ? 1 : pb < pa ? -1 : 0;
+    }
+    if (mode === 'member') {
+      var ta = a.dataset.title || '';
+      var tb = b.dataset.title || '';
+      var sa = PRIORITY_MEMBERS.some(function(m) { return ta.includes(m); }) ? 1 : 0;
+      var sb = PRIORITY_MEMBERS.some(function(m) { return tb.includes(m); }) ? 1 : 0;
+      return sb - sa;
+    }
+    return 0;
+  });
+
+  cards.forEach(function(card) { form.appendChild(card); });
+}
+
+// ── 再生数補完 ────────────────────────────────────────────────────────────
+function fillViewCounts(btn) {
+  var orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 取得中...';
+  var msg = document.getElementById('fill-views-result');
+  msg.textContent = '';
+  fetch('/api/videos/fill-view-counts', {method: 'POST'})
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      btn.disabled = false;
+      btn.innerHTML = orig;
+      if (d.ok) {
+        msg.style.color = 'var(--accent)';
+        msg.textContent = d.updated + '件更新（' + d.skipped + '件スキップ）';
+        if (d.updated > 0) setTimeout(function() { location.reload(); }, 1500);
+      } else {
+        msg.style.color = '#e03030';
+        msg.textContent = d.error || 'エラーが発生しました';
+      }
+    })
+    .catch(function() {
+      btn.disabled = false;
+      btn.innerHTML = orig;
+      msg.style.color = '#e03030';
+      msg.textContent = '通信エラー';
+    });
 }
 
 function resummary(id, btn) {
