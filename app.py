@@ -255,6 +255,37 @@ def _is_preview_valid_image(url: str) -> bool:
     return True
 
 
+def _delete_video_files(video_file_path: str, static_dir: str) -> int:
+    """動画ファイル本体・クリップ・オリジナルを削除する。削除したファイル数を返す。"""
+    if not video_file_path:
+        return 0
+    base_name = os.path.splitext(os.path.basename(video_file_path))[0]
+    videos_dir = os.path.join(static_dir, "videos")
+    deleted = 0
+
+    main_path = os.path.join(static_dir, video_file_path)
+    if os.path.exists(main_path):
+        try:
+            os.remove(main_path)
+            deleted += 1
+        except OSError:
+            pass
+
+    if os.path.isdir(videos_dir):
+        for fname in os.listdir(videos_dir):
+            if fname.endswith(".mp4") and (
+                fname.startswith(base_name + "_clip_")
+                or fname.startswith(base_name + "_original")
+            ):
+                try:
+                    os.remove(os.path.join(videos_dir, fname))
+                    deleted += 1
+                except OSError:
+                    pass
+
+    return deleted
+
+
 def _build_image_list(thumbnail_url, image_urls_json, max_images=20):
     """投稿画像リストを構築する（threads_api.py と同一ロジック）。"""
     import json as _json
@@ -300,7 +331,7 @@ def pending():
         articles = (Article.query
                     .filter_by(status="posted", content_type="video")
                     .order_by(Article.created_at.desc())
-                    .limit(50).all())
+                    .all())
         images_map = {}
     elif tab == "video":
         articles = [a for a in all_pending if (a.content_type or "article") == "video"]
@@ -328,7 +359,7 @@ def pending():
             logger.debug("pending preview article=%d imgs=%d", a.id, len(imgs))
 
     return render_template("pending.html", articles=articles, images_map=images_map,
-                           active_tab=tab, counts=counts)
+                           active_tab=tab, counts=counts, now_utc=datetime.utcnow())
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
@@ -338,7 +369,13 @@ def bulk_delete_articles():
     if not ids:
         flash("記事が選択されていません", "secondary")
         return redirect(url_for("pending", tab=tab))
-    Article.query.filter(Article.id.in_([int(i) for i in ids])).delete(synchronize_session=False)
+    int_ids = [int(i) for i in ids]
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    articles = Article.query.filter(Article.id.in_(int_ids)).all()
+    for a in articles:
+        if a.video_file_path:
+            _delete_video_files(a.video_file_path, static_dir)
+    Article.query.filter(Article.id.in_(int_ids)).delete(synchronize_session=False)
     db.session.commit()
     flash(f"{len(ids)} 件の記事を削除しました", "warning")
     return redirect(url_for("pending", tab=tab))
@@ -346,7 +383,12 @@ def bulk_delete_articles():
 
 @app.route("/pending/delete-all", methods=["POST"])
 def delete_all_pending():
-    count = Article.query.filter_by(status="pending").count()
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    articles = Article.query.filter_by(status="pending").all()
+    for a in articles:
+        if a.video_file_path:
+            _delete_video_files(a.video_file_path, static_dir)
+    count = len(articles)
     Article.query.filter_by(status="pending").delete(synchronize_session=False)
     db.session.commit()
     flash(f"承認待ち記事 {count} 件をすべて削除しました", "warning")

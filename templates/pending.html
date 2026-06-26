@@ -144,6 +144,13 @@
           {% endif %}
           {% if active_tab == 'posted' %}
           <span class="badge bg-success me-1" style="font-size:.7rem">投稿済み</span>
+          {% if a.posted_at %}
+          <span class="ms-1" style="color:var(--text-muted)">
+            📤 最終投稿日:
+            <strong style="color:var(--text)">{{ (a.posted_at | utc_to_jst).strftime('%Y/%m/%d') }}</strong>
+            <span style="color:var(--accent)">&nbsp;（{{ (now_utc - a.posted_at).days }}日前）</span>
+          </span>
+          {% endif %}
           {% endif %}
           <span>yt-dlpダウンロード済み · Threads動画投稿</span>
           {% if a.published_at %}

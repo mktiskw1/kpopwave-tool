@@ -311,6 +311,69 @@ def _setup_weekly_post_jobs(app):
     logger.info("投稿ジョブ設定完了: %d件", job_count)
 
 
+def _engagement_job(app):
+    """投稿済み記事のいいね数をThreads APIから取得してDBに保存する（毎日1回）。"""
+    from engagement_tracker import refresh_engagement
+    result = refresh_engagement(app)
+    logger.info(
+        "エンゲージメント定期取得: 更新=%d スキップ=%d エラー=%d 合計=%d",
+        result.get("updated", 0), result.get("skipped", 0),
+        result.get("errors", 0), result.get("total", 0),
+    )
+
+
+def _video_cleanup_job(app):
+    """投稿済み動画ファイルのうち7日経過・いいね200未満のものを削除する（毎日1回）。"""
+    import os
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    videos_dir = os.path.join(static_dir, "videos")
+
+    with app.app_context():
+        targets = (
+            Article.query
+            .filter(
+                Article.status == "posted",
+                Article.content_type == "video",
+                Article.video_file_path.isnot(None),
+                Article.posted_at < cutoff,
+                or_(Article.like_count.is_(None), Article.like_count < 200),
+            )
+            .all()
+        )
+
+        deleted_files = 0
+        for article in targets:
+            base_name = os.path.splitext(os.path.basename(article.video_file_path))[0]
+
+            main_path = os.path.join(static_dir, article.video_file_path)
+            if os.path.exists(main_path):
+                try:
+                    os.remove(main_path)
+                    deleted_files += 1
+                except OSError:
+                    pass
+
+            if os.path.isdir(videos_dir):
+                for fname in os.listdir(videos_dir):
+                    if fname.endswith(".mp4") and (
+                        fname.startswith(base_name + "_clip_")
+                        or fname.startswith(base_name + "_original")
+                    ):
+                        try:
+                            os.remove(os.path.join(videos_dir, fname))
+                            deleted_files += 1
+                        except OSError:
+                            pass
+
+            article.video_file_path = None
+
+        if targets:
+            db.session.commit()
+
+        logger.info("動画ファイル自動削除: %d件対象 %dファイル削除", len(targets), deleted_files)
+
+
 def setup_scheduler(app):
     """スケジューラを初期化して起動する。"""
     _setup_weekly_post_jobs(app)
@@ -341,8 +404,24 @@ def setup_scheduler(app):
         replace_existing=True,
     )
 
+    scheduler.add_job(
+        _engagement_job,
+        CronTrigger(hour=2, minute=0, timezone="Asia/Tokyo"),
+        args=[app],
+        id="engagement_daily",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        _video_cleanup_job,
+        CronTrigger(hour=3, minute=0, timezone="Asia/Tokyo"),
+        args=[app],
+        id="video_cleanup",
+        replace_existing=True,
+    )
+
     app.reschedule_post_jobs = lambda: _setup_weekly_post_jobs(app)
 
     scheduler.start()
-    logger.info("Scheduler started (post backup every 5min, comments/rollover every 30min)")
+    logger.info("Scheduler started (post backup 5min, comments/rollover 30min, engagement 2:00 JST, video cleanup 3:00 JST)")
     return scheduler
