@@ -366,12 +366,12 @@ def _video_cleanup_job(app):
                         except OSError:
                             pass
 
-            article.video_file_path = None
+            db.session.delete(article)
 
         if targets:
             db.session.commit()
 
-        logger.info("動画ファイル自動削除: %d件対象 %dファイル削除", len(targets), deleted_files)
+        logger.info("動画クリーンアップ: %d件対象 %dファイル削除 %dレコード削除", len(targets), deleted_files, len(targets))
 
 
 def setup_scheduler(app):
