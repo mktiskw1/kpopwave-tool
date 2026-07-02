@@ -20,6 +20,7 @@ import threading
 import urllib.parse
 import urllib.request
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 
 REDIRECT_URI = "http://localhost:8888/callback"
@@ -128,6 +129,27 @@ def _save_db(db_path: Path, token: str, user_id: str):
             else:
                 con.execute("INSERT INTO settings (key,value) VALUES (?,?)", (k, v))
         con.commit()
+    finally:
+        con.close()
+
+
+def _save_new_account(db_path: Path, account_label: str, token: str, user_id: str) -> bool:
+    """threads_accounts テーブルに新規アカウントとしてINSERTする。
+    既存のレコード（account_id=1 の KPOP アカウント含む）は一切変更しない。"""
+    if not db_path.exists():
+        print(f"  (DB が見つかりません: {db_path} — スキップ)")
+        return False
+    con = sqlite3.connect(db_path)
+    try:
+        now = datetime.utcnow().isoformat()
+        con.execute(
+            "INSERT INTO threads_accounts "
+            "(account_label, threads_user_id, threads_access_token, token_acquired_at, is_active, created_at) "
+            "VALUES (?, ?, ?, ?, 1, ?)",
+            (account_label, user_id, token, now, now),
+        )
+        con.commit()
+        return True
     finally:
         con.close()
 
@@ -254,30 +276,34 @@ def main():
     print(f"\n認証成功: @{username} (ID: {user_id})")
     print(f"長期トークン取得済み (有効期限: 60 日)\n")
 
-    # .env に保存
-    _save_env(base / ".env", long_token, user_id)
-    print(f"[保存] .env")
-
-    # app_id / app_secret も .env に書き込む（未設定の場合）
-    env2 = _read_env(base / ".env")
-    changed = False
-    lines = (base / ".env").read_text(encoding="utf-8").splitlines()
+    # app_id / app_secret は .env に書き込む（未設定の場合のみ。複数アカウントで共有するため）
+    lines = (base / ".env").read_text(encoding="utf-8").splitlines() if (base / ".env").exists() else []
     keys_present = {l.split("=")[0].strip() for l in lines if "=" in l}
     with open(base / ".env", "a", encoding="utf-8") as f:
         if "META_APP_ID" not in keys_present:
             f.write(f"\nMETA_APP_ID={app_id}\n")
-            changed = True
         if "META_APP_SECRET" not in keys_present:
             f.write(f"META_APP_SECRET={app_secret}\n")
-            changed = True
 
-    # SQLite DB に保存
+    # このアカウントの表示名を入力してもらい、threads_accounts に新規レコードとして保存する。
+    # 既存アカウント（account_id=1 の KPOP アカウント含む）は一切変更しない。
+    print("-" * 60)
+    account_label = ""
+    while not account_label:
+        account_label = input("このアカウントの表示名を入力してください（例: 田中アカウント）: ").strip()
+        if not account_label:
+            print("  表示名は必須です。")
+
     db_path = base / "instance" / "rock_metal.db"
-    _save_db(db_path, long_token, user_id)
-    print(f"[保存] {db_path}")
+    saved = _save_new_account(db_path, account_label, long_token, user_id)
+    if saved:
+        print(f"[保存] {db_path} に threads_accounts レコードを新規追加しました（{account_label}）")
+    else:
+        print("[エラー] DB への保存に失敗しました。")
 
     print("\n" + "=" * 60)
     print("  完了！")
+    print(f"  アカウント「{account_label}」を追加しました。")
     print("  アプリが起動中の場合はブラウザをリロードしてください。")
     print("=" * 60)
 
