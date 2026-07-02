@@ -6,7 +6,7 @@ import time
 import requests
 from datetime import datetime, timedelta
 
-from database import FollowCandidate, Setting, db
+from database import FollowCandidate, Setting, get_active_account, db
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +61,16 @@ def fmt_followers(n: "int | None") -> str:
 
 # ── Threads API: 自分のフォロワー数 ─────────────────────────────────────────
 
-def get_my_follower_count(app) -> "int | None":
-    with app.app_context():
-        user_id = Setting.get("threads_user_id") or os.getenv("THREADS_USER_ID", "")
-        token   = Setting.get("threads_access_token") or os.getenv("THREADS_ACCESS_TOKEN", "")
+def get_my_follower_count(app, account_id: int = None) -> "int | None":
+    account = get_active_account(app, account_id)
+    if account:
+        user_id = account["threads_user_id"] or os.getenv("THREADS_USER_ID", "")
+        token   = account["threads_access_token"] or os.getenv("THREADS_ACCESS_TOKEN", "")
+    else:
+        # フォールバック: アカウント未登録時（マイグレーション前など）は settings を直接参照
+        with app.app_context():
+            user_id = Setting.get("threads_user_id") or os.getenv("THREADS_USER_ID", "")
+            token   = Setting.get("threads_access_token") or os.getenv("THREADS_ACCESS_TOKEN", "")
     if not user_id or not token:
         logger.info("フォロワー数取得スキップ: 認証情報が未設定")
         return None
@@ -435,11 +441,17 @@ def _discover_reddit(limit: int = 50) -> list:
 
 # ── Threads エンゲージメント取得 ─────────────────────────────────────────────
 
-def fetch_engagers_from_threads(app) -> dict:
+def fetch_engagers_from_threads(app, account_id: int = None) -> dict:
     """自分の投稿にリプライ・いいねしたユーザーをThreads APIから取得してフォロー候補に追加する。"""
-    with app.app_context():
-        user_id = Setting.get("threads_user_id") or os.getenv("THREADS_USER_ID", "")
-        token   = Setting.get("threads_access_token") or os.getenv("THREADS_ACCESS_TOKEN", "")
+    account = get_active_account(app, account_id)
+    if account:
+        user_id = account["threads_user_id"] or os.getenv("THREADS_USER_ID", "")
+        token   = account["threads_access_token"] or os.getenv("THREADS_ACCESS_TOKEN", "")
+    else:
+        # フォールバック: アカウント未登録時（マイグレーション前など）は settings を直接参照
+        with app.app_context():
+            user_id = Setting.get("threads_user_id") or os.getenv("THREADS_USER_ID", "")
+            token   = Setting.get("threads_access_token") or os.getenv("THREADS_ACCESS_TOKEN", "")
 
     if not user_id or not token:
         return {"error": "Threads APIの認証情報が設定されていません", "added": 0, "found": 0}

@@ -4,17 +4,25 @@ import time
 from datetime import datetime, timezone
 
 import requests
+from sqlalchemy import or_
 
-from database import Article, Setting, db
+from database import Article, Setting, get_active_account, db
 
 logger = logging.getLogger(__name__)
 
 THREADS_API = "https://graph.threads.net/v1.0"
 
 
-def _get_token(app) -> str:
+def _get_token(app, account_id: int = None) -> tuple:
+    """(token, account_id) を返す。account_id はトークン解決に使ったアカウントのid（記事フィルタに使用）。"""
+    account = get_active_account(app, account_id)
+    if account:
+        token = account["threads_access_token"] or os.getenv("THREADS_ACCESS_TOKEN", "")
+        return token, account["id"]
+    # フォールバック: アカウント未登録時（マイグレーション前など）は settings を直接参照
     with app.app_context():
-        return Setting.get("threads_access_token") or os.getenv("THREADS_ACCESS_TOKEN", "")
+        token = Setting.get("threads_access_token") or os.getenv("THREADS_ACCESS_TOKEN", "")
+    return token, None
 
 
 def _fetch_insights(post_id: str, token: str) -> dict:
@@ -40,21 +48,35 @@ def _fetch_insights(post_id: str, token: str) -> dict:
         return {}
 
 
-def refresh_engagement(app) -> dict:
-    """posted 状態の全記事のエンゲージメントを Threads Insights API で更新する。"""
-    token = _get_token(app)
+def refresh_engagement(app, account_id: int = None) -> dict:
+    """posted 状態の全記事のエンゲージメントを Threads Insights API で更新する。
+
+    account_id 省略時はアクティブアカウント。該当アカウントの記事のみ対象とする
+    （account_id が未割当のレコードも従来互換のため含める）。
+    """
+    token, resolved_account_id = _get_token(app, account_id)
     if not token:
         return {"error": "Threadsアクセストークン未設定", "updated": 0, "total": 0}
 
+    # account_id 未割当の記事は「最古のアクティブアカウント（レガシー）」の対象範囲としてのみ含める
+    legacy_account = get_active_account(app)
+    is_legacy = bool(legacy_account and resolved_account_id == legacy_account["id"])
+
     with app.app_context():
-        rows = (
+        query = (
             Article.query
             .filter_by(status="posted")
             .filter(Article.threads_post_id.isnot(None))
             .filter(Article.threads_post_id != "")
-            .with_entities(Article.id, Article.threads_post_id)
-            .all()
         )
+        if resolved_account_id is not None:
+            if is_legacy:
+                query = query.filter(
+                    or_(Article.account_id == resolved_account_id, Article.account_id.is_(None))
+                )
+            else:
+                query = query.filter(Article.account_id == resolved_account_id)
+        rows = query.with_entities(Article.id, Article.threads_post_id).all()
 
     updated = skipped = errors = 0
 

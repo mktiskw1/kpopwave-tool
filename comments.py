@@ -2,7 +2,7 @@ import logging
 
 import requests
 
-from database import Comment, Setting, db
+from database import Comment, Setting, get_active_account, db
 
 logger = logging.getLogger(__name__)
 
@@ -13,14 +13,18 @@ _POSTS_TO_CHECK = 10    # 返信を確認する最近の投稿数
 _REPLIES_PER_POST = 20  # 1投稿あたりの取得返信数
 
 
-def _creds(app):
+def _creds(app, account_id: int = None):
+    account = get_active_account(app, account_id)
+    if account:
+        return account["threads_access_token"], account["threads_user_id"]
+    # フォールバック: アカウント未登録時（マイグレーション前など）は settings を直接参照
     with app.app_context():
         return Setting.get("threads_access_token"), Setting.get("threads_user_id")
 
 
-def fetch_comments(app):
+def fetch_comments(app, account_id: int = None):
     """Threads API から自分の投稿への他者コメントを取得して DB に保存。"""
-    token, user_id = _creds(app)
+    token, user_id = _creds(app, account_id)
     if not token or not user_id:
         return {"error": "Threadsの認証情報が設定されていません", "fetched": 0, "new": 0}
 
@@ -115,9 +119,9 @@ def fetch_comments(app):
     return {"fetched": total, "new": new_count}
 
 
-def like_comment(app, reply_id):
+def like_comment(app, reply_id, account_id: int = None):
     """コメントにいいね。成功時は DB の is_liked を 1 に更新。"""
-    token, _ = _creds(app)
+    token, _ = _creds(app, account_id)
     if not token:
         return {"error": "Threadsの認証情報が設定されていません"}
     try:
@@ -141,9 +145,9 @@ def like_comment(app, reply_id):
     return {"ok": True}
 
 
-def post_reply(app, reply_id, text):
+def post_reply(app, reply_id, text, account_id: int = None):
     """コメントに返信を投稿（create → publish の2ステップ）。"""
-    token, user_id = _creds(app)
+    token, user_id = _creds(app, account_id)
     if not token or not user_id:
         return {"error": "Threadsの認証情報が設定されていません"}
     try:

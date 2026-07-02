@@ -9,15 +9,13 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import or_, text
 
-from database import Article, Setting, db
+from database import Article, Setting, ThreadsAccount, get_active_account, db
 
 logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler(timezone="Asia/Tokyo")
 
 _JITTER_SECONDS = 1800  # ±30分
-# CronジョブとIntervalジョブが同時に _post_job を起動したときの二重投稿防止
-_post_job_lock = threading.Lock()
 _JST = ZoneInfo("Asia/Tokyo")
 _UTC = ZoneInfo("UTC")
 _DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -26,32 +24,69 @@ _DEFAULT_TIMES = ["07:00", "12:00", "15:00", "18:00", "21:00"]
 
 # ── ユーティリティ ─────────────────────────────────────────────────────────────
 
-def get_weekly_schedule(app) -> dict:
-    """DB から週間スケジュールを取得。未設定なら post_times 設定で全曜日を埋めて返す。"""
+def _resolve_account_context(app, account_id: int = None) -> tuple:
+    """account_id を正規化する。
+
+    account_id が None、または「最古のアクティブアカウント」（＝マルチアカウント化以前から
+    存在する唯一のアカウント）と一致する場合は is_legacy=True を返し、
+    無プレフィックスの既存設定キー（weekly_schedule / post_times）をそのまま使い続ける。
+    それ以外の account_id は専用プレフィックスキーを使う新規アカウントとして扱う。
+    """
+    if account_id is None:
+        return None, True
+    legacy = get_active_account(app)
+    is_legacy = bool(legacy and legacy["id"] == account_id)
+    return account_id, is_legacy
+
+
+def get_weekly_schedule(app, account_id: int = None) -> dict:
+    """DB から週間スケジュールを取得。未設定なら post_times 設定で全曜日を埋めて返す。
+
+    account_id 省略時、または既存の唯一アカウントの場合は従来通り無プレフィックスキーを使う。
+    """
+    resolved_id, is_legacy = _resolve_account_context(app, account_id)
+    schedule_key = "weekly_schedule" if is_legacy else f"weekly_schedule_{resolved_id}"
+    post_times_key = "post_times" if is_legacy else f"post_times_{resolved_id}"
+
     with app.app_context():
-        raw = Setting.get("weekly_schedule", "")
+        raw = Setting.get(schedule_key, "")
     if raw:
         try:
             return json.loads(raw)
         except Exception:
             pass
-    # フォールバック: 既存の post_times を全曜日に適用
+    # フォールバック: post_times 設定を全曜日に適用
     with app.app_context():
-        times_str = Setting.get("post_times", ",".join(_DEFAULT_TIMES))
+        times_str = Setting.get(post_times_key, ",".join(_DEFAULT_TIMES))
     times = [t.strip() for t in times_str.split(",") if t.strip()]
     return {day: times for day in _DAY_KEYS}
 
 
-def next_post_slot(app) -> datetime | None:
+def set_weekly_schedule(app, schedule_dict: dict, account_id: int = None) -> None:
+    """週間スケジュールを保存する。account_id の解決規則は get_weekly_schedule と同じ。"""
+    resolved_id, is_legacy = _resolve_account_context(app, account_id)
+    schedule_key = "weekly_schedule" if is_legacy else f"weekly_schedule_{resolved_id}"
+    with app.app_context():
+        Setting.set(schedule_key, json.dumps(schedule_dict))
+
+
+def next_post_slot(app, account_id: int = None) -> datetime | None:
     """週間スケジュールから次の投稿スロット（UTC naive）を返す。
-    既に同スロットにキュー済み記事がある場合は次のスロットを探す。"""
-    schedule = get_weekly_schedule(app)
+    既に同スロットに同アカウントのキュー済み記事がある場合は次のスロットを探す。"""
+    schedule = get_weekly_schedule(app, account_id)
     now_jst = datetime.now(_JST)
 
     with app.app_context():
+        query = Article.query.filter_by(status="queued")
+        if account_id is not None:
+            _, is_legacy = _resolve_account_context(app, account_id)
+            if is_legacy:
+                query = query.filter(or_(Article.account_id == account_id, Article.account_id.is_(None)))
+            else:
+                query = query.filter(Article.account_id == account_id)
         occupied = {
             a.scheduled_at
-            for a in Article.query.filter_by(status="queued").all()
+            for a in query.all()
             if a.scheduled_at is not None
         }
 
@@ -97,32 +132,71 @@ def _collect_comments_job(app):
     fetch_comments(app)
 
 
+_post_job_locks: dict = {}
+_post_job_locks_guard = threading.Lock()
+
+
+def _get_account_lock(account_id) -> threading.Lock:
+    """アカウントごとの排他ロックを取得する（同一アカウントの二重投稿防止用）。"""
+    with _post_job_locks_guard:
+        if account_id not in _post_job_locks:
+            _post_job_locks[account_id] = threading.Lock()
+        return _post_job_locks[account_id]
+
+
+def _active_account_ids(app) -> list:
+    with app.app_context():
+        return [
+            a.id for a in
+            ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).all()
+        ]
+
+
 def _post_job(app):
-    # ── 第1防衛: スレッドロック ─────────────────────────────────────────────
-    # CronジョブとIntervalバックアップジョブが同時起動しても1つだけ実行する
-    if not _post_job_lock.acquire(blocking=False):
-        logger.info("[_post_job] 別ジョブ実行中 → スキップ（二重投稿防止）")
+    """全アクティブアカウントの投稿処理を順番に実行する（Intervalバックアップ用）。"""
+    account_ids = _active_account_ids(app)
+    if not account_ids:
+        logger.warning("[_post_job] アクティブな threads_accounts が存在しません")
+        return
+    for account_id in account_ids:
+        _post_job_for_account(app, account_id)
+
+
+def _post_job_for_account(app, account_id):
+    # ── 第1防衛: スレッドロック（アカウント単位） ───────────────────────────
+    # CronジョブとIntervalバックアップジョブが同一アカウントに対して同時起動しても
+    # 1つだけ実行する。別アカウントは別ロックのため並行実行可能。
+    lock = _get_account_lock(account_id)
+    if not lock.acquire(blocking=False):
+        logger.info("[_post_job] account_id=%s 別ジョブ実行中 → スキップ（二重投稿防止）", account_id)
         return
     try:
-        _run_post_job(app)
+        _run_post_job_for_account(app, account_id)
     finally:
-        _post_job_lock.release()
+        lock.release()
 
 
-def _run_post_job(app):
+def _run_post_job_for_account(app, account_id):
     from threads_api import post_to_threads
 
     with app.app_context():
+        _, is_legacy = _resolve_account_context(app, account_id)
         test_mode = Setting.get("test_mode", "true").lower() == "true"
         now = datetime.utcnow()
         now_jst = datetime.now(_JST)
 
-        all_queued = Article.query.filter_by(status="queued").order_by(
-            Article.scheduled_at.asc().nullsfirst()
-        ).all()
+        def _scope(query):
+            if is_legacy:
+                return query.filter(or_(Article.account_id == account_id, Article.account_id.is_(None)))
+            return query.filter(Article.account_id == account_id)
+
+        all_queued = _scope(
+            Article.query.filter_by(status="queued")
+        ).order_by(Article.scheduled_at.asc().nullsfirst()).all()
 
         logger.info(
-            "[_post_job] 実行開始 now_utc=%s now_jst=%s test_mode=%s queued=%d件",
+            "[_post_job] account_id=%s 実行開始 now_utc=%s now_jst=%s test_mode=%s queued=%d件",
+            account_id,
             now.strftime("%Y-%m-%d %H:%M:%S"),
             now_jst.strftime("%Y-%m-%d %H:%M:%S"),
             test_mode,
@@ -143,10 +217,10 @@ def _run_post_job(app):
                         f"scheduled_at({a.scheduled_at}) > now({now.strftime('%H:%M:%S')}) "
                         f"→ あと{int(diff_sec//60)}分{int(diff_sec%60)}秒"
                     )
-            logger.info("[_post_job]   id=%-4d %s", a.id, reason)
+            logger.info("[_post_job]   account_id=%s id=%-4d %s", account_id, a.id, reason)
 
         article = (
-            Article.query.filter_by(status="queued")
+            _scope(Article.query.filter_by(status="queued"))
             .filter(
                 or_(
                     Article.scheduled_at.is_(None),
@@ -158,13 +232,16 @@ def _run_post_job(app):
         )
 
         if not article:
-            logger.info("[_post_job] 投稿対象なし（全%d件が未来スロット or キュー空）", len(all_queued))
+            logger.info(
+                "[_post_job] account_id=%s 投稿対象なし（全%d件が未来スロット or キュー空）",
+                account_id, len(all_queued),
+            )
             return
 
         article_id = article.id
         logger.info(
-            "[_post_job] 投稿対象決定: id=%d scheduled_at(UTC)=%s has_summary=%s",
-            article_id, article.scheduled_at, bool(article.summary),
+            "[_post_job] account_id=%s 投稿対象決定: id=%d scheduled_at(UTC)=%s has_summary=%s",
+            account_id, article_id, article.scheduled_at, bool(article.summary),
         )
 
         # ── 第2防衛: DBレベルのアトミックロック ─────────────────────────────
@@ -178,18 +255,25 @@ def _run_post_job(app):
 
         if result.rowcount == 0:
             logger.warning(
-                "[_post_job] id=%d のDBロック取得失敗（他ジョブが処理中）→ スキップ", article_id
+                "[_post_job] account_id=%s id=%d のDBロック取得失敗（他ジョブが処理中）→ スキップ",
+                account_id, article_id,
             )
             return
 
-        logger.info("[_post_job] id=%d status→'posting' ロック完了、投稿実行", article_id)
+        logger.info(
+            "[_post_job] account_id=%s id=%d status→'posting' ロック完了、投稿実行",
+            account_id, article_id,
+        )
 
-    success, msg = post_to_threads(app, article_id, test_mode=test_mode)
-    logger.info("[_post_job] 投稿結果: id=%d success=%s msg=%s", article_id, success, msg)
+    success, msg = post_to_threads(app, article_id, test_mode=test_mode, account_id=account_id)
+    logger.info(
+        "[_post_job] account_id=%s 投稿結果: id=%d success=%s msg=%s",
+        account_id, article_id, success, msg,
+    )
 
 
 def _rollover_overdue_job(app):
-    """予定時刻を過ぎたキュー済み記事を次の空きスロットに自動繰り越す。
+    """予定時刻を過ぎたキュー済み記事を次の空きスロットに自動繰り越す（アカウント単位）。
     _post_job（CronTrigger + jitter最大30分）との競合を避けるため、
     scheduled_at から90分以上経過した記事のみ繰り越す。"""
     with app.app_context():
@@ -200,7 +284,7 @@ def _rollover_overdue_job(app):
                     now_utc.strftime("%H:%M:%S"), rollover_threshold.strftime("%H:%M:%S"))
 
         # ── 'posting' スタック回復 ────────────────────────────────────────────
-        # クラッシュなどで 'posting' のまま10分以上経過した記事を 'queued' に戻す
+        # クラッシュなどで 'posting' のまま10分以上経過した記事を 'queued' に戻す（全アカウント共通）
         stuck_threshold = now_utc - timedelta(minutes=10)
         stuck = (
             Article.query
@@ -217,27 +301,45 @@ def _rollover_overdue_job(app):
                 a.status = "queued"
             db.session.commit()
 
+    account_ids = _active_account_ids(app)
+    if not account_ids:
+        logger.warning("[_rollover_overdue_job] アクティブな threads_accounts が存在しません")
+        return
+
+    for account_id in account_ids:
+        _rollover_overdue_for_account(app, account_id, now_utc, rollover_threshold)
+
+
+def _rollover_overdue_for_account(app, account_id, now_utc, rollover_threshold):
+    with app.app_context():
+        _, is_legacy = _resolve_account_context(app, account_id)
+
+        def _scope(query):
+            if is_legacy:
+                return query.filter(or_(Article.account_id == account_id, Article.account_id.is_(None)))
+            return query.filter(Article.account_id == account_id)
+
         overdue = (
-            Article.query.filter_by(status="queued")
+            _scope(Article.query.filter_by(status="queued"))
             .filter(Article.scheduled_at.isnot(None))
             .filter(Article.scheduled_at < rollover_threshold)
             .order_by(Article.scheduled_at.asc())
             .all()
         )
         if not overdue:
-            logger.debug("[_rollover_overdue_job] 繰り越し対象なし")
+            logger.debug("[_rollover_overdue_job] account_id=%s 繰り越し対象なし", account_id)
             return
 
-        logger.info("[_rollover_overdue_job] 繰り越し対象: %d件", len(overdue))
+        logger.info("[_rollover_overdue_job] account_id=%s 繰り越し対象: %d件", account_id, len(overdue))
 
-        # 未来スロットの使用済みセットを構築
+        # 未来スロットの使用済みセットを構築（同アカウント分のみ）
         occupied = {
             a.scheduled_at
-            for a in Article.query.filter_by(status="queued").all()
+            for a in _scope(Article.query.filter_by(status="queued")).all()
             if a.scheduled_at is not None and a.scheduled_at > now_utc
         }
 
-        schedule = get_weekly_schedule(app)
+        schedule = get_weekly_schedule(app, account_id)
         now_jst = datetime.now(_JST)
 
         def _next_free_slot():
@@ -263,11 +365,12 @@ def _rollover_overdue_job(app):
         for article in overdue:
             new_slot = _next_free_slot()
             if new_slot:
-                logger.info("繰り越し: article %d %s → %s UTC", article.id, article.scheduled_at, new_slot)
+                logger.info("繰り越し: account_id=%s article %d %s → %s UTC",
+                            account_id, article.id, article.scheduled_at, new_slot)
                 article.scheduled_at = new_slot
                 occupied.add(new_slot)
             else:
-                logger.warning("繰り越し先スロットなし: article %d", article.id)
+                logger.warning("繰り越し先スロットなし: account_id=%s article %d", account_id, article.id)
 
         db.session.commit()
 
@@ -281,34 +384,39 @@ def _setup_weekly_post_jobs(app):
         if job.id.startswith("cron_post_"):
             scheduler.remove_job(job.id)
 
-    schedule = get_weekly_schedule(app)
+    account_ids = _active_account_ids(app)
+    if not account_ids:
+        logger.warning("投稿ジョブ設定スキップ: アクティブな threads_accounts が存在しません")
+        return
+
     job_count = 0
+    for account_id in account_ids:
+        schedule = get_weekly_schedule(app, account_id)
+        for day, times in schedule.items():
+            for i, t in enumerate(times or []):
+                t = t.strip()
+                if not t:
+                    continue
+                try:
+                    hour, minute = t.split(":")
+                    scheduler.add_job(
+                        _post_job_for_account,
+                        CronTrigger(
+                            day_of_week=day,
+                            hour=int(hour),
+                            minute=int(minute),
+                            timezone="Asia/Tokyo",
+                            jitter=_JITTER_SECONDS,
+                        ),
+                        args=[app, account_id],
+                        id=f"cron_post_{account_id}_{day}_{i}",
+                        replace_existing=True,
+                    )
+                    job_count += 1
+                except Exception as exc:
+                    logger.error("Invalid schedule '%s %s' (account_id=%s): %s", day, t, account_id, exc)
 
-    for day, times in schedule.items():
-        for i, t in enumerate(times or []):
-            t = t.strip()
-            if not t:
-                continue
-            try:
-                hour, minute = t.split(":")
-                scheduler.add_job(
-                    _post_job,
-                    CronTrigger(
-                        day_of_week=day,
-                        hour=int(hour),
-                        minute=int(minute),
-                        timezone="Asia/Tokyo",
-                        jitter=_JITTER_SECONDS,
-                    ),
-                    args=[app],
-                    id=f"cron_post_{day}_{i}",
-                    replace_existing=True,
-                )
-                job_count += 1
-            except Exception as exc:
-                logger.error("Invalid schedule '%s %s': %s", day, t, exc)
-
-    logger.info("投稿ジョブ設定完了: %d件", job_count)
+    logger.info("投稿ジョブ設定完了: %d件 (%dアカウント)", job_count, len(account_ids))
 
 
 def _engagement_job(app):

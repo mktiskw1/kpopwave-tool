@@ -9,7 +9,7 @@ from datetime import datetime
 import requests
 from sqlalchemy import text
 
-from database import Article, Setting, db  # Setting は動画URL生成に使用
+from database import Article, Setting, get_active_account, db  # Setting は動画URL生成に使用
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,13 @@ def _is_valid_image_url(url: str) -> bool:
     return True
 
 
-def _get_credentials(app):
+def _get_credentials(app, account_id: int = None):
+    account = get_active_account(app, account_id)
+    if account:
+        user_id = account["threads_user_id"] or os.getenv("THREADS_USER_ID", "")
+        token = account["threads_access_token"] or os.getenv("THREADS_ACCESS_TOKEN", "")
+        return user_id, token
+    # フォールバック: アカウント未登録時（マイグレーション前など）は settings を直接参照
     with app.app_context():
         user_id = Setting.get("threads_user_id") or os.getenv("THREADS_USER_ID", "")
         token = Setting.get("threads_access_token") or os.getenv("THREADS_ACCESS_TOKEN", "")
@@ -282,7 +288,7 @@ def _post_carousel(user_id: str, token: str, post_text: str, images: list, artic
     return False, result
 
 
-def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool, str]:
+def post_to_threads(app, article_id: int, test_mode: bool = False, account_id: int = None) -> tuple[bool, str]:
     """Threads に記事を投稿する。(success: bool, message: str) を返す。"""
     with app.app_context():
         article = Article.query.get(article_id)
@@ -370,7 +376,7 @@ def post_to_threads(app, article_id: int, test_mode: bool = False) -> tuple[bool
         return True, f"テストモード: 投稿シミュレーション成功 ({mode_label})"
 
     # ── 実投稿 ───────────────────────────────────────────────────
-    user_id, token = _get_credentials(app)
+    user_id, token = _get_credentials(app, account_id)
     if not user_id or not token:
         return False, "Threads の認証情報が設定されていません"
 

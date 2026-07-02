@@ -127,6 +127,65 @@
     </div>
   </div>
 
+  <!-- アカウント管理 -->
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header"><i class="bi bi-people-fill me-2"></i>アカウント管理</div>
+      <div class="card-body">
+        <div class="table-responsive mb-3">
+          <table class="table table-sm align-middle mb-0" style="font-size:.85rem">
+            <thead>
+              <tr>
+                <th>アカウント名</th>
+                <th>Threads ユーザーID</th>
+                <th>状態</th>
+                <th class="text-end">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for acc in accounts %}
+              <tr>
+                <td class="fw-semibold">{{ acc.account_label }}</td>
+                <td class="text-muted">{{ acc.threads_user_id or '未設定' }}</td>
+                <td>
+                  {% if acc.is_active %}
+                    <span class="badge bg-success">有効</span>
+                  {% else %}
+                    <span class="badge bg-secondary">無効</span>
+                  {% endif %}
+                </td>
+                <td class="text-end">
+                  <form method="post" action="{{ url_for('toggle_account_active', id=acc.id) }}" class="d-inline">
+                    <button type="submit" class="btn btn-sm btn-outline-secondary py-0 px-2" style="font-size:.75rem">
+                      {% if acc.is_active %}無効化{% else %}有効化{% endif %}
+                    </button>
+                  </form>
+                </td>
+              </tr>
+              {% else %}
+              <tr><td colspan="4" class="text-muted text-center py-3">登録済みアカウントがありません</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        <hr>
+
+        <p class="fw-semibold mb-2" style="font-size:.85rem">新しいアカウントを追加</p>
+        <form method="post" action="{{ url_for('accounts_start_oauth') }}" class="d-flex gap-2 flex-wrap align-items-center">
+          <input type="text" name="account_label" class="form-control form-control-sm" style="max-width:220px"
+                 placeholder="アカウント名（例: 田中アカウント）" required>
+          <button type="submit" class="btn btn-primary btn-sm">
+            <i class="bi bi-box-arrow-up-right me-1"></i> Threads で認証して追加
+          </button>
+        </form>
+        <p class="text-muted mt-2 mb-0" style="font-size:.75rem">
+          追加時は別のThreadsアカウントでログイン・許可してください。既存アカウントの認証情報は上書きされません。
+        </p>
+      </div>
+    </div>
+  </div>
+
   <!-- Anthropic API -->
   <div class="col-md-6">
     <div class="card h-100">

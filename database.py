@@ -40,6 +40,8 @@ class Article(db.Model):
     content_type = db.Column(db.String(20), nullable=True, default='article')  # 'article' or 'video'
     video_file_path = db.Column(db.String(500), nullable=True)  # static/videos/xxxx.mp4 形式
     is_fancam = db.Column(db.Boolean, nullable=True, default=False)
+    # マルチアカウント対応
+    account_id = db.Column(db.Integer, db.ForeignKey("threads_accounts.id"), nullable=True)
 
     def to_dict(self):
         return {
@@ -51,6 +53,45 @@ class Article(db.Model):
             "scheduled_at": self.scheduled_at.isoformat() if self.scheduled_at else None,
             "posted_at": self.posted_at.isoformat() if self.posted_at else None,
             "created_at": self.created_at.isoformat(),
+        }
+
+
+class ThreadsAccount(db.Model):
+    __tablename__ = "threads_accounts"
+
+    id = db.Column(db.Integer, primary_key=True)
+    account_label = db.Column(db.String(100), nullable=False)
+    threads_user_id = db.Column(db.String(100), nullable=True)
+    threads_access_token = db.Column(db.Text, nullable=True)
+    token_acquired_at = db.Column(db.DateTime, nullable=True)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+def get_active_account(app, account_id: int = None) -> dict:
+    """Threadsアカウント情報を取得する。
+
+    account_id 指定時はそのアカウント、省略時は is_active=True のアカウントのうち
+    最も id が小さいもの（＝従来の唯一アカウント）を返す。
+    見つからない場合は None。
+    """
+    with app.app_context():
+        if account_id is not None:
+            acc = ThreadsAccount.query.get(account_id)
+        else:
+            acc = (
+                ThreadsAccount.query
+                .filter_by(is_active=True)
+                .order_by(ThreadsAccount.id.asc())
+                .first()
+            )
+        if not acc:
+            return None
+        return {
+            "id": acc.id,
+            "account_label": acc.account_label,
+            "threads_user_id": acc.threads_user_id,
+            "threads_access_token": acc.threads_access_token,
         }
 
 

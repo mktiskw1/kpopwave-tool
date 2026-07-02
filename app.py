@@ -9,9 +9,10 @@ from urllib.parse import urlencode, urlparse, parse_qs
 import requests
 from dotenv import load_dotenv
 from flask import Flask, flash, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from sqlalchemy import or_
 
 from config import Config
-from database import Article, BuzzPost, Comment, Setting, db
+from database import Article, BuzzPost, Comment, Setting, ThreadsAccount, get_active_account, db
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -89,6 +90,7 @@ def _migrate_db():
         ("video_file_path", "VARCHAR(500)"),
         ("is_fancam", "INTEGER DEFAULT 0"),
         ("view_count", "INTEGER"),
+        ("account_id", "INTEGER"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -96,6 +98,40 @@ def _migrate_db():
                 conn.execute(text(f"ALTER TABLE articles ADD COLUMN {col} {typedef}"))
                 conn.commit()
                 logger.info("DB migration: articles.%s added", col)
+
+    # threads_accounts テーブル: 既存の単一アカウント設定を初期レコードとして移行
+    if ThreadsAccount.query.count() == 0:
+        acquired_at = None
+        acquired_at_str = Setting.get("threads_token_acquired_at", "")
+        if acquired_at_str:
+            try:
+                acquired_at = datetime.fromisoformat(acquired_at_str)
+            except ValueError:
+                pass
+        default_account = ThreadsAccount(
+            account_label="kpopwave.daily",
+            threads_user_id=Setting.get("threads_user_id", ""),
+            threads_access_token=Setting.get("threads_access_token", ""),
+            token_acquired_at=acquired_at,
+            is_active=True,
+        )
+        db.session.add(default_account)
+        db.session.commit()
+        logger.info("DB migration: threads_accounts に初期アカウント作成 (id=%d, label=%s)",
+                    default_account.id, default_account.account_label)
+
+    # articles.account_id が未設定の既存レコードをデフォルトアカウントに紐付け
+    default_account = ThreadsAccount.query.filter_by(account_label="kpopwave.daily").first()
+    if default_account:
+        with db.engine.connect() as conn:
+            result = conn.execute(
+                text("UPDATE articles SET account_id = :aid WHERE account_id IS NULL"),
+                {"aid": default_account.id},
+            )
+            conn.commit()
+            if result.rowcount:
+                logger.info("DB migration: articles.account_id を %d 件バックフィル (account_id=%d)",
+                            result.rowcount, default_account.id)
 
     # follow_candidates テーブル
     existing_fc = {c["name"] for c in inspector.get_columns("follow_candidates")}
@@ -229,6 +265,27 @@ def index():
 # ── 承認待ち記事 ───────────────────────────────────────────────────────────
 
 
+def _selected_account_id():
+    """クエリパラメータ account_id を解決する。省略時はレガシー（最古の）アクティブアカウント。"""
+    raw = request.args.get("account_id")
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    legacy = get_active_account(app)
+    return legacy["id"] if legacy else None
+
+
+def _account_query_scope(query, model_cls, account_id, legacy_id):
+    """account_id でクエリをスコープする。レガシーアカウントは account_id IS NULL の記事も含める。"""
+    if account_id is None:
+        return query
+    if account_id == legacy_id:
+        return query.filter(or_(model_cls.account_id == account_id, model_cls.account_id.is_(None)))
+    return query.filter(model_cls.account_id == account_id)
+
+
 _PREVIEW_EXCLUDE = (
     "gstatic.com",
     "news.google.com",
@@ -308,15 +365,21 @@ def _build_image_list(thumbnail_url, image_urls_json, max_images=20):
 @app.route("/pending")
 def pending():
     tab = request.args.get("tab", "all")
+    account_id = _selected_account_id()
+    legacy = get_active_account(app)
+    legacy_id = legacy["id"] if legacy else None
 
-    all_pending = Article.query.filter_by(status="pending").order_by(Article.created_at.desc()).all()
+    def _scope(query):
+        return _account_query_scope(query, Article, account_id, legacy_id)
+
+    all_pending = _scope(Article.query.filter_by(status="pending")).order_by(Article.created_at.desc()).all()
 
     counts = {
         "all":    len(all_pending),
         "rss":    0,
         "youtube": 0,
         "video":  0,
-        "posted": Article.query.filter_by(status="posted", content_type="video").count(),
+        "posted": _scope(Article.query.filter_by(status="posted", content_type="video")).count(),
     }
     for a in all_pending:
         src = a.feed_source or ""
@@ -328,8 +391,7 @@ def pending():
             counts["rss"] += 1
 
     if tab == "posted":
-        articles = (Article.query
-                    .filter_by(status="posted", content_type="video")
+        articles = (_scope(Article.query.filter_by(status="posted", content_type="video"))
                     .order_by(Article.created_at.desc())
                     .all())
         images_map = {}
@@ -358,8 +420,11 @@ def pending():
             images_map[a.id] = imgs
             logger.debug("pending preview article=%d imgs=%d", a.id, len(imgs))
 
+    accounts = ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).all()
+
     return render_template("pending.html", articles=articles, images_map=images_map,
-                           active_tab=tab, counts=counts, now_utc=datetime.utcnow())
+                           active_tab=tab, counts=counts, now_utc=datetime.utcnow(),
+                           accounts=accounts, active_account_id=account_id)
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
@@ -403,7 +468,7 @@ def approve_article(id):
     article = Article.query.get_or_404(id)
     article.status = "queued"
 
-    slot_utc = next_post_slot(app)
+    slot_utc = next_post_slot(app, account_id=article.account_id)
     if slot_utc:
         article.scheduled_at = slot_utc
         slot_jst = slot_utc + timedelta(hours=9)
@@ -617,23 +682,34 @@ def serve_video(filename):
 
 @app.route("/queue")
 def queue():
+    account_id = _selected_account_id()
+    legacy = get_active_account(app)
+    legacy_id = legacy["id"] if legacy else None
+
+    def _scope(query):
+        return _account_query_scope(query, Article, account_id, legacy_id)
+
     queued = (
-        Article.query.filter_by(status="queued")
+        _scope(Article.query.filter_by(status="queued"))
         .order_by(Article.scheduled_at.asc().nullsfirst(), Article.created_at.asc())
         .all()
     )
     posted = (
-        Article.query.filter_by(status="posted")
+        _scope(Article.query.filter_by(status="posted"))
         .order_by(Article.posted_at.desc())
         .limit(30)
         .all()
     )
-    failed = Article.query.filter_by(status="failed").order_by(Article.updated_at.desc()).limit(10).all()
+    failed = _scope(Article.query.filter_by(status="failed")).order_by(Article.updated_at.desc()).limit(10).all()
     images_map = {}
     for a in queued:
         if (a.content_type or "article") != "video":
             images_map[a.id] = _build_image_list(a.thumbnail_url, a.image_urls)
-    return render_template("queue.html", queued=queued, posted=posted, failed=failed, images_map=images_map)
+
+    accounts = ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).all()
+
+    return render_template("queue.html", queued=queued, posted=posted, failed=failed, images_map=images_map,
+                           accounts=accounts, active_account_id=account_id)
 
 
 @app.route("/queue/<int:id>/schedule", methods=["POST"])
@@ -820,7 +896,8 @@ def settings():
         "app_base_url": base_url,
         "callback_url": base_url + "/auth/threads/callback",
     }
-    return render_template("settings.html", settings=current)
+    accounts = ThreadsAccount.query.order_by(ThreadsAccount.id.asc()).all()
+    return render_template("settings.html", settings=current, accounts=accounts)
 
 
 @app.route("/api/quick-setting", methods=["POST"])
@@ -840,7 +917,9 @@ def quick_setting():
 
 @app.route("/schedule", methods=["GET", "POST"])
 def schedule():
-    from scheduler import get_weekly_schedule, _setup_weekly_post_jobs, _DAY_KEYS
+    from scheduler import get_weekly_schedule, set_weekly_schedule, _DAY_KEYS
+
+    account_id = _selected_account_id()
 
     if request.method == "POST":
         new_schedule = {}
@@ -859,29 +938,76 @@ def schedule():
                     pass
             new_schedule[day] = sorted(set(valid))
 
-        Setting.set("weekly_schedule", json.dumps(new_schedule))
+        set_weekly_schedule(app, new_schedule, account_id=account_id)
 
         if hasattr(app, "reschedule_post_jobs"):
             app.reschedule_post_jobs()
 
         flash("週間スケジュールを保存しました", "success")
-        return redirect(url_for("schedule"))
+        return redirect(url_for("schedule", account_id=account_id))
 
-    from scheduler import get_weekly_schedule
     _DAY_LABELS = {
         "mon": "月", "tue": "火", "wed": "水", "thu": "木",
         "fri": "金", "sat": "土", "sun": "日",
     }
-    current = get_weekly_schedule(app)
+    current = get_weekly_schedule(app, account_id)
+    accounts = ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).all()
     return render_template(
         "schedule.html",
         schedule=current,
         day_keys=_DAY_KEYS,
         day_labels=_DAY_LABELS,
+        accounts=accounts,
+        active_account_id=account_id,
     )
 
 
 # ── Threads OAuth 認証 ────────────────────────────────────────────────────
+
+
+def _sync_threads_account_token(user_id: str, token: str, username: str = None,
+                                 force_new: bool = False, label: str = None):
+    """OAuth認証成功時にトークンを保存する。
+
+    force_new=False（デフォルト・既存の「トークンを再取得」ボタン用）:
+        settings テーブルと「アクティブな最初のアカウント」（＝従来からの唯一アカウント）の
+        両方を更新する。マルチアカウント導入前と完全に同じ挙動。
+    force_new=True（「新しいアカウントを追加」用）:
+        settings テーブルには一切書き込まず、threads_accounts に新規レコードを追加する。
+        既存アカウントのトークンには影響しない。
+    """
+    if force_new:
+        account = ThreadsAccount(
+            account_label=label or username or f"account_{user_id}",
+            threads_user_id=user_id,
+            threads_access_token=token,
+            token_acquired_at=datetime.utcnow(),
+            is_active=True,
+        )
+        db.session.add(account)
+        db.session.commit()
+        return account
+
+    Setting.set("threads_access_token", token)
+    Setting.set("threads_user_id", user_id)
+    Setting.set("threads_token_acquired_at", datetime.utcnow().isoformat())
+
+    account = ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).first()
+    if account:
+        account.threads_user_id = user_id
+        account.threads_access_token = token
+        account.token_acquired_at = datetime.utcnow()
+    else:
+        account = ThreadsAccount(
+            account_label=username or "default",
+            threads_user_id=user_id,
+            threads_access_token=token,
+            token_acquired_at=datetime.utcnow(),
+            is_active=True,
+        )
+        db.session.add(account)
+    db.session.commit()
+    return account
 
 
 @app.route("/auth/threads/start")
@@ -906,6 +1032,52 @@ def threads_auth_start():
         "state": state,
     })
     return redirect(auth_url)
+
+
+@app.route("/accounts/start-oauth", methods=["POST"])
+def accounts_start_oauth():
+    """新しいThreadsアカウントを追加するためのOAuthフローを開始する（既存アカウントは変更しない）。"""
+    app_id = Setting.get("meta_app_id")
+    app_secret = Setting.get("meta_app_secret")
+    if not app_id or not app_secret:
+        flash("Meta App ID と App Secret を設定・保存してから認証を開始してください", "warning")
+        return redirect(url_for("settings"))
+
+    label = (request.form.get("account_label") or "").strip()
+    if not label:
+        flash("アカウント名を入力してください", "warning")
+        return redirect(url_for("settings"))
+
+    state = secrets.token_urlsafe(32)
+    session["threads_oauth_state"] = state
+    session["threads_oauth_new_account"] = True
+    session["threads_oauth_new_label"] = label
+
+    base_url = Setting.get("app_base_url", "http://localhost:5000").rstrip("/")
+    redirect_uri = base_url + "/auth/threads/callback"
+
+    auth_url = "https://threads.net/oauth/authorize?" + urlencode({
+        "client_id": app_id,
+        "redirect_uri": redirect_uri,
+        "scope": _THREADS_SCOPES,
+        "response_type": "code",
+        "state": state,
+    })
+    return redirect(auth_url)
+
+
+@app.route("/accounts/<int:id>/toggle-active", methods=["POST"])
+def toggle_account_active(id):
+    account = ThreadsAccount.query.get_or_404(id)
+    account.is_active = not account.is_active
+    db.session.commit()
+    if hasattr(app, "reschedule_post_jobs"):
+        app.reschedule_post_jobs()
+    flash(
+        f"{account.account_label} を{'有効化' if account.is_active else '無効化'}しました",
+        "success",
+    )
+    return redirect(url_for("settings"))
 
 
 @app.route("/auth/threads/manual")
@@ -944,6 +1116,9 @@ def threads_auth_exchange():
     if not state or state != session.pop("threads_oauth_state", None):
         flash("セッションが切れました。ページを再読み込みしてやり直してください", "danger")
         return redirect(url_for("threads_auth_manual"))
+
+    is_new_account = session.pop("threads_oauth_new_account", False)
+    new_account_label = session.pop("threads_oauth_new_label", None)
 
     app_id = Setting.get("meta_app_id")
     app_secret = Setting.get("meta_app_secret")
@@ -993,14 +1168,24 @@ def threads_auth_exchange():
         user_id = user_data.get("id", "")
         username = user_data.get("username", "")
 
-        Setting.set("threads_access_token", long_token)
-        Setting.set("threads_user_id", user_id)
-        Setting.set("threads_token_acquired_at", datetime.utcnow().isoformat())
-        flash(
-            f"トークンを更新しました！ @{username}（ID: {user_id}）"
-            f"有効期限：{expires_in_days}日後",
-            "success",
+        _sync_threads_account_token(
+            user_id, long_token, username,
+            force_new=is_new_account, label=new_account_label,
         )
+        if is_new_account:
+            if hasattr(app, "reschedule_post_jobs"):
+                app.reschedule_post_jobs()
+            flash(
+                f"新しいアカウント「{new_account_label}」を追加しました！ @{username}（ID: {user_id}）"
+                f"有効期限：{expires_in_days}日後",
+                "success",
+            )
+        else:
+            flash(
+                f"トークンを更新しました！ @{username}（ID: {user_id}）"
+                f"有効期限：{expires_in_days}日後",
+                "success",
+            )
     except Exception as e:
         logger.exception("Threads OAuth 処理エラー（手動コード）")
         flash(f"認証処理中にエラーが発生しました: {e}", "danger")
@@ -1021,6 +1206,9 @@ def threads_auth_callback():
     if not state or state != session.pop("threads_oauth_state", None):
         flash("不正なリクエストです（state パラメータ不一致）", "danger")
         return redirect(url_for("settings"))
+
+    is_new_account = session.pop("threads_oauth_new_account", False)
+    new_account_label = session.pop("threads_oauth_new_label", None)
 
     code = request.args.get("code")
     if not code:
@@ -1078,14 +1266,24 @@ def threads_auth_callback():
         user_id = user_data.get("id", "")
         username = user_data.get("username", "")
 
-        Setting.set("threads_access_token", long_token)
-        Setting.set("threads_user_id", user_id)
-        Setting.set("threads_token_acquired_at", datetime.utcnow().isoformat())
-        flash(
-            f"トークンを更新しました！ @{username}（ID: {user_id}）"
-            f"有効期限：{expires_in_days}日後",
-            "success",
+        _sync_threads_account_token(
+            user_id, long_token, username,
+            force_new=is_new_account, label=new_account_label,
         )
+        if is_new_account:
+            if hasattr(app, "reschedule_post_jobs"):
+                app.reschedule_post_jobs()
+            flash(
+                f"新しいアカウント「{new_account_label}」を追加しました！ @{username}（ID: {user_id}）"
+                f"有効期限：{expires_in_days}日後",
+                "success",
+            )
+        else:
+            flash(
+                f"トークンを更新しました！ @{username}（ID: {user_id}）"
+                f"有効期限：{expires_in_days}日後",
+                "success",
+            )
     except Exception as e:
         logger.exception("Threads OAuth 処理エラー")
         flash(f"認証処理中にエラーが発生しました: {e}", "danger")
@@ -1791,7 +1989,8 @@ def debug_threads_search():
     import json as _json
     from flask import Response
 
-    token = Setting.get("threads_access_token", "")
+    account = get_active_account(app)
+    token = account["threads_access_token"] if account else Setting.get("threads_access_token", "")
     if not token:
         return Response(
             _json.dumps({"error": "threads_access_token が未設定です"}, ensure_ascii=False),
@@ -1833,8 +2032,9 @@ def debug_threads_api():
     import time as _time
     _BASE = "https://graph.threads.net/v1.0"
 
-    token   = Setting.get("threads_access_token", "")
-    user_id = Setting.get("threads_user_id", "")
+    account = get_active_account(app)
+    token   = account["threads_access_token"] if account else Setting.get("threads_access_token", "")
+    user_id = account["threads_user_id"] if account else Setting.get("threads_user_id", "")
 
     if not token or not user_id:
         return jsonify({"error": "threads_access_token / threads_user_id が未設定です"})
@@ -1912,8 +2112,9 @@ def debug_threads_video():
     _BASE = "https://graph.threads.net/v1.0"
     _TEST_VIDEO_URL = "https://www.w3schools.com/html/mov_bbb.mp4"
 
-    token   = Setting.get("threads_access_token", "")
-    user_id = Setting.get("threads_user_id", "")
+    account = get_active_account(app)
+    token   = account["threads_access_token"] if account else Setting.get("threads_access_token", "")
+    user_id = account["threads_user_id"] if account else Setting.get("threads_user_id", "")
 
     if not token or not user_id:
         return Response(
