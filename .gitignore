@@ -13,6 +13,9 @@ instance/
 *.db
 *.sqlite3
 
+# 自己署名証明書（get_token.py の HTTPS ローカルサーバー用）
+certs/
+
 # ログファイル
 *.log
 

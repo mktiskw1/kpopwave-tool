@@ -4,7 +4,7 @@ Threads アクセストークン取得スクリプト
 
 【Meta Developer Portal での設定（1回だけ）】
   アプリ → Threads API → 設定 → コールバック URL に以下を追加:
-    http://localhost:8888/callback
+    https://localhost:8888/callback
 
 使い方:
   .\\venv\\Scripts\\python get_token.py
@@ -15,6 +15,8 @@ import json
 import os
 import secrets
 import sqlite3
+import ssl
+import subprocess
 import sys
 import threading
 import urllib.parse
@@ -23,8 +25,11 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 
-REDIRECT_URI = "http://localhost:8888/callback"
+REDIRECT_URI = "https://localhost:8888/callback"
 SCOPE = "threads_basic,threads_content_publish"
+CERT_DIR = Path(__file__).parent / "certs"
+CERT_FILE = CERT_DIR / "localhost.crt"
+KEY_FILE = CERT_DIR / "localhost.key"
 
 _code: str | None = None
 _error: str | None = None
@@ -61,8 +66,39 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def _ensure_certificate() -> None:
+    """localhost用の自己署名証明書が無ければ openssl（Git Bash経由）で生成する。"""
+    if CERT_FILE.exists() and KEY_FILE.exists():
+        return
+
+    print("初回実行: HTTPS用の自己署名証明書を生成しています...")
+    CERT_DIR.mkdir(exist_ok=True)
+    openssl_cmd = (
+        "openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes "
+        f'-keyout "{KEY_FILE.as_posix()}" -out "{CERT_FILE.as_posix()}" '
+        '-subj "/CN=localhost" '
+        '-addext "subjectAltName=DNS:localhost,IP:127.0.0.1"'
+    )
+    # MSYS_NO_PATHCONV: Git Bash が "/CN=localhost" を Windows パスに誤変換するのを防ぐ
+    env = {**os.environ, "MSYS_NO_PATHCONV": "1"}
+    try:
+        result = subprocess.run(
+            ["bash", "-c", openssl_cmd], capture_output=True, text=True, env=env
+        )
+    except FileNotFoundError:
+        sys.exit("[エラー] Git Bash (bash.exe) が見つかりません。Git for Windows をインストールしてください。")
+
+    if result.returncode != 0 or not (CERT_FILE.exists() and KEY_FILE.exists()):
+        sys.exit(f"[エラー] 証明書の生成に失敗しました:\n{result.stderr}")
+
+    print(f"  証明書を生成しました: {CERT_FILE}\n")
+
+
 def _start_server():
     srv = http.server.HTTPServer(("127.0.0.1", 8888), _Handler)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(certfile=str(CERT_FILE), keyfile=str(KEY_FILE))
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     srv.timeout = 1
     while not _done.is_set():
         srv.handle_request()
@@ -190,6 +226,17 @@ def main():
     print()
     print("  登録先: アプリ → Threads API → 設定 → コールバック URL")
     print("-" * 60)
+
+    _ensure_certificate()
+
+    print("!" * 60)
+    print("  注意: 自己署名証明書を使用しているため、認証完了後に")
+    print("  ブラウザで「保護されていない通信」等の警告画面が表示されます。")
+    print("  - Chrome: 「詳細設定」→「localhost にアクセスする（安全ではありません）」")
+    print("  - Edge  : 「詳細情報」→「localhost に進む (安全ではありません)」")
+    print("  を選択して続行してください（ローカル環境のみの通信のため問題ありません）。")
+    print("!" * 60)
+
     print("\nブラウザで認証ページを開きます。")
     print("Threads アカウントでログインして「許可」を押してください。\n")
 

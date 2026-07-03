@@ -11,8 +11,6 @@ import webbrowser
 import sys
 import re
 import json
-import sqlite3
-import shutil
 import threading
 import time
 import urllib.request
@@ -189,97 +187,20 @@ def set_status(msg):
 
 
 # ── Cloudflare Tunnel ─────────────────────────────────────────
-_tunnel_proc = None
-
-
-def _find_cloudflared() -> str | None:
-    found = shutil.which("cloudflared")
-    if found:
-        return found
-    winget_link = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links\cloudflared.exe")
-    if os.path.exists(winget_link):
-        return winget_link
-    return None
-
-
-def _update_url_in_db(url: str) -> bool:
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("UPDATE settings SET value=? WHERE key='app_base_url'", (url,))
-        if c.rowcount == 0:
-            c.execute("INSERT INTO settings (key, value) VALUES ('app_base_url', ?)", (url,))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-
 def run_tunnel():
-    global _tunnel_proc
-
-    if _tunnel_proc is not None and _tunnel_proc.poll() is None:
-        messagebox.showinfo("Cloudflare Tunnel", "すでに起動中です。\nステータスバーのURLを確認してください。")
+    bat_path = os.path.join(PROJECT_DIR, "start_cloudflare.bat")
+    if not os.path.exists(bat_path):
+        messagebox.showerror("エラー", f"start_cloudflare.bat が見つかりません:\n{bat_path}")
         return
-
-    exe = _find_cloudflared()
-    if not exe:
-        messagebox.showerror(
-            "エラー",
-            "cloudflared が見つかりません。\n"
-            "winget install --id Cloudflare.cloudflared でインストールしてください。",
+    try:
+        subprocess.Popen(
+            f'cmd.exe /c "{bat_path}"',
+            cwd=PROJECT_DIR,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
-        set_status("cloudflared: インストールが必要")
-        return
-
-    subprocess.run(["taskkill", "/f", "/im", "cloudflared.exe"], capture_output=True)
-
-    _tunnel_proc = subprocess.Popen(
-        [exe, "tunnel", "--url", "http://localhost:5000"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
-    set_status("Cloudflare Tunnel を起動中... (最大30秒)")
-
-    def _monitor():
-        url_re = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
-        url = None
-        start = time.time()
-
-        try:
-            for line in _tunnel_proc.stdout:
-                m = url_re.search(line)
-                if m:
-                    url = m.group(0)
-                    break
-                if time.time() - start > 30:
-                    break
-        except Exception:
-            pass
-
-        def _on_done():
-            if not url:
-                messagebox.showerror("エラー", "Cloudflare Tunnel の起動がタイムアウトしました（30秒）。")
-                set_status("Cloudflare Tunnel 起動タイムアウト")
-                return
-            ok = _update_url_in_db(url)
-            db_msg = "app_base_url を更新しました。" if ok else "DB 更新に失敗しました。"
-            messagebox.showinfo("Cloudflare Tunnel 起動完了", f"URL: {url}\n\n{db_msg}")
-            set_status(f"Cloudflare: {url}")
-
-        root.after(0, _on_done)
-
-        if url:
-            try:
-                for _ in _tunnel_proc.stdout:
-                    pass
-            except Exception:
-                pass
-
-    threading.Thread(target=_monitor, daemon=True).start()
+        set_status("Cloudflare Tunnel (contentwave) を起動しました")
+    except Exception as e:
+        messagebox.showerror("エラー", f"起動に失敗しました:\n{e}")
 
 
 # ── スリープ制御 ────────────────────────────────────────────
