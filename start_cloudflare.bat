@@ -37,7 +37,15 @@ if not exist "%CONFIG_PATH%" (
     exit /b 1
 )
 
-taskkill /f /im cloudflared.exe > nul 2>&1
+tasklist /fi "imagename eq cloudflared.exe" 2>nul | find /i "cloudflared.exe" >nul
+if not errorlevel 1 (
+    echo [INFO] cloudflared.exe is already running - the tunnel is likely already active.
+    echo        Public URL: %FIXED_URL%
+    echo        Close the existing tunnel window first if you want to restart it.
+    echo.
+    pause
+    exit /b 0
+)
 
 echo [2/3] Setting app_base_url = %FIXED_URL% ...
 
@@ -64,4 +72,13 @@ echo      Close this window to stop the tunnel.
 echo ============================================================
 echo.
 "!CF_EXE!" tunnel --config "%CONFIG_PATH%" run %TUNNEL_NAME%
+
+echo.
+echo ============================================================
+echo [STOPPED] Cloudflare Tunnel process has exited (exit code %ERRORLEVEL%).
+echo           This window normally stays open forever while the tunnel
+echo           is active - if you did not close it yourself, check the
+echo           log above for the reason (crash, or killed by a second
+echo           "start_cloudflare.bat" run).
+echo ============================================================
 pause
