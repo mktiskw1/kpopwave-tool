@@ -18,6 +18,10 @@ BODY_MAX_VIDEO   = 50   # 動画投稿の文字数上限
 BODY_MAX_ARTICLE = 150  # 記事投稿の文字数上限
 BODY_MAX_RETRIES = 3    # 超過時の再生成試行回数
 
+# Claude API課金停止時など、AI生成を使わずタイトルそのままを投稿文にするためのフラグ。
+# settings テーブルの値で切り替える（"false" でAI生成をスキップ）。DBに未設定なら従来通りAI有効。
+AI_SUMMARY_SETTING_KEY = "ai_summary_enabled"
+
 _RANKING_TITLE_KEYWORDS = frozenset([
     "ranking", "rankings", "ranked", "chart", "charts",
     "poll", "top 10", "top10", "brand reputation",
@@ -193,6 +197,21 @@ def _get_api_key(app) -> str:
     with app.app_context():
         key = Setting.get("anthropic_api_key", "")
     return key or os.getenv("ANTHROPIC_API_KEY", "")
+
+
+def _ai_summary_enabled(app) -> bool:
+    """Trueならこれまで通りClaudeで生成、Falseならタイトルをそのまま投稿文として使う。"""
+    with app.app_context():
+        val = Setting.get(AI_SUMMARY_SETTING_KEY, "true")
+    return str(val).lower() != "false"
+
+
+def _title_only_summary(title: str, body_max: int) -> str:
+    """AI無効時: タイトルをそのまま投稿文にする（上限超過時は末尾を切り詰める）。"""
+    title = (title or "").strip()
+    if len(title) <= body_max:
+        return title
+    return title[: body_max - 1] + "…"
 
 
 def _detect_group_name(feed_source: str, title: str) -> str:
@@ -457,6 +476,22 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
 
     is_video_post = (content_type == "video")
     body_max = BODY_MAX_VIDEO if is_video_post else BODY_MAX_ARTICLE
+
+    # ── AI生成フラグ確認（無効ならタイトルそのままで即保存して終了） ──────────
+    if not _ai_summary_enabled(app):
+        post_text = _title_only_summary(title, body_max)
+        with app.app_context():
+            art = db.session.get(Article, article_id)
+            if art:
+                art.summary       = post_text
+                art.post_style    = style
+                art.error_message = None
+                db.session.commit()
+        logger.info(
+            "AI生成スキップ（固定テンプレート）: article=%d video=%s (%d文字)",
+            article_id, is_video_post, len(post_text),
+        )
+        return True
 
     # ── APIキー確認 ────────────────────────────────────────────────────────
     api_key = _get_api_key(app)
