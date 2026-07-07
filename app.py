@@ -962,7 +962,7 @@ def schedule():
             app.reschedule_post_jobs()
 
         flash("週間スケジュールを保存しました", "success")
-        return redirect(url_for("schedule", account_id=account_id))
+        return redirect(url_for("schedule"))
 
     _DAY_LABELS = {
         "mon": "月", "tue": "火", "wed": "水", "thu": "木",

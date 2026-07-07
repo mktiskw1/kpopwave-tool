@@ -19,7 +19,7 @@
   ] %}
   {% for key, label, count, badge_color in tabs %}
   <li class="nav-item" style="flex-shrink:0">
-    <a href="{{ url_for('pending', tab=key, account_id=active_account_id) }}"
+    <a href="{{ url_for('pending', tab=key) }}"
        class="nav-link px-3 py-2 {% if active_tab == key %}active{% endif %}"
        style="border-radius:8px 8px 0 0;font-size:.88rem;white-space:nowrap;
               {% if active_tab == key %}
