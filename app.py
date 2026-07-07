@@ -266,15 +266,29 @@ def index():
 
 
 def _selected_account_id():
-    """クエリパラメータ account_id を解決する。省略時はレガシー（最古の）アクティブアカウント。"""
+    """account_id解決順序: クエリパラメータ → セッション → レガシー（最古の）アクティブアカウント。
+    解決したIDは常にセッションへ書き戻し、以降のリクエストに引き継ぐ。"""
     raw = request.args.get("account_id")
     if raw:
         try:
-            return int(raw)
+            resolved = int(raw)
         except ValueError:
-            pass
+            resolved = None
+        if resolved is not None and ThreadsAccount.query.get(resolved):
+            session["active_account_id"] = resolved
+            return resolved
+
+    session_id = session.get("active_account_id")
+    if session_id is not None:
+        if ThreadsAccount.query.get(session_id):
+            return session_id
+        session.pop("active_account_id", None)
+
     legacy = get_active_account(app)
-    return legacy["id"] if legacy else None
+    legacy_id = legacy["id"] if legacy else None
+    if legacy_id is not None:
+        session["active_account_id"] = legacy_id
+    return legacy_id
 
 
 def _account_query_scope(query, model_cls, account_id, legacy_id):
@@ -1078,6 +1092,14 @@ def toggle_account_active(id):
         "success",
     )
     return redirect(url_for("settings"))
+
+
+@app.route("/accounts/switch/<int:id>")
+def switch_account(id):
+    """サイドバーのアカウント切り替えドロップダウンから呼ばれる。セッションに保存して元のページへ戻る。"""
+    account = ThreadsAccount.query.get_or_404(id)
+    session["active_account_id"] = account.id
+    return redirect(request.referrer or url_for("index"))
 
 
 @app.route("/auth/threads/manual")
