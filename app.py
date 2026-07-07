@@ -444,8 +444,7 @@ def pending():
             logger.debug("pending preview article=%d imgs=%d", a.id, len(imgs))
 
     return render_template("pending.html", articles=articles, images_map=images_map,
-                           active_tab=tab, counts=counts, now_utc=datetime.utcnow(),
-                           active_account_id=account_id)
+                           active_tab=tab, counts=counts, now_utc=datetime.utcnow())
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
