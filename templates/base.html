@@ -29,6 +29,25 @@
       --text-muted:    #5a8a6a;
     }
 
+    .theme-kpop {
+      --accent:        #c9699f;
+      --accent-hover:  #a84f81;
+      --accent-light:  #e6a9c9;
+      --accent-soft:   #fbeef6;
+      --accent2:       #8f6bb8;
+      --accent2-light: #bfa3dd;
+      --accent3:       #7b93cf;
+      --accent3-light: #aebde3;
+      --accent-dark:   #7a3f60;
+      --accent-rgb:    201, 105, 159;
+      --accent2-rgb:   143, 107, 184;
+      --bg:            #fdf6fb;
+      --surface2:      #fbeef6;
+      --border:        #e6c6db;
+      --text:          #4a2a42;
+      --text-muted:    #a97a97;
+    }
+
     /* ─── Base ─────────────────────────────────────────────────── */
     body {
       background: var(--bg);
@@ -370,9 +389,20 @@
       border-bottom-color: var(--accent);
       background: rgba(var(--accent-rgb), .06);
     }
+
+    /* ─── kpopwave.daily テーマの個別上書き ───────────────────────── */
+    .theme-kpop .sidebar {
+      background: linear-gradient(175deg, #fdf7fb 0%, #fbeef6 55%, #f7e3f0 100%);
+    }
+    .theme-kpop .btn-secondary {
+      background: linear-gradient(135deg, #e6a9c9, #c9699f);
+    }
+    .theme-kpop .btn-secondary:hover {
+      background: linear-gradient(135deg, #c9699f, #a84f81);
+    }
   </style>
 </head>
-<body>
+<body class="{% if nav_active_account_id == 1 %}theme-kpop{% endif %}">
 
 <!-- モバイル：横スクロールナビバー（JS不使用） -->
 <nav class="d-md-none mobile-nav-bar">
