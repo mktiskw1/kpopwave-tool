@@ -10,18 +10,6 @@
   </span>
 </div>
 
-<!-- アカウント選択タブ -->
-{% if accounts and accounts|length > 1 %}
-<div class="d-flex gap-2 mb-3 flex-wrap">
-  {% for acc in accounts %}
-  <a href="{{ url_for('schedule', account_id=acc.id) }}"
-     class="btn btn-sm {% if acc.id == active_account_id %}btn-accent{% else %}btn-outline-secondary{% endif %}">
-    {{ acc.account_label }}
-  </a>
-  {% endfor %}
-</div>
-{% endif %}
-
 <!-- 説明バー -->
 <div class="alert alert-secondary py-2 mb-4" style="font-size:.82rem">
   <i class="bi bi-info-circle me-1"></i>

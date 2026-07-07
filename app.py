@@ -443,11 +443,9 @@ def pending():
             images_map[a.id] = imgs
             logger.debug("pending preview article=%d imgs=%d", a.id, len(imgs))
 
-    accounts = ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).all()
-
     return render_template("pending.html", articles=articles, images_map=images_map,
                            active_tab=tab, counts=counts, now_utc=datetime.utcnow(),
-                           accounts=accounts, active_account_id=account_id)
+                           active_account_id=account_id)
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
@@ -729,10 +727,7 @@ def queue():
         if (a.content_type or "article") != "video":
             images_map[a.id] = _build_image_list(a.thumbnail_url, a.image_urls)
 
-    accounts = ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).all()
-
-    return render_template("queue.html", queued=queued, posted=posted, failed=failed, images_map=images_map,
-                           accounts=accounts, active_account_id=account_id)
+    return render_template("queue.html", queued=queued, posted=posted, failed=failed, images_map=images_map)
 
 
 @app.route("/queue/<int:id>/schedule", methods=["POST"])
@@ -974,14 +969,11 @@ def schedule():
         "fri": "金", "sat": "土", "sun": "日",
     }
     current = get_weekly_schedule(app, account_id)
-    accounts = ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).all()
     return render_template(
         "schedule.html",
         schedule=current,
         day_keys=_DAY_KEYS,
         day_labels=_DAY_LABELS,
-        accounts=accounts,
-        active_account_id=account_id,
     )
 
 

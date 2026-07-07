@@ -8,18 +8,6 @@
   </h4>
 </div>
 
-<!-- アカウント選択タブ -->
-{% if accounts and accounts|length > 1 %}
-<div class="d-flex gap-2 mb-3 flex-wrap">
-  {% for acc in accounts %}
-  <a href="{{ url_for('pending', tab=active_tab, account_id=acc.id) }}"
-     class="btn btn-sm {% if acc.id == active_account_id %}btn-accent{% else %}btn-outline-secondary{% endif %}">
-    {{ acc.account_label }}
-  </a>
-  {% endfor %}
-</div>
-{% endif %}
-
 <!-- フィルタータブ -->
 <ul class="nav mb-3" style="gap:4px;border-bottom:1.5px solid var(--border);padding-bottom:0;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch">
   {% set tabs = [

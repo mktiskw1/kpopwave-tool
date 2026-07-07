@@ -3,18 +3,6 @@
 
 <h4 class="mb-4 fw-bold">投稿キュー</h4>
 
-<!-- アカウント選択タブ -->
-{% if accounts and accounts|length > 1 %}
-<div class="d-flex gap-2 mb-3 flex-wrap">
-  {% for acc in accounts %}
-  <a href="{{ url_for('queue', account_id=acc.id) }}"
-     class="btn btn-sm {% if acc.id == active_account_id %}btn-accent{% else %}btn-outline-secondary{% endif %}">
-    {{ acc.account_label }}
-  </a>
-  {% endfor %}
-</div>
-{% endif %}
-
 <!-- キュー中 -->
 <div class="card mb-4">
   <div class="card-header d-flex justify-content-between">
