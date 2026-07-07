@@ -203,6 +203,8 @@ def inject_globals():
         "unread_comments_count": Comment.query.filter_by(is_read=0).count(),
         "youtube_min_view_count": Setting.get("youtube_min_view_count", "5000000"),
         "youtube_max_view_count": Setting.get("youtube_max_view_count", "0"),
+        "nav_accounts": ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).all(),
+        "nav_active_account_id": _selected_account_id(),
     }
 
 
