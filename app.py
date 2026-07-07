@@ -256,11 +256,18 @@ def inject_timedelta():
 
 @app.route("/")
 def index():
+    account_id = _selected_account_id()
+    legacy = get_active_account(app)
+    legacy_id = legacy["id"] if legacy else None
+
+    def _scope(query):
+        return _account_query_scope(query, Article, account_id, legacy_id)
+
     stats = {
-        s: Article.query.filter_by(status=s).count()
+        s: _scope(Article.query.filter_by(status=s)).count()
         for s in ("pending", "queued", "posted", "rejected", "failed")
     }
-    recent = Article.query.order_by(Article.created_at.desc()).limit(15).all()
+    recent = _scope(Article.query).order_by(Article.created_at.desc()).limit(15).all()
     return render_template("index.html", stats=stats, recent=recent)
 
 
