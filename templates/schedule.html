@@ -31,7 +31,7 @@
   {% set color = day_colors[day] %}
   {% set times = schedule.get(day, []) %}
 
-  <div class="col-6 col-md-4 col-lg-3" id="day-col-{{ day }}">
+  <div class="col-12 col-md-6 col-lg-3" id="day-col-{{ day }}">
     <div class="card h-100" style="border-color:{{ color }}40">
       <!-- 曜日ヘッダー -->
       <div class="card-header d-flex justify-content-between align-items-center py-2"
@@ -43,30 +43,17 @@
       </div>
 
       <div class="card-body p-2">
-        <!-- 時刻リスト -->
-        <div class="time-list-{{ day }} mb-2">
-          {% for t in times %}
-          <div class="d-flex align-items-center gap-1 mb-1 time-item">
-            <input type="text" name="times_{{ day }}" value="{{ t }}"
-                   class="form-control form-control-sm time-input text-center fw-bold"
-                   style="max-width:72px;font-size:.9rem;letter-spacing:1px"
-                   placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]"
-                   oninput="validateTime(this)">
-            <button type="button" class="btn btn-sm btn-outline-danger px-1 py-0"
-                    style="font-size:.75rem;line-height:1.6"
-                    onclick="removeTime(this, '{{ day }}')">
-              <i class="bi bi-x"></i>
-            </button>
-          </div>
+        <!-- 時刻トグルボタン -->
+        <div class="hour-toggle-grid" style="--day-color:{{ color }}">
+          {% for h in range(24) %}
+          {% set hh = '%02d'|format(h) %}
+          <input type="checkbox" class="btn-check hour-check" autocomplete="off"
+                 id="time-{{ day }}-{{ h }}" name="times_{{ day }}" value="{{ hh }}:00"
+                 {% if hh in checked_hours.get(day, []) %}checked{% endif %}
+                 onchange="onHourToggle('{{ day }}')">
+          <label class="hour-btn-label" for="time-{{ day }}-{{ h }}">{{ hh }}</label>
           {% endfor %}
         </div>
-
-        <!-- 追加ボタン -->
-        <button type="button" class="btn btn-sm w-100 py-1"
-                style="background:{{ color }}18;border:1px dashed {{ color }}55;color:{{ color }};font-size:.8rem"
-                onclick="addTime('{{ day }}')">
-          <i class="bi bi-plus-lg me-1"></i>追加
-        </button>
       </div>
     </div>
   </div>
@@ -123,61 +110,33 @@
 {% endblock %}
 
 {% block scripts %}
+<style>
+  .hour-toggle-grid { display:grid; grid-template-columns:repeat(6,1fr); gap:6px; }
+  .hour-btn-label {
+    display:flex; align-items:center; justify-content:center;
+    height:34px; border-radius:8px; font-weight:700; font-size:.78rem;
+    cursor:pointer; user-select:none; transition:all .15s;
+    border:1.5px solid var(--border); color:var(--text-muted); background:var(--surface);
+  }
+  .hour-check:checked + .hour-btn-label {
+    background:var(--day-color); border-color:var(--day-color); color:#fff;
+  }
+</style>
 <script>
-const DAY_COLORS = {
-  mon:"#AB47BC",tue:"#F06292",wed:"#26A69A",thu:"#FFA726",fri:"#CE93D8",
-  sat:"#4FC3F7",sun:"#E91E8C"
-};
-
-function addTime(day) {
-  const list = document.querySelector(`.time-list-${day}`);
-  const div = document.createElement('div');
-  div.className = 'd-flex align-items-center gap-1 mb-1 time-item';
-  const color = DAY_COLORS[day] || '#888';
-  div.innerHTML = `
-    <input type="text" name="times_${day}" value=""
-           class="form-control form-control-sm time-input text-center fw-bold"
-           style="max-width:72px;font-size:.9rem;letter-spacing:1px"
-           placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]"
-           oninput="validateTime(this)">
-    <button type="button" class="btn btn-sm btn-outline-danger px-1 py-0"
-            style="font-size:.75rem;line-height:1.6"
-            onclick="removeTime(this,'${day}')">
-      <i class="bi bi-x"></i>
-    </button>`;
-  list.appendChild(div);
-  div.querySelector('input').focus();
-  updateCount(day);
-}
-
-function removeTime(btn, day) {
-  btn.closest('.time-item').remove();
+function onHourToggle(day) {
   updateCount(day);
   updatePreview(day);
 }
 
 function updateCount(day) {
-  const items = document.querySelectorAll(`.time-list-${day} .time-item`);
-  document.querySelector(`.slot-count-${day}`).textContent = items.length;
-}
-
-function validateTime(input) {
-  const v = input.value.trim();
-  const ok = /^\d{1,2}:\d{2}$/.test(v) && (() => {
-    const [h, m] = v.split(':').map(Number);
-    return h >= 0 && h <= 23 && m >= 0 && m <= 59;
-  })();
-  input.style.borderColor = v === '' ? '' : (ok ? '#26A69A' : '#E91E8C');
-  if (ok) updatePreview(input.closest('[class*="col-"]').id.replace('day-col-', ''));
+  const checked = document.querySelectorAll(`input[name="times_${day}"]:checked`);
+  document.querySelector(`.slot-count-${day}`).textContent = checked.length;
 }
 
 function updatePreview(day) {
-  const inputs = document.querySelectorAll(`input[name="times_${day}"]`);
+  const checked = document.querySelectorAll(`input[name="times_${day}"]:checked`);
   const cell = document.getElementById(`preview-${day}`);
-  const times = Array.from(inputs)
-    .map(i => i.value.trim())
-    .filter(t => /^\d{1,2}:\d{2}$/.test(t))
-    .sort();
+  const times = Array.from(checked).map(i => i.value).sort();
   if (times.length === 0) {
     cell.innerHTML = '<span class="text-muted" style="font-size:.75rem">—</span>';
   } else {
@@ -188,29 +147,16 @@ function updatePreview(day) {
 }
 
 function applyAllDays() {
-  const monInputs = document.querySelectorAll('input[name="times_mon"]');
-  const monTimes = Array.from(monInputs).map(i => i.value.trim()).filter(Boolean);
+  const monChecked = new Set(
+    Array.from(document.querySelectorAll('input[name="times_mon"]:checked')).map(i => i.value)
+  );
   ['tue','wed','thu','fri'].forEach(day => {
-    // 既存の入力を全削除
-    document.querySelectorAll(`.time-list-${day} .time-item`).forEach(el => el.remove());
-    // 月曜の時刻をコピー
-    monTimes.forEach(t => {
-      addTime(day);
-      const list = document.querySelector(`.time-list-${day}`);
-      const last = list.querySelectorAll('.time-item');
-      last[last.length - 1].querySelector('input').value = t;
+    document.querySelectorAll(`input[name="times_${day}"]`).forEach(input => {
+      input.checked = monChecked.has(input.value);
     });
     updateCount(day);
     updatePreview(day);
   });
 }
-
-// 入力変化時にリアルタイムでプレビューを更新
-document.getElementById('schedule-form').addEventListener('input', e => {
-  if (e.target.matches('.time-input')) {
-    const col = e.target.closest('[id^="day-col-"]');
-    if (col) updatePreview(col.id.replace('day-col-', ''));
-  }
-});
 </script>
 {% endblock %}
