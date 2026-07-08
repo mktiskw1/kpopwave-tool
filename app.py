@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import secrets
+import uuid
 from datetime import datetime, timedelta
 from urllib.parse import urlencode, urlparse, parse_qs
 
@@ -973,6 +974,76 @@ def schedule():
         schedule=current,
         day_keys=_DAY_KEYS,
         day_labels=_DAY_LABELS,
+    )
+
+
+TEXT_POST_MAX_CHARS = 500  # Threads API の投稿文字数上限
+
+
+@app.route("/text-post", methods=["GET", "POST"])
+def text_post():
+    accounts = ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).all()
+
+    if request.method == "POST":
+        body = (request.form.get("body") or "").strip()
+        action = request.form.get("action") or ""
+        try:
+            account_id = int(request.form.get("account_id") or 0)
+        except ValueError:
+            account_id = 0
+
+        account = ThreadsAccount.query.filter_by(id=account_id, is_active=True).first()
+
+        if not body:
+            flash("投稿文を入力してください", "danger")
+            return redirect(url_for("text_post"))
+        if len(body) > TEXT_POST_MAX_CHARS:
+            flash(f"投稿文は{TEXT_POST_MAX_CHARS}文字以内で入力してください", "danger")
+            return redirect(url_for("text_post"))
+        if not account:
+            flash("アカウントを選択してください", "danger")
+            return redirect(url_for("text_post"))
+        if action not in ("post_now", "queue"):
+            flash("不正なリクエストです", "danger")
+            return redirect(url_for("text_post"))
+
+        title = body[:30] + ("…" if len(body) > 30 else "")
+        article = Article(
+            feed_source="テキスト投稿",
+            title=title,
+            url=f"text-post:{uuid.uuid4().hex}",
+            summary=body,
+            status="queued",
+            content_type="text",
+            account_id=account.id,
+        )
+        db.session.add(article)
+        db.session.commit()
+        logger.info("テキスト投稿作成: id=%d account_id=%d action=%s", article.id, account.id, action)
+
+        if action == "queue":
+            flash("キューに追加しました", "success")
+            return redirect(url_for("queue"))
+
+        from threads_api import post_to_threads
+        test_mode = Setting.get("test_mode", "true").lower() == "true"
+        success, msg = post_to_threads(app, article.id, test_mode=test_mode, account_id=account.id)
+        flash(msg, "success" if success else "danger")
+        return redirect(url_for("queue"))
+
+    default_account_id = None
+    for acc in accounts:
+        if acc.account_label == "田中（仮）":
+            default_account_id = acc.id
+            break
+    if default_account_id is None and accounts:
+        default_account_id = accounts[0].id
+
+    return render_template(
+        "text_post.html",
+        accounts=accounts,
+        default_account_id=default_account_id,
+        max_chars=TEXT_POST_MAX_CHARS,
     )
 
 

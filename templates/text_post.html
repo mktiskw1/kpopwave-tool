@@ -1,0 +1,62 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<h4 class="mb-4 fw-bold">テキスト投稿</h4>
+
+<div class="card" style="max-width:640px">
+  <div class="card-header">
+    <i class="bi bi-pencil-square me-2"></i>新規テキスト投稿
+  </div>
+  <div class="card-body">
+    <form method="post" id="text-post-form">
+      <div class="mb-3">
+        <label class="form-label" for="account_id">投稿アカウント</label>
+        <select class="form-select" id="account_id" name="account_id">
+          {% for acc in accounts %}
+          <option value="{{ acc.id }}" {% if acc.id == default_account_id %}selected{% endif %}>{{ acc.account_label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="mb-2">
+        <label class="form-label" for="body">投稿文</label>
+        <textarea class="form-control" id="body" name="body" rows="8"
+                  oninput="updateTextPostCount()" placeholder="投稿する本文を入力してください"></textarea>
+      </div>
+      <div class="d-flex justify-content-end mb-3">
+        <span id="text-post-count" class="char-count ok">0 / {{ max_chars }} 文字</span>
+      </div>
+
+      <div class="d-flex gap-2">
+        <button type="submit" name="action" value="post_now" id="btn-post-now"
+                class="btn btn-accent" onclick="return confirm('今すぐ投稿しますか？')">
+          <i class="bi bi-send-fill"></i> 今すぐ投稿
+        </button>
+        <button type="submit" name="action" value="queue" id="btn-queue"
+                class="btn btn-outline-info">
+          <i class="bi bi-collection-fill"></i> キューに追加
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const TEXT_POST_MAX_CHARS = {{ max_chars }};
+
+function updateTextPostCount() {
+  const len = document.getElementById('body').value.length;
+  const countEl = document.getElementById('text-post-count');
+  const over = len > TEXT_POST_MAX_CHARS;
+  countEl.textContent = len + ' / ' + TEXT_POST_MAX_CHARS + ' 文字';
+  countEl.className = 'char-count ' + (over ? 'over' : 'ok');
+  document.getElementById('btn-post-now').disabled = over || len === 0;
+  document.getElementById('btn-queue').disabled = over || len === 0;
+}
+
+updateTextPostCount();
+</script>
+{% endblock %}
