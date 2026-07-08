@@ -969,11 +969,16 @@ def schedule():
         "fri": "金", "sat": "土", "sun": "日",
     }
     current = get_weekly_schedule(app, account_id)
+    checked_hours = {
+        day: {t[:2] for t in times if len(t) >= 2}
+        for day, times in current.items()
+    }
     return render_template(
         "schedule.html",
         schedule=current,
         day_keys=_DAY_KEYS,
         day_labels=_DAY_LABELS,
+        checked_hours=checked_hours,
     )
 
 
