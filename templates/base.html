@@ -418,6 +418,9 @@
   <a href="{{ url_for('schedule') }}" class="{% if request.endpoint=='schedule' %}active{% endif %}">
     <i class="bi bi-calendar-week-fill"></i> スケジュール
   </a>
+  <a href="{{ url_for('text_post') }}" class="{% if request.endpoint=='text_post' %}active{% endif %}">
+    <i class="bi bi-pencil-square"></i> テキスト投稿
+  </a>
   <a href="{{ url_for('comments_page') }}" class="{% if request.endpoint=='comments_page' %}active{% endif %}">
     <i class="bi bi-chat-dots-fill"></i> コメント{% if unread_comments_count > 0 %} <span class="badge badge-pending" style="font-size:.65rem;vertical-align:middle">{{ unread_comments_count }}</span>{% endif %}
   </a>
@@ -483,6 +486,11 @@
         <li class="nav-item">
           <a class="nav-link {% if request.endpoint=='schedule' %}active{% endif %}" href="{{ url_for('schedule') }}">
             <i class="bi bi-calendar-week-fill"></i> スケジュール
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link {% if request.endpoint=='text_post' %}active{% endif %}" href="{{ url_for('text_post') }}">
+            <i class="bi bi-pencil-square"></i> テキスト投稿
           </a>
         </li>
         <li class="nav-item">
