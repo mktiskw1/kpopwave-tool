@@ -121,6 +121,9 @@
   .hour-check:checked + .hour-btn-label {
     background:var(--day-color); border-color:var(--day-color); color:#fff;
   }
+  .hour-check:focus-visible + .hour-btn-label {
+    outline: 2px solid var(--day-color); outline-offset: 1px;
+  }
 </style>
 <script>
 function onHourToggle(day) {
