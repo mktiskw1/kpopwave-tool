@@ -1000,17 +1000,13 @@ def text_post():
         account = ThreadsAccount.query.filter_by(id=account_id, is_active=True).first()
 
         if not body:
-            flash("投稿文を入力してください", "danger")
-            return redirect(url_for("text_post"))
+            return jsonify({"success": False, "message": "投稿文を入力してください"})
         if len(body) > TEXT_POST_MAX_CHARS:
-            flash(f"投稿文は{TEXT_POST_MAX_CHARS}文字以内で入力してください", "danger")
-            return redirect(url_for("text_post"))
+            return jsonify({"success": False, "message": f"投稿文は{TEXT_POST_MAX_CHARS}文字以内で入力してください"})
         if not account:
-            flash("アカウントを選択してください", "danger")
-            return redirect(url_for("text_post"))
+            return jsonify({"success": False, "message": "アカウントを選択してください"})
         if action not in ("post_now", "queue"):
-            flash("不正なリクエストです", "danger")
-            return redirect(url_for("text_post"))
+            return jsonify({"success": False, "message": "不正なリクエストです"})
 
         title = body[:30] + ("…" if len(body) > 30 else "")
         article = Article(
@@ -1027,14 +1023,12 @@ def text_post():
         logger.info("テキスト投稿作成: id=%d account_id=%d action=%s", article.id, account.id, action)
 
         if action == "queue":
-            flash("キューに追加しました", "success")
-            return redirect(url_for("queue"))
+            return jsonify({"success": True, "message": "キューに追加しました"})
 
         from threads_api import post_to_threads
         test_mode = Setting.get("test_mode", "true").lower() == "true"
         success, msg = post_to_threads(app, article.id, test_mode=test_mode, account_id=account.id)
-        flash(msg, "success" if success else "danger")
-        return redirect(url_for("queue"))
+        return jsonify({"success": success, "message": msg})
 
     default_account_id = None
     for acc in accounts:

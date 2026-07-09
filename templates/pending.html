@@ -215,11 +215,21 @@
                    oninput="syncTrimDisplay('start', {{ a.id }})"
                    style="width:64px;padding:2px 5px;border-radius:6px;border:1px solid var(--border);
                           background:#fff;color:var(--text);font-size:.78rem">
+            <button type="button" onclick="seekToTrim('start', {{ a.id }})"
+                    style="padding:2px 9px;border-radius:6px;border:1px solid var(--border);
+                           background:#fff;color:var(--text);font-size:.78rem;cursor:pointer">
+              移動
+            </button>
             <label style="margin:0">終了</label>
             <input id="trim-end-{{ a.id }}" type="number" min="1" placeholder="例: 60"
                    oninput="syncTrimDisplay('end', {{ a.id }})"
                    style="width:64px;padding:2px 5px;border-radius:6px;border:1px solid var(--border);
                           background:#fff;color:var(--text);font-size:.78rem">
+            <button type="button" onclick="seekToTrim('end', {{ a.id }})"
+                    style="padding:2px 9px;border-radius:6px;border:1px solid var(--border);
+                           background:#fff;color:var(--text);font-size:.78rem;cursor:pointer">
+              移動
+            </button>
           </div>
           <!-- 切り取りボタン -->
           <button type="button"
@@ -512,6 +522,15 @@ function syncTrimDisplay(type, id) {
   var val = parseFloat(document.getElementById('trim-' + type + '-' + id).value);
   var el = document.getElementById('trim-' + type + '-display-' + id);
   if (el) el.textContent = isNaN(val) ? '--:--' : formatTime(val);
+}
+
+function seekToTrim(type, id) {
+  var vid = document.getElementById('vid-' + id);
+  var input = document.getElementById('trim-' + type + '-' + id);
+  if (!vid || !input) return;
+  var val = parseFloat(input.value);
+  if (isNaN(val) || val < 0) return;
+  vid.currentTime = val;
 }
 
 // ── 動画切り取り（別投稿として追加） ────────────────────────────────────────
