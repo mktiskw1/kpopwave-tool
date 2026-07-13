@@ -198,14 +198,21 @@ def utc_to_jst_filter(dt):
 
 @app.context_processor
 def inject_globals():
+    account_id = _selected_account_id()
+    legacy = get_active_account(app)
+    legacy_id = legacy["id"] if legacy else None
+
+    def _scope(query):
+        return _account_query_scope(query, Article, account_id, legacy_id)
+
     return {
-        "pending_count": Article.query.filter_by(status="pending").count(),
-        "queued_count": Article.query.filter_by(status="queued").count(),
+        "pending_count": _scope(Article.query.filter_by(status="pending")).count(),
+        "queued_count": _scope(Article.query.filter_by(status="queued")).count(),
         "unread_comments_count": Comment.query.filter_by(is_read=0).count(),
         "youtube_min_view_count": Setting.get("youtube_min_view_count", "5000000"),
         "youtube_max_view_count": Setting.get("youtube_max_view_count", "0"),
         "nav_accounts": ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).all(),
-        "nav_active_account_id": _selected_account_id(),
+        "nav_active_account_id": account_id,
     }
 
 
@@ -752,8 +759,9 @@ def schedule_article(id):
 def post_now(id):
     from threads_api import post_to_threads
 
+    article = Article.query.get_or_404(id)
     test_mode = Setting.get("test_mode", "true").lower() == "true"
-    success, msg = post_to_threads(app, id, test_mode=test_mode)
+    success, msg = post_to_threads(app, id, test_mode=test_mode, account_id=article.account_id)
     flash(msg, "success" if success else "danger")
     return redirect(url_for("queue"))
 
@@ -795,16 +803,25 @@ def reorder_queue():
         if not ordered:
             return jsonify({"success": False, "error": "articles not found"})
 
-        # 並び替え対象以外のキュー済みスロットを占有セットに入れる
+        legacy = get_active_account(app)
+        legacy_id = legacy["id"] if legacy else None
+        account_id = ordered[0].account_id
+        if account_id is None:
+            account_id = legacy_id
+
+        # 並び替え対象以外のキュー済みスロットを占有セットに入れる（同一アカウントのみ）
+        occupied_query = (
+            Article.query.filter_by(status="queued")
+                          .filter(~Article.id.in_(ids))
+        )
+        occupied_query = _account_query_scope(occupied_query, Article, account_id, legacy_id)
         occupied = {
             a.scheduled_at
-            for a in Article.query.filter_by(status="queued")
-                                  .filter(~Article.id.in_(ids))
-                                  .all()
+            for a in occupied_query.all()
             if a.scheduled_at is not None
         }
 
-        schedule = get_weekly_schedule(app)
+        schedule = get_weekly_schedule(app, account_id=account_id)
         now_jst = datetime.now(_JST)
 
         def _next_future_slot():
@@ -1018,6 +1035,9 @@ def text_post():
             content_type="text",
             account_id=account.id,
         )
+        if action == "queue":
+            from scheduler import next_post_slot
+            article.scheduled_at = next_post_slot(app, account_id=account.id)
         db.session.add(article)
         db.session.commit()
         logger.info("テキスト投稿作成: id=%d account_id=%d action=%s", article.id, account.id, action)
@@ -1509,83 +1529,98 @@ def collect_youtube():
 @app.route("/api/videos/<int:article_id>/trim", methods=["POST"])
 def trim_video(article_id):
     import subprocess as _sp
+
     data = request.get_json(force=True) or {}
-    start = int(data.get("start", 0))
-    end   = data.get("end")
+
+    try:
+        start = float(data.get("start", 0) or 0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "開始秒数が不正です"}), 400
+    start = round(start * 2) / 2
+
+    end_raw = data.get("end")
+    end = None
+    if end_raw is not None and end_raw != "":
+        try:
+            end = float(end_raw)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "終了秒数が不正です"}), 400
+        end = round(end * 2) / 2
 
     article = Article.query.get_or_404(article_id)
     if not article.video_file_path:
         return jsonify({"ok": False, "error": "動画ファイルがありません"}), 400
 
-    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-    video_path = os.path.join(static_dir, article.video_file_path)
-    if not os.path.exists(video_path):
-        return jsonify({"ok": False, "error": "ファイルが見つかりません"}), 404
-
-    ffmpeg_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin", "ffmpeg.exe")
-    if not os.path.exists(ffmpeg_exe):
-        return jsonify({"ok": False, "error": "ffmpeg.exe が見つかりません"}), 500
-
-    videos_dir = os.path.join(static_dir, "videos")
-
-    # 元ファイルのベース名（拡張子なし）
-    # video_file_path は "videos/{video_id}.mp4" 形式
-    base_name = os.path.splitext(os.path.basename(video_path))[0]
-
-    # 元ファイルを _original として保持（まだなければリネーム）
-    original_filename = base_name + "_original.mp4"
-    original_path = os.path.join(videos_dir, original_filename)
-    if not os.path.exists(original_path):
-        import shutil as _shutil
-        _shutil.copy2(video_path, original_path)
-
-    # clip 連番を決定（既存の clip ファイル数をカウント）
-    existing_clips = [
-        f for f in os.listdir(videos_dir)
-        if f.startswith(base_name + "_clip_") and f.endswith(".mp4")
-    ]
-    clip_num = len(existing_clips) + 1
-    clip_filename = f"{base_name}_clip_{clip_num}.mp4"
-    clip_path = os.path.join(videos_dir, clip_filename)
-
-    cmd = [ffmpeg_exe, "-y", "-i", video_path, "-ss", str(start)]
-    if end is not None:
-        cmd += ["-to", str(int(end))]
-    cmd += [
-        "-c:v", "libx264", "-crf", "23", "-preset", "fast",
-        "-c:a", "aac", "-b:a", "128k",
-        "-avoid_negative_ts", "make_zero",
-        "-movflags", "+faststart",
-        clip_path,
-    ]
-
     try:
+        static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+        video_path = os.path.join(static_dir, article.video_file_path)
+        if not os.path.exists(video_path):
+            return jsonify({"ok": False, "error": "ファイルが見つかりません"}), 404
+
+        ffmpeg_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin", "ffmpeg.exe")
+        if not os.path.exists(ffmpeg_exe):
+            return jsonify({"ok": False, "error": "ffmpeg.exe が見つかりません"}), 500
+
+        videos_dir = os.path.join(static_dir, "videos")
+
+        # 元ファイルのベース名（拡張子なし）
+        # video_file_path は "videos/{video_id}.mp4" 形式
+        base_name = os.path.splitext(os.path.basename(video_path))[0]
+
+        # 元ファイルを _original として保持（まだなければリネーム）
+        original_filename = base_name + "_original.mp4"
+        original_path = os.path.join(videos_dir, original_filename)
+        if not os.path.exists(original_path):
+            import shutil as _shutil
+            _shutil.copy2(video_path, original_path)
+
+        # clip 連番を決定（既存の clip ファイル数をカウント）
+        existing_clips = [
+            f for f in os.listdir(videos_dir)
+            if f.startswith(base_name + "_clip_") and f.endswith(".mp4")
+        ]
+        clip_num = len(existing_clips) + 1
+        clip_filename = f"{base_name}_clip_{clip_num}.mp4"
+        clip_path = os.path.join(videos_dir, clip_filename)
+
+        cmd = [ffmpeg_exe, "-y", "-i", video_path, "-ss", str(start)]
+        if end is not None:
+            cmd += ["-to", str(end)]
+        cmd += [
+            "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+            "-c:a", "aac", "-b:a", "128k",
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
+            clip_path,
+        ]
+
         result = _sp.run(cmd, capture_output=True, timeout=600)
         if result.returncode != 0:
             err = result.stderr.decode("utf-8", errors="replace")[-500:]
             return jsonify({"ok": False, "error": err}), 500
+
+        # 新しい Article レコードを作成（元記事はそのまま残す）
+        import time as _time
+        clip_rel_path = f"videos/{clip_filename}"
+        new_article = Article(
+            feed_source=article.feed_source,
+            title=f"{article.title} [クリップ {clip_num}]",
+            url=f"{article.url}#clip_{int(_time.time())}",
+            status="pending",
+            content_type="video",
+            thumbnail_url=article.thumbnail_url,
+            video_file_path=clip_rel_path,
+            published_at=article.published_at,
+        )
+        db.session.add(new_article)
+        db.session.commit()
+
+        logger.info("動画クリップ作成完了: 元article_id=%d -> new_article_id=%d clip=%s",
+                    article_id, new_article.id, clip_filename)
+        return jsonify({"ok": True, "new_article_id": new_article.id})
     except Exception as exc:
+        logger.exception("動画トリミング失敗: article_id=%d", article_id)
         return jsonify({"ok": False, "error": str(exc)}), 500
-
-    # 新しい Article レコードを作成（元記事はそのまま残す）
-    import time as _time
-    clip_rel_path = f"videos/{clip_filename}"
-    new_article = Article(
-        feed_source=article.feed_source,
-        title=f"{article.title} [クリップ {clip_num}]",
-        url=f"{article.url}#clip_{int(_time.time())}",
-        status="pending",
-        content_type="video",
-        thumbnail_url=article.thumbnail_url,
-        video_file_path=clip_rel_path,
-        published_at=article.published_at,
-    )
-    db.session.add(new_article)
-    db.session.commit()
-
-    logger.info("動画クリップ作成完了: 元article_id=%d -> new_article_id=%d clip=%s",
-                article_id, new_article.id, clip_filename)
-    return jsonify({"ok": True, "new_article_id": new_article.id})
 
 
 @app.route("/api/articles/<int:article_id>/requeue", methods=["POST"])

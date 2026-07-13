@@ -295,9 +295,13 @@ def post_to_threads(app, article_id: int, test_mode: bool = False, account_id: i
         if not article:
             return False, "記事が見つかりません"
 
+        # 呼び出し元がaccount_idを渡し忘れた場合の防御: 記事自身に紐づくアカウントを使う
+        if account_id is None:
+            account_id = article.account_id
+
         logger.info(
-            "[post_to_threads] 開始: id=%d status=%r test=%s",
-            article_id, article.status, test_mode,
+            "[post_to_threads] 開始: id=%d status=%r test=%s account_id=%s",
+            article_id, article.status, test_mode, account_id,
         )
 
         # 冪等ガード: 既に投稿済み or 想定外ステータスなら即リターン

@@ -211,7 +211,7 @@
           <div class="d-flex align-items-center gap-2 flex-wrap mb-2" style="font-size:.78rem;color:var(--text-muted)">
             <span>手入力(秒):</span>
             <label style="margin:0">開始</label>
-            <input id="trim-start-{{ a.id }}" type="number" min="0" value="0"
+            <input id="trim-start-{{ a.id }}" type="number" min="0" step="0.5" value="0"
                    oninput="syncTrimDisplay('start', {{ a.id }})"
                    style="width:64px;padding:2px 5px;border-radius:6px;border:1px solid var(--border);
                           background:#fff;color:var(--text);font-size:.78rem">
@@ -221,7 +221,7 @@
               移動
             </button>
             <label style="margin:0">終了</label>
-            <input id="trim-end-{{ a.id }}" type="number" min="1" placeholder="例: 60"
+            <input id="trim-end-{{ a.id }}" type="number" min="0.5" step="0.5" placeholder="例: 60"
                    oninput="syncTrimDisplay('end', {{ a.id }})"
                    style="width:64px;padding:2px 5px;border-radius:6px;border:1px solid var(--border);
                           background:#fff;color:var(--text);font-size:.78rem">
@@ -278,6 +278,8 @@
 
       <!-- 要約エリア -->
       {% if a.summary %}
+      {% set is_title_truncated = a.summary.endswith('…') and a.title.startswith(a.summary[:-1]) %}
+      {% set edit_initial = a.title if is_title_truncated else a.summary %}
       <div class="mt-2">
         <div class="d-flex justify-content-between align-items-center mb-1">
           <span class="char-count {% if a.summary|length > 500 %}over{% else %}ok{% endif %}">
@@ -297,9 +299,9 @@
         <div id="display-{{ a.id }}" class="summary-box">{{ a.summary }}</div>
         <div id="edit-{{ a.id }}" class="d-none mt-1">
           <textarea id="textarea-{{ a.id }}" class="form-control" rows="5"
-                    oninput="updateCount({{ a.id }})">{{ a.summary }}</textarea>
+                    oninput="updateCount({{ a.id }})">{{ edit_initial }}</textarea>
           <div class="d-flex justify-content-between align-items-center mt-1">
-            <span id="count-{{ a.id }}" class="char-count">{{ a.summary|length }} / 500 文字</span>
+            <span id="count-{{ a.id }}" class="char-count">{{ edit_initial|length }} / 500 文字</span>
             <div class="d-flex gap-1">
               <button type="button" class="btn btn-sm btn-accent" onclick="saveSummary({{ a.id }})">保存</button>
               <button type="button" class="btn btn-sm btn-secondary" onclick="toggleEdit({{ a.id }})">キャンセル</button>
@@ -439,6 +441,22 @@ function toggleEdit(id) {
   document.getElementById('edit-' + id).classList.toggle('d-none');
 }
 
+function enterEditMode(id) {
+  const disp = document.getElementById('display-' + id);
+  const edit = document.getElementById('edit-' + id);
+  if (disp) disp.classList.add('d-none');
+  if (edit) edit.classList.remove('d-none');
+}
+
+function getEditInitialValue(id, summary) {
+  const card = document.getElementById('card-' + id);
+  const title = card ? (card.dataset.title || '') : '';
+  if (summary && title && summary.endsWith('…') && title.startsWith(summary.slice(0, -1))) {
+    return title;
+  }
+  return summary;
+}
+
 function updateCount(id) {
   const len = document.getElementById('textarea-' + id).value.length;
   const el = document.getElementById('count-' + id);
@@ -500,9 +518,11 @@ function requeueArticle(id, btn) {
 
 // ── 動画プレーヤー操作ユーティリティ ────────────────────────────────────────
 function formatTime(sec) {
-  var s = Math.floor(sec);
+  var half = Math.round(sec * 2) / 2;
+  var s = Math.floor(half);
   var m = Math.floor(s / 60);
-  return m + ':' + (s % 60 < 10 ? '0' : '') + (s % 60);
+  var suffix = (half - s === 0.5) ? '.5' : '';
+  return m + ':' + (s % 60 < 10 ? '0' : '') + (s % 60) + suffix;
 }
 
 function updateVidTime(id, vid) {
@@ -513,7 +533,7 @@ function updateVidTime(id, vid) {
 function markTrimPoint(type, id) {
   var vid = document.getElementById('vid-' + id);
   if (!vid) return;
-  var t = Math.floor(vid.currentTime);
+  var t = Math.round(vid.currentTime * 2) / 2;
   document.getElementById('trim-' + type + '-' + id).value = t;
   document.getElementById('trim-' + type + '-display-' + id).textContent = formatTime(t);
 }
@@ -535,9 +555,9 @@ function seekToTrim(type, id) {
 
 // ── 動画切り取り（別投稿として追加） ────────────────────────────────────────
 function trimVideo(id, btn) {
-  const start = parseInt(document.getElementById('trim-start-' + id).value) || 0;
+  const start = parseFloat(document.getElementById('trim-start-' + id).value) || 0;
   const endVal = document.getElementById('trim-end-' + id).value;
-  const end = endVal !== '' ? parseInt(endVal) : null;
+  const end = endVal !== '' ? parseFloat(endVal) : null;
   if (end !== null && end <= start) {
     alert('終了時間は開始時間より大きい値を入力してください');
     return;
@@ -668,15 +688,18 @@ function resummary(id, btn) {
         if (disp) {
           disp.textContent = d.summary;
           const ta = document.getElementById('textarea-' + id);
-          if (ta) ta.value = d.summary;
+          if (ta) ta.value = getEditInitialValue(id, d.summary);
+          updateCount(id);
           const cc = document.querySelector('#card-' + id + ' .char-count');
           if (cc) {
             cc.textContent = d.length + ' / 500 文字';
             cc.className = 'char-count ' + (d.length > 500 ? 'over' : 'ok');
           }
+          enterEditMode(id);
           const card = document.getElementById('card-' + id);
           if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
         } else {
+          sessionStorage.setItem('pendingEditId', id);
           location.reload();
         }
       } else {
@@ -686,5 +709,15 @@ function resummary(id, btn) {
       btn.innerHTML = orig;
     });
 }
+
+document.addEventListener('DOMContentLoaded', function() {
+  const editId = sessionStorage.getItem('pendingEditId');
+  if (!editId) return;
+  sessionStorage.removeItem('pendingEditId');
+  const card = document.getElementById('card-' + editId);
+  if (!card) return;
+  enterEditMode(editId);
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+});
 </script>
 {% endblock %}
