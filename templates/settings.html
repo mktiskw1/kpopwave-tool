@@ -145,7 +145,17 @@
             <tbody>
               {% for acc in accounts %}
               <tr>
-                <td class="fw-semibold">{{ acc.account_label }}</td>
+                <td class="fw-semibold">
+                  <span id="acc-label-display-{{ acc.id }}">{{ acc.account_label }}</span>
+                  <span id="acc-label-edit-{{ acc.id }}" style="display:none">
+                    <input type="text" id="acc-label-input-{{ acc.id }}" class="form-control form-control-sm d-inline-block"
+                           value="{{ acc.account_label }}" style="width:180px;font-size:.85rem">
+                    <button type="button" class="btn btn-sm py-0 px-1 btn-success" style="font-size:.72rem"
+                            onclick="saveAccountLabel({{ acc.id }})">✓</button>
+                    <button type="button" class="btn btn-sm py-0 px-1 btn-outline-secondary" style="font-size:.72rem"
+                            onclick="cancelEditAccountLabel({{ acc.id }})">✕</button>
+                  </span>
+                </td>
                 <td class="text-muted">{{ acc.threads_user_id or '未設定' }}</td>
                 <td>
                   {% if acc.is_active %}
@@ -155,6 +165,8 @@
                   {% endif %}
                 </td>
                 <td class="text-end">
+                  <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" style="font-size:.75rem"
+                          onclick="startEditAccountLabel({{ acc.id }})">編集</button>
                   <form method="post" action="{{ url_for('toggle_account_active', id=acc.id) }}" class="d-inline">
                     <button type="submit" class="btn btn-sm btn-outline-secondary py-0 px-2" style="font-size:.75rem">
                       {% if acc.is_active %}無効化{% else %}有効化{% endif %}
@@ -361,6 +373,41 @@ function addFeed() {
     </button>`;
   c.appendChild(div);
   div.querySelector('input[name=feed_name]').focus();
+}
+
+function startEditAccountLabel(id) {
+  document.getElementById("acc-label-display-" + id).style.display = "none";
+  document.getElementById("acc-label-edit-" + id).style.display = "inline-block";
+  const input = document.getElementById("acc-label-input-" + id);
+  input.focus();
+  input.select();
+}
+function cancelEditAccountLabel(id) {
+  document.getElementById("acc-label-edit-" + id).style.display = "none";
+  document.getElementById("acc-label-display-" + id).style.display = "";
+}
+function saveAccountLabel(id) {
+  const input = document.getElementById("acc-label-input-" + id);
+  const label = input.value.trim();
+  if (!label) {
+    alert("アカウント名を入力してください");
+    return;
+  }
+  fetch(`/accounts/${id}/rename`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ account_label: label }).toString(),
+  })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        document.getElementById("acc-label-display-" + id).textContent = data.account_label;
+        cancelEditAccountLabel(id);
+      } else {
+        alert(data.error || "更新に失敗しました");
+      }
+    })
+    .catch(() => alert("更新に失敗しました"));
 }
 
 function addChannel() {

@@ -1170,6 +1170,17 @@ def accounts_start_oauth():
     return redirect(auth_url)
 
 
+@app.route("/accounts/<int:id>/rename", methods=["POST"])
+def rename_account(id):
+    account = ThreadsAccount.query.get_or_404(id)
+    label = (request.form.get("account_label") or "").strip()
+    if not label:
+        return jsonify({"ok": False, "error": "アカウント名を入力してください"}), 400
+    account.account_label = label
+    db.session.commit()
+    return jsonify({"ok": True, "account_label": account.account_label})
+
+
 @app.route("/accounts/<int:id>/toggle-active", methods=["POST"])
 def toggle_account_active(id):
     account = ThreadsAccount.query.get_or_404(id)
@@ -1529,29 +1540,30 @@ def collect_youtube():
 @app.route("/api/videos/<int:article_id>/trim", methods=["POST"])
 def trim_video(article_id):
     import subprocess as _sp
-
-    data = request.get_json(force=True) or {}
+    from werkzeug.exceptions import NotFound
 
     try:
-        start = float(data.get("start", 0) or 0)
-    except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "開始秒数が不正です"}), 400
-    start = round(start * 2) / 2
+        data = request.get_json(force=True, silent=True) or {}
 
-    end_raw = data.get("end")
-    end = None
-    if end_raw is not None and end_raw != "":
         try:
-            end = float(end_raw)
+            start = float(data.get("start", 0) or 0)
         except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "終了秒数が不正です"}), 400
-        end = round(end * 2) / 2
+            return jsonify({"ok": False, "error": "開始秒数が不正です"}), 400
+        start = round(start * 2) / 2
 
-    article = Article.query.get_or_404(article_id)
-    if not article.video_file_path:
-        return jsonify({"ok": False, "error": "動画ファイルがありません"}), 400
+        end_raw = data.get("end")
+        end = None
+        if end_raw is not None and end_raw != "":
+            try:
+                end = float(end_raw)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "終了秒数が不正です"}), 400
+            end = round(end * 2) / 2
 
-    try:
+        article = Article.query.get_or_404(article_id)
+        if not article.video_file_path:
+            return jsonify({"ok": False, "error": "動画ファイルがありません"}), 400
+
         static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
         video_path = os.path.join(static_dir, article.video_file_path)
         if not os.path.exists(video_path):
@@ -1583,9 +1595,12 @@ def trim_video(article_id):
         clip_filename = f"{base_name}_clip_{clip_num}.mp4"
         clip_path = os.path.join(videos_dir, clip_filename)
 
-        cmd = [ffmpeg_exe, "-y", "-i", video_path, "-ss", str(start)]
+        # -ss を -i より前に置くキーフレームシークで高速化する。
+        # この場合 -to は使えない（シーク後の相対時刻ではなく元の絶対時刻のままになるため）ので、
+        # 代わりに相対時間指定の -t (end - start) を使う。
+        cmd = [ffmpeg_exe, "-y", "-ss", str(start), "-i", video_path]
         if end is not None:
-            cmd += ["-to", str(end)]
+            cmd += ["-t", str(end - start)]
         cmd += [
             "-c:v", "libx264", "-crf", "23", "-preset", "fast",
             "-c:a", "aac", "-b:a", "128k",
@@ -1618,6 +1633,8 @@ def trim_video(article_id):
         logger.info("動画クリップ作成完了: 元article_id=%d -> new_article_id=%d clip=%s",
                     article_id, new_article.id, clip_filename)
         return jsonify({"ok": True, "new_article_id": new_article.id})
+    except NotFound:
+        raise
     except Exception as exc:
         logger.exception("動画トリミング失敗: article_id=%d", article_id)
         return jsonify({"ok": False, "error": str(exc)}), 500
