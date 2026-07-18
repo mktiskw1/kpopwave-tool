@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 import feedparser
 
-from database import Article, Setting, db
+from database import Article, Setting, ThreadsAccount, db
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +102,9 @@ def _strip_html(text: str) -> str:
 
 # ── AI判定（第2フィルター） ──────────────────────────────────────────────────
 
-def _ai_judge_titles(titles: list, api_key: str) -> list:
+def _ai_judge_titles(titles: list, api_key: str, topic_label: str = "女性KPOPアイドル") -> list:
     """
-    タイトルリストをClaude Haikuに送り、女性KPOP関連のインデックス(0始まり)を返す。
+    タイトルリストをClaude Haikuに送り、指定トピックに関連するインデックス(0始まり)を返す。
     APIエラー・キー未設定時はフォールバックとして全インデックスを返す。
     """
     if not titles:
@@ -116,14 +116,22 @@ def _ai_judge_titles(titles: list, api_key: str) -> list:
     import anthropic
 
     numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(titles))
-    prompt = (
-        "以下の記事タイトルのうち、女性KPOPアイドル（グループ・ソロ）に関する"
-        "ニュース・レビュー・インタビュー・カムバック・コンサート情報のものを選び、"
-        "番号をカンマ区切りで返してください。\n"
-        "除外: 男性アイドル・韓国ドラマ・映画・スポーツ・政治・一般音楽\n\n"
-        f"{numbered}\n\n"
-        "回答は番号のみ（例: 1,3,5）。対象なし→「なし」"
-    )
+    if topic_label == "女性KPOPアイドル":
+        prompt = (
+            "以下の記事タイトルのうち、女性KPOPアイドル（グループ・ソロ）に関する"
+            "ニュース・レビュー・インタビュー・カムバック・コンサート情報のものを選び、"
+            "番号をカンマ区切りで返してください。\n"
+            "除外: 男性アイドル・韓国ドラマ・映画・スポーツ・政治・一般音楽\n\n"
+            f"{numbered}\n\n"
+            "回答は番号のみ（例: 1,3,5）。対象なし→「なし」"
+        )
+    else:
+        prompt = (
+            f"以下の記事タイトルのうち、{topic_label}に関するものを選び、"
+            "番号をカンマ区切りで返してください。\n\n"
+            f"{numbered}\n\n"
+            "回答は番号のみ（例: 1,3,5）。対象なし→「なし」"
+        )
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
@@ -152,15 +160,15 @@ def _ai_judge_titles(titles: list, api_key: str) -> list:
         return list(range(len(titles)))
 
 
-def _ai_judge_batched(titles: list, api_key: str) -> list:
+def _ai_judge_batched(titles: list, api_key: str, topic_label: str = "女性KPOPアイドル") -> list:
     """AI_BATCH_SIZE を超える場合は分割して判定する。"""
     if len(titles) <= AI_BATCH_SIZE:
-        return _ai_judge_titles(titles, api_key)
+        return _ai_judge_titles(titles, api_key, topic_label=topic_label)
 
     approved = []
     for offset in range(0, len(titles), AI_BATCH_SIZE):
         batch = titles[offset:offset + AI_BATCH_SIZE]
-        indices = _ai_judge_titles(batch, api_key)
+        indices = _ai_judge_titles(batch, api_key, topic_label=topic_label)
         approved.extend(i + offset for i in indices)
     return approved
 
@@ -190,6 +198,10 @@ def collect_articles(app) -> int:
     feeds = get_feed_list(app)
     with app.app_context():
         api_key = Setting.get("anthropic_api_key", "") or os.getenv("ANTHROPIC_API_KEY", "")
+        topic_by_account = {
+            acc.id: (acc.content_topic or "").strip()
+            for acc in ThreadsAccount.query.all()
+        }
 
     new_count = 0
     seen_urls = set()  # 今回の収集内での重複防止
@@ -198,6 +210,8 @@ def collect_articles(app) -> int:
         url  = feed_info.get("url", "") if isinstance(feed_info, dict) else str(feed_info)
         name = feed_info.get("name", url) if isinstance(feed_info, dict) else url
         is_ja = _is_japanese_feed(feed_info)
+        account_id = feed_info.get("account_id", 1) if isinstance(feed_info, dict) else 1
+        content_topic = topic_by_account.get(account_id, "")
         if not url:
             continue
 
@@ -241,9 +255,10 @@ def collect_articles(app) -> int:
                 plain_content = _strip_html(content)
                 title = (entry.get("title") or "")
 
-                # 日本語フィードはキーワードフィルターをスキップしてAI判定に委ねる
-                # （日本語記事はカタカナ表記が多くキーワード一致しにくいため）
-                if not is_ja:
+                # content_topic 設定済みアカウント（非KPOP）のフィードは
+                # 女性KPOPキーワード辞書と無関係なためキーワードフィルタを丸ごとスキップする。
+                # KPOPアカウント（content_topic未設定）は既存通り、日本語フィードのみスキップ。
+                if not content_topic and not is_ja:
                     # ── フィルター2: 除外キーワード ──────────────────────
                     if _check_excluded(title, plain_content):
                         skipped_kw += 1
@@ -266,6 +281,7 @@ def collect_articles(app) -> int:
                     "raw_content":  plain_content[:5000],
                     "feed_source":  name,
                     "lang":         "ja" if is_ja else "en",
+                    "account_id":   account_id,
                 })
 
         if not candidates:
@@ -277,7 +293,8 @@ def collect_articles(app) -> int:
 
         # ── フィルター4: Claude Haiku AI判定（タイトルのみ送信） ──────────
         titles_only = [c["title"] for c in candidates]
-        approved_indices = _ai_judge_batched(titles_only, api_key)
+        topic_label = content_topic or "女性KPOPアイドル"
+        approved_indices = _ai_judge_batched(titles_only, api_key, topic_label=topic_label)
         skipped_ai = len(candidates) - len(approved_indices)
 
         with app.app_context():
@@ -290,6 +307,7 @@ def collect_articles(app) -> int:
                     published_at=c["published_at"],
                     raw_content=c["raw_content"],
                     status="pending",
+                    account_id=c["account_id"],
                 )
                 db.session.add(article)
                 seen_urls.add(c["url"])
