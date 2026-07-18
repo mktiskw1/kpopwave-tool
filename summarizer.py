@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 import anthropic
 import requests
 
-from database import Article, BuzzPost, Setting, db
+from database import Article, BuzzPost, Setting, ThreadsAccount, db
 
 logger = logging.getLogger(__name__)
 
@@ -473,6 +473,11 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
         thumbnail_url = article.thumbnail_url or ""
         is_ja_src     = _is_japanese_source(feed_source)
         content_type  = article.content_type or "article"
+        content_topic = ""
+        if article.account_id:
+            acc = db.session.get(ThreadsAccount, article.account_id)
+            if acc and acc.content_topic:
+                content_topic = acc.content_topic.strip()
 
     is_video_post = (content_type == "video")
     body_max = BODY_MAX_VIDEO if is_video_post else BODY_MAX_ARTICLE
@@ -524,6 +529,47 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
     else:
         fresh_body, article_images, fetch_ok = _fetch_article_page(url)
         article_body = fresh_body if fetch_ok else stored_body
+
+    # ── 非KPOPアカウント（content_topic設定済み）: 汎用シンプル生成パス ──────
+    if content_topic:
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            generic_prompt = (
+                f"あなたは{content_topic}が好きな人です。"
+                "以下の記事を読んで、友達にLINEで一言伝えるような自然な口語体で"
+                f"感想を書いてください。{body_max}文字以内。\n"
+                "絵文字なし・ハッシュタグなし・URLなし。「〜です」「〜ます」ではなく口語体で。\n"
+                "伝聞表現（〜とのこと、〜と報じられている）は使わない。\n"
+                "出力は投稿文のみ（前置き・説明不要）。\n\n"
+                f"【記事タイトル】{title}\n【本文】{article_body[:2000]}"
+            )
+            msg = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=200,
+                messages=[{"role": "user", "content": generic_prompt}],
+            )
+            post_text = msg.content[0].text.strip()
+            if len(post_text) > body_max:
+                post_text = post_text[:body_max - 1] + "…"
+        except Exception as exc:
+            logger.error("Generic summarize error for article %d: %s", article_id, exc, exc_info=True)
+            _save_error(app, article_id, f"{type(exc).__name__}: {exc}")
+            return False
+
+        with app.app_context():
+            art = db.session.get(Article, article_id)
+            if art:
+                art.summary       = post_text
+                art.post_style    = style
+                art.error_message = None
+                if article_images:
+                    art.image_urls = json.dumps(article_images, ensure_ascii=False)
+                db.session.commit()
+        logger.info(
+            "Summarized(generic) article %d topic=%s (%d文字, %d images)",
+            article_id, content_topic, len(post_text), len(article_images),
+        )
+        return True
 
     # ── グループ名検出 ─────────────────────────────────────────────────────
     group_name = _detect_group_name(feed_source, title)
