@@ -65,6 +65,7 @@ class ThreadsAccount(db.Model):
     threads_access_token = db.Column(db.Text, nullable=True)
     token_acquired_at = db.Column(db.DateTime, nullable=True)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
+    content_topic = db.Column(db.String(200), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 

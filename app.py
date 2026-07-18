@@ -100,6 +100,18 @@ def _migrate_db():
                 conn.commit()
                 logger.info("DB migration: articles.%s added", col)
 
+    # threads_accounts テーブル: content_topic 列
+    existing_accounts_cols = {c["name"] for c in inspector.get_columns("threads_accounts")}
+    account_cols = [
+        ("content_topic", "VARCHAR(200)"),
+    ]
+    with db.engine.connect() as conn:
+        for col, typedef in account_cols:
+            if col not in existing_accounts_cols:
+                conn.execute(text(f"ALTER TABLE threads_accounts ADD COLUMN {col} {typedef}"))
+                conn.commit()
+                logger.info("DB migration: threads_accounts.%s added", col)
+
     # threads_accounts テーブル: 既存の単一アカウント設定を初期レコードとして移行
     if ThreadsAccount.query.count() == 0:
         acquired_at = None
