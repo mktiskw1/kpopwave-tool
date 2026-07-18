@@ -293,9 +293,15 @@
           {% for feed in settings.rss_feeds %}
           <div class="input-group mb-2 feed-row">
             <input type="text" class="form-control" name="feed_name"
-                   placeholder="名前" value="{{ feed.name }}" style="max-width:130px;font-size:.82rem">
+                   placeholder="名前" value="{{ feed.name }}" style="max-width:110px;font-size:.82rem">
             <input type="text" class="form-control" name="feed_url"
                    placeholder="RSS URL" value="{{ feed.url }}" style="font-size:.82rem">
+            <select class="form-select form-select-sm" name="feed_account_id" style="max-width:150px;font-size:.78rem">
+              {% for acc in accounts %}
+              <option value="{{ acc.id }}" {% if (feed.account_id or 1) == acc.id %}selected{% endif %}>{{ acc.account_label }}</option>
+              {% endfor %}
+            </select>
+            <input type="hidden" name="feed_lang" value="{{ feed.lang or '' }}">
             <button type="button" class="btn btn-outline-danger btn-sm px-2"
                     onclick="this.closest('.feed-row').remove()">
               <i class="bi bi-trash3"></i>
@@ -375,13 +381,17 @@
 
 {% block scripts %}
 <script>
+const FEED_ACCOUNT_OPTIONS = `{% for acc in accounts %}<option value="{{ acc.id }}">{{ acc.account_label }}</option>{% endfor %}`;
+
 function addFeed() {
   const c = document.getElementById('feeds-container');
   const div = document.createElement('div');
   div.className = 'input-group mb-2 feed-row';
   div.innerHTML = `
-    <input type="text" class="form-control" name="feed_name" placeholder="名前" style="max-width:130px;font-size:.82rem">
+    <input type="text" class="form-control" name="feed_name" placeholder="名前" style="max-width:110px;font-size:.82rem">
     <input type="text" class="form-control" name="feed_url" placeholder="RSS URL" style="font-size:.82rem">
+    <select class="form-select form-select-sm" name="feed_account_id" style="max-width:150px;font-size:.78rem">${FEED_ACCOUNT_OPTIONS}</select>
+    <input type="hidden" name="feed_lang" value="">
     <button type="button" class="btn btn-outline-danger btn-sm px-2" onclick="this.closest('.feed-row').remove()">
       <i class="bi bi-trash3"></i>
     </button>`;

@@ -894,8 +894,22 @@ def settings():
 
         feed_names = request.form.getlist("feed_name")
         feed_urls = request.form.getlist("feed_url")
-        feeds = [{"name": n.strip(), "url": u.strip()}
-                 for n, u in zip(feed_names, feed_urls) if u.strip()]
+        feed_langs = request.form.getlist("feed_lang")
+        feed_account_ids = request.form.getlist("feed_account_id")
+        feeds = []
+        for i, (n, u) in enumerate(zip(feed_names, feed_urls)):
+            if not u.strip():
+                continue
+            feed = {"name": n.strip(), "url": u.strip()}
+            lang = feed_langs[i].strip() if i < len(feed_langs) else ""
+            if lang:
+                feed["lang"] = lang
+            try:
+                acc_id = int(feed_account_ids[i]) if i < len(feed_account_ids) and feed_account_ids[i] else 1
+            except ValueError:
+                acc_id = 1
+            feed["account_id"] = acc_id
+            feeds.append(feed)
         Setting.set("rss_feeds", json.dumps(feeds))
 
         ch_names = request.form.getlist("youtube_channel_name")
