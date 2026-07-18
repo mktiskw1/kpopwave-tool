@@ -583,9 +583,8 @@ function trimVideo(id, btn) {
     }
   })
   .catch(function() {
-    alert('通信エラーが発生しました');
-    btn.disabled = false;
-    btn.innerHTML = orig;
+    alert('通信が中断されました。処理が完了している可能性があるため、一覧を更新して確認します。');
+    location.href = '/pending?tab=video';
   });
 }
 
