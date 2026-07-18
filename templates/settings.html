@@ -381,7 +381,16 @@
 
 {% block scripts %}
 <script>
-const FEED_ACCOUNT_OPTIONS = `{% for acc in accounts %}<option value="{{ acc.id }}">{{ acc.account_label }}</option>{% endfor %}`;
+const FEED_ACCOUNTS = [{% for acc in accounts %}{"id": {{ acc.id }}, "label": {{ acc.account_label|tojson }}}{% if not loop.last %},{% endif %}{% endfor %}];
+
+function buildFeedAccountOptionsHtml() {
+  return FEED_ACCOUNTS.map(a => {
+    const opt = document.createElement('option');
+    opt.value = a.id;
+    opt.textContent = a.label;
+    return opt.outerHTML;
+  }).join('');
+}
 
 function addFeed() {
   const c = document.getElementById('feeds-container');
@@ -390,7 +399,7 @@ function addFeed() {
   div.innerHTML = `
     <input type="text" class="form-control" name="feed_name" placeholder="名前" style="max-width:110px;font-size:.82rem">
     <input type="text" class="form-control" name="feed_url" placeholder="RSS URL" style="font-size:.82rem">
-    <select class="form-select form-select-sm" name="feed_account_id" style="max-width:150px;font-size:.78rem">${FEED_ACCOUNT_OPTIONS}</select>
+    <select class="form-select form-select-sm" name="feed_account_id" style="max-width:150px;font-size:.78rem">${buildFeedAccountOptionsHtml()}</select>
     <input type="hidden" name="feed_lang" value="">
     <button type="button" class="btn btn-outline-danger btn-sm px-2" onclick="this.closest('.feed-row').remove()">
       <i class="bi bi-trash3"></i>
