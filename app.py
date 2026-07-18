@@ -1193,6 +1193,15 @@ def rename_account(id):
     return jsonify({"ok": True, "account_label": account.account_label})
 
 
+@app.route("/accounts/<int:id>/content-topic", methods=["POST"])
+def update_account_content_topic(id):
+    account = ThreadsAccount.query.get_or_404(id)
+    topic = (request.form.get("content_topic") or "").strip()
+    account.content_topic = topic or None
+    db.session.commit()
+    return jsonify({"ok": True, "content_topic": account.content_topic or ""})
+
+
 @app.route("/accounts/<int:id>/toggle-active", methods=["POST"])
 def toggle_account_active(id):
     account = ThreadsAccount.query.get_or_404(id)

@@ -137,6 +137,7 @@
             <thead>
               <tr>
                 <th>アカウント名</th>
+                <th>コンテンツトピック</th>
                 <th>Threads ユーザーID</th>
                 <th>状態</th>
                 <th class="text-end">操作</th>
@@ -155,6 +156,21 @@
                     <button type="button" class="btn btn-sm py-0 px-1 btn-outline-secondary" style="font-size:.72rem"
                             onclick="cancelEditAccountLabel({{ acc.id }})">✕</button>
                   </span>
+                  <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 ms-1" style="font-size:.72rem"
+                          onclick="startEditAccountLabel({{ acc.id }})">編集</button>
+                </td>
+                <td>
+                  <span id="acc-topic-display-{{ acc.id }}" style="color:var(--text-muted)">{{ acc.content_topic or "（KPOP専用ロジック）" }}</span>
+                  <span id="acc-topic-edit-{{ acc.id }}" style="display:none">
+                    <input type="text" id="acc-topic-input-{{ acc.id }}" class="form-control form-control-sm d-inline-block"
+                           value="{{ acc.content_topic or '' }}" placeholder="例: ガチャガチャ・カプセルトイに関する記事" style="width:260px;font-size:.85rem">
+                    <button type="button" class="btn btn-sm py-0 px-1 btn-success" style="font-size:.72rem"
+                            onclick="saveContentTopic({{ acc.id }})">✓</button>
+                    <button type="button" class="btn btn-sm py-0 px-1 btn-outline-secondary" style="font-size:.72rem"
+                            onclick="cancelEditContentTopic({{ acc.id }})">✕</button>
+                  </span>
+                  <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 ms-1" style="font-size:.72rem"
+                          onclick="startEditContentTopic({{ acc.id }})">編集</button>
                 </td>
                 <td class="text-muted">{{ acc.threads_user_id or '未設定' }}</td>
                 <td>
@@ -165,8 +181,6 @@
                   {% endif %}
                 </td>
                 <td class="text-end">
-                  <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 me-1" style="font-size:.75rem"
-                          onclick="startEditAccountLabel({{ acc.id }})">編集</button>
                   <form method="post" action="{{ url_for('toggle_account_active', id=acc.id) }}" class="d-inline">
                     <button type="submit" class="btn btn-sm btn-outline-secondary py-0 px-2" style="font-size:.75rem">
                       {% if acc.is_active %}無効化{% else %}有効化{% endif %}
@@ -175,7 +189,7 @@
                 </td>
               </tr>
               {% else %}
-              <tr><td colspan="4" class="text-muted text-center py-3">登録済みアカウントがありません</td></tr>
+              <tr><td colspan="5" class="text-muted text-center py-3">登録済みアカウントがありません</td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -403,6 +417,37 @@ function saveAccountLabel(id) {
       if (data.ok) {
         document.getElementById("acc-label-display-" + id).textContent = data.account_label;
         cancelEditAccountLabel(id);
+      } else {
+        alert(data.error || "更新に失敗しました");
+      }
+    })
+    .catch(() => alert("更新に失敗しました"));
+}
+
+function startEditContentTopic(id) {
+  document.getElementById("acc-topic-display-" + id).style.display = "none";
+  document.getElementById("acc-topic-edit-" + id).style.display = "inline-block";
+  const input = document.getElementById("acc-topic-input-" + id);
+  input.focus();
+  input.select();
+}
+function cancelEditContentTopic(id) {
+  document.getElementById("acc-topic-edit-" + id).style.display = "none";
+  document.getElementById("acc-topic-display-" + id).style.display = "";
+}
+function saveContentTopic(id) {
+  const input = document.getElementById("acc-topic-input-" + id);
+  const topic = input.value.trim();
+  fetch(`/accounts/${id}/content-topic`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ content_topic: topic }).toString(),
+  })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        document.getElementById("acc-topic-display-" + id).textContent = data.content_topic || "（KPOP専用ロジック）";
+        cancelEditContentTopic(id);
       } else {
         alert(data.error || "更新に失敗しました");
       }
