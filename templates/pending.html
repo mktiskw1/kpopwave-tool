@@ -246,16 +246,21 @@
         </div>
       </div>
 
-      <!-- 画像プレビュー（記事投稿のみ: thumbnail→image_urls全件、最大20枚） -->
+      <!-- 画像プレビュー（記事投稿のみ: thumbnail→image_urls全件、最大20枚、チェックボックスで選択可能） -->
       {% else %}
       {% set imgs = images_map.get(a.id, []) %}
       {% if imgs %}
-      <div class="mb-1" style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch">
+      <div class="mb-1" id="img-row-{{ a.id }}" style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch">
         {% for img_url in imgs %}
-        <a href="{{ a.url }}" target="_blank" rel="noopener" style="flex:0 0 auto">
-          <img src="{{ img_url }}"
-               style="height:100px;width:auto;max-width:160px;border-radius:6px;display:block;object-fit:cover">
-        </a>
+        <div class="position-relative" style="flex:0 0 auto">
+          <a href="{{ a.url }}" target="_blank" rel="noopener">
+            <img src="{{ img_url }}"
+                 style="height:100px;width:auto;max-width:160px;border-radius:6px;display:block;object-fit:cover">
+          </a>
+          <input type="checkbox" class="img-select-cb" data-url="{{ img_url }}" checked
+                 onchange="updateImageSelection({{ a.id }})"
+                 style="position:absolute;top:4px;left:4px;width:18px;height:18px;cursor:pointer;accent-color:var(--accent);box-shadow:0 0 3px rgba(0,0,0,.6)">
+        </div>
         {% endfor %}
       </div>
       <div class="mb-2" style="font-size:.72rem;color:var(--text-muted)">
@@ -706,6 +711,24 @@ function resummary(id, btn) {
       }
       btn.disabled = false;
       btn.innerHTML = orig;
+    });
+}
+
+function updateImageSelection(articleId) {
+  const row = document.getElementById('img-row-' + articleId);
+  if (!row) return;
+  const urls = Array.from(row.querySelectorAll('.img-select-cb:checked')).map(cb => cb.dataset.url);
+  fetch('/articles/' + articleId + '/update-images', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ urls: urls }),
+  })
+    .then(r => r.json())
+    .then(function(d) {
+      if (!d.ok) alert(d.error || '画像選択の保存に失敗しました');
+    })
+    .catch(function() {
+      alert('画像選択の保存に失敗しました');
     });
 }
 
