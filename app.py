@@ -687,6 +687,20 @@ def edit_article(id):
     return jsonify({"success": True, "summary": summary, "length": len(summary)})
 
 
+@app.route("/articles/<int:id>/update-images", methods=["POST"])
+def update_article_images(id):
+    article = Article.query.get_or_404(id)
+    data = request.get_json(silent=True) or {}
+    urls = data.get("urls", [])
+    if not isinstance(urls, list):
+        return jsonify({"ok": False, "error": "urls must be a list"}), 400
+    urls = [u for u in urls if isinstance(u, str) and u.strip()]
+    article.thumbnail_url = urls[0] if urls else None
+    article.image_urls = json.dumps(urls[1:], ensure_ascii=False) if len(urls) > 1 else None
+    db.session.commit()
+    return jsonify({"ok": True, "count": len(urls)})
+
+
 @app.route("/articles/<int:id>/resummary", methods=["POST"])
 def resummary_article(id):
     from summarizer import summarize_article
