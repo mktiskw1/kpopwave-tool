@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timedelta
 
 import feedparser
+import requests
 
 from database import Article, Setting, ThreadsAccount, db
 
@@ -109,6 +110,29 @@ def _is_recent(published_at) -> bool:
 
 def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", " ", text or "")
+
+
+_OGP_IMAGE_RE = re.compile(
+    r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']'
+    r'|<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+    re.IGNORECASE,
+)
+
+
+def _fetch_ogp_thumbnail(url: str) -> str:
+    """記事ページのOGP画像（og:image）を取得する。取得失敗時は空文字を返す。"""
+    try:
+        resp = requests.get(url, headers={"User-Agent": "KpopWaveBot/1.0"}, timeout=10)
+        if resp.status_code != 200:
+            return ""
+        m = _OGP_IMAGE_RE.search(resp.text)
+        if not m:
+            return ""
+        img = (m.group(1) or m.group(2) or "").strip()
+        return img if img.startswith("http") else ""
+    except Exception as exc:
+        logger.warning("OGP画像取得エラー [%s]: %s", url, exc)
+        return ""
 
 
 # ── AI判定（第2フィルター） ──────────────────────────────────────────────────
@@ -314,6 +338,13 @@ def collect_articles(app) -> int:
         approved_indices = _ai_judge_batched(titles_only, api_key, topic_label=topic_label)
         skipped_ai = len(candidates) - len(approved_indices)
 
+        # content_topicアカウント（非KPOP）は承認待ち画面での画像プレビュー用に
+        # OGP画像を収集時点で取得する（KPOPアカウントは要約生成時に取得する既存フローのまま）
+        thumbnails = {}
+        if content_topic:
+            for idx in approved_indices:
+                thumbnails[idx] = _fetch_ogp_thumbnail(candidates[idx]["url"])
+
         with app.app_context():
             for idx in approved_indices:
                 c = candidates[idx]
@@ -325,6 +356,7 @@ def collect_articles(app) -> int:
                     raw_content=c["raw_content"],
                     status="pending",
                     account_id=c["account_id"],
+                    thumbnail_url=thumbnails.get(idx) or None,
                 )
                 db.session.add(article)
                 seen_urls.add(c["url"])
