@@ -3,6 +3,7 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta
+from urllib.parse import urljoin, urlparse
 
 import feedparser
 import requests
@@ -118,21 +119,57 @@ _OGP_IMAGE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ARTICLE_IMG_EXCLUDE_HINTS = [
+    "banner", "/ads/", "ad-", "-ad.", "sponsor", "widget", "spacer",
+    "btn-", "share", "logo", "icon", "avatar", "sns",
+    "wp-content/themes", ".svg", "1x1", "pixel", "tracking",
+]
 
-def _fetch_ogp_thumbnail(url: str) -> str:
-    """記事ページのOGP画像（og:image）を取得する。取得失敗時は空文字を返す。"""
+
+def _is_gachapara_content_image(url: str) -> bool:
+    """gachapara.jpドメインの画像で、広告・バナー・アイコン等でないものだけ許可する。"""
+    if not url or not url.startswith("http"):
+        return False
+    host = urlparse(url).netloc.lower()
+    if host != "gachapara.jp" and not host.endswith(".gachapara.jp"):
+        return False
+    low = url.lower()
+    return not any(h in low for h in _ARTICLE_IMG_EXCLUDE_HINTS)
+
+
+def _fetch_article_images(url: str, max_body_images: int = 6) -> list:
+    """記事ページのOGP画像＋本文内画像（gachapara.jpドメインのみ）を取得する。
+    先頭がOGP画像、以降が本文画像。取得失敗時は空リストを返す。"""
     try:
         resp = requests.get(url, headers={"User-Agent": "KpopWaveBot/1.0"}, timeout=10)
         if resp.status_code != 200:
-            return ""
-        m = _OGP_IMAGE_RE.search(resp.text)
-        if not m:
-            return ""
-        img = (m.group(1) or m.group(2) or "").strip()
-        return img if img.startswith("http") else ""
+            return []
+
+        html = resp.text
+        images = []
+
+        m = _OGP_IMAGE_RE.search(html)
+        if m:
+            og_img = (m.group(1) or m.group(2) or "").strip()
+            if _is_gachapara_content_image(og_img):
+                images.append(og_img)
+
+        for section_tag in ("article", "main"):
+            sm = re.search(rf"<{section_tag}[^>]*>([\s\S]*?)</{section_tag}>", html, re.IGNORECASE)
+            if not sm:
+                continue
+            for img_src in re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', sm.group(1), re.IGNORECASE):
+                resolved = urljoin(url, img_src)
+                if _is_gachapara_content_image(resolved) and resolved not in images:
+                    images.append(resolved)
+                    if len(images) >= max_body_images + 1:
+                        break
+            break
+
+        return images
     except Exception as exc:
-        logger.warning("OGP画像取得エラー [%s]: %s", url, exc)
-        return ""
+        logger.warning("記事画像取得エラー [%s]: %s", url, exc)
+        return []
 
 
 # ── AI判定（第2フィルター） ──────────────────────────────────────────────────
@@ -339,15 +376,17 @@ def collect_articles(app) -> int:
         skipped_ai = len(candidates) - len(approved_indices)
 
         # content_topicアカウント（非KPOP）は承認待ち画面での画像プレビュー用に
-        # OGP画像を収集時点で取得する（KPOPアカウントは要約生成時に取得する既存フローのまま）
-        thumbnails = {}
+        # OGP画像＋本文内商品画像を収集時点で取得する
+        # （KPOPアカウントは要約生成時に取得する既存フローのまま）
+        article_images = {}
         if content_topic:
             for idx in approved_indices:
-                thumbnails[idx] = _fetch_ogp_thumbnail(candidates[idx]["url"])
+                article_images[idx] = _fetch_article_images(candidates[idx]["url"])
 
         with app.app_context():
             for idx in approved_indices:
                 c = candidates[idx]
+                imgs = article_images.get(idx, [])
                 article = Article(
                     feed_source=c["feed_source"],
                     title=c["title"][:500] or "No Title",
@@ -356,7 +395,8 @@ def collect_articles(app) -> int:
                     raw_content=c["raw_content"],
                     status="pending",
                     account_id=c["account_id"],
-                    thumbnail_url=thumbnails.get(idx) or None,
+                    thumbnail_url=imgs[0] if imgs else None,
+                    image_urls=json.dumps(imgs[1:], ensure_ascii=False) if len(imgs) > 1 else None,
                 )
                 db.session.add(article)
                 seen_urls.add(c["url"])
