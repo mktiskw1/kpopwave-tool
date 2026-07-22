@@ -178,6 +178,7 @@ queued  → failed
 | Cloudflare Tunnel連携 | `launcher.py` + `start_cloudflare.bat` | トンネル起動時にURLを取得してDBの`app_base_url`に自動保存 |
 | 動画投稿前URL自動更新 | `threads_api.py` `_try_refresh_tunnel_url()` | 動画投稿直前にlocalhost:2480/metricsなどからTunnel URLを再取得・DB更新。取得失敗時は投稿スキップ |
 | スマホ対応UI | `base.html` | 768px以下で横スクロールナビバーを表示。JS不使用の純粋HTML実装 |
+| 投稿文フック管理 | `hooks.html` + `/hooks/<account_id>` | アカウントごとにフックフレーズをCRUD管理。`Hook`テーブル（`last_used_at`昇順のローテーション）から取得し、生成済み投稿文の先頭に機械的に連結する（AIプロンプト注入ではない） |
 
 ---
 
@@ -186,7 +187,7 @@ queued  → failed
 ### 絶対ルール
 - **URLなし・ハッシュタグなし・絵文字なし**
 - **文字数上限**: 動画=50文字、記事=150文字（超過時は最大3回再生成→強制切り詰め）
-- **必ずフックで始める**（フック前に何も置かない）
+- **必ずフックで始める**（フック前に何も置かない）。フックはAIプロンプトへの注入ではなく、`Hook`テーブルからローテーション取得したフレーズを生成済み本文の先頭に機械的に連結する方式（`summarizer.py`の`_get_next_hook`/`_attach_hook`）
 - 「〜です」「〜ます」禁止 → 口語体
 - 伝聞表現禁止:「〜とのこと」「記事によると」「〜と報じられている」
 - **グループ名またはメンバー名を必ず1つ以上含める**（Step1・Step2両方で厳守）
@@ -203,9 +204,11 @@ queued  → failed
 ### ポジティブ表現（推奨）
 `次元が違う` / `レベルが違う` / `完成度が高い` / `本当にうまい` / `かっこよすぎる` / `美しい` / `素敵すぎる`
 
-### フックカテゴリ（`_KPOP_HOOKS` in summarizer.py）
-毎回ランダムに1つ選択して渡す。7カテゴリ・計58種:
-衝撃・驚き型 / こっそり・共有型 / 問いかけ型 / 保存促進型 / 感情爆発型 / 限定・希少型 / 独り言・つぶやき型
+### フック管理（`Hook`テーブル + `/hooks/<account_id>`画面）
+KPOP（account_id=1）・ガチャ沼の住人（account_id=2）それぞれ管理画面からCRUD可能。
+`last_used_at`昇順（未使用が常に最優先）でローテーション取得し、取得したフレーズを
+生成済み投稿文の先頭に連結する。旧`_KPOP_HOOKS`辞書・AIプロンプトへの注入方式
+（`HOOK_SECTION`）は廃止済み。デフォルトで各10個のフレーズがプリセット投入される。
 
 ### ペルソナ
 25歳日本人女性、KPOPオタク歴8年、推しはaespa、Threadsで情報発信中
@@ -235,7 +238,8 @@ queued  → failed
 | 再投稿が動画しかできない | `requeue_article` に動画限定チェックがあった | 記事は `status="pending"` にリセットのみ、動画はファイル確認+再DL |
 | 画像が投稿されない | Googleプロフィール画像・小サイズ画像が混入 | `_is_valid_image_url()` でフィルタリング必須 |
 | 投稿文に「これガチなんですけど」が入る | 旧プロンプト例文の影響 | 禁止ワードリストに追加済み、例文も差し替え済み |
-| フックがビジネス系・ノウハウ系になる | 旧 `_HOOK_PATTERNS_BY_TIME` の名残 | `_KPOP_HOOKS`（カテゴリ別）に全面差し替え済み |
+| フックがビジネス系・ノウハウ系になる | 旧 `_HOOK_PATTERNS_BY_TIME` の名残 | `Hook`テーブルベースのローテーション方式に全面差し替え済み（`_KPOP_HOOKS`辞書は廃止） |
+| `nav_active_account_id`がNoneのページで500になる | 全アカウントを無効化すると`_selected_account_id()`がNoneを返す | `base.html`のアカウント依存リンク（フック管理等）は`{% if nav_active_account_id %}`で必ずガードする |
 | SQLiteでカラム追加エラー | `ALTER TABLE` の構文差異 | `_migrate_db()` パターンを使う（`ADD COLUMN` のみ可） |
 | 投稿文が文字数超過する | Step2の再生成上限に達した | `BODY_MAX_RETRIES=3` 後は末尾切り詰め（`…`付加） |
 | 動画投稿が静止画になる | Cloudflare TunnelのURLが変わったまま古いURLで投稿 | `_try_refresh_tunnel_url()` が投稿直前にURL再取得する。cloudflaredが停止中の場合は投稿スキップ |
