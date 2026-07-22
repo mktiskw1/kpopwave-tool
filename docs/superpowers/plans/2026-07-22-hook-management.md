@@ -316,24 +316,25 @@ with app.app_context():
 ```
 Expected: `account_id=1: 10件`・`account_id=2: 10件`、それぞれ設計書通りのフレーズが出力される。
 
-続けて`test_client()`でルートの動作を確認する（Global Constraintsに従い`from app import app`を使うこと）:
+続けて`test_client()`でルートの動作を確認する（Global Constraintsに従い`from app import app`を使うこと）。
+
+**注意**: `GET /hooks/<account_id>`（`hooks_page`）は`templates/hooks.html`（Task 3で作成予定）のレンダリングに依存するため、このタスクの時点ではまだ存在せず呼び出すと500エラーになる。このタスクではルートが登録されていることの確認と、テンプレートに依存しないPOST系（add/edit/delete、いずれも`jsonify`のみでレンダリング不要）の動作確認に留める。`GET /hooks/<account_id>`の完全な動作確認はTask 3で行う:
 
 ```bash
 venv/Scripts/python.exe -c "
 from app import app
 from database import Hook, db
 
+print('hooks_page ルート登録確認:', 'hooks_page' in app.view_functions)
+
 client = app.test_client()
-
-r = client.get('/hooks/1')
-print('GET /hooks/1:', r.status_code)
-
-r = client.get('/hooks/999')
-print('GET /hooks/999 (存在しない):', r.status_code)
 
 r = client.post('/hooks/1/add', data={'phrase': 'テストフック'})
 print('POST /hooks/1/add:', r.status_code, r.get_json())
 new_id = r.get_json()['id']
+
+r = client.post('/hooks/999999/add', data={'phrase': 'x'})
+print('POST /hooks/999999/add (存在しないアカウント):', r.status_code)
 
 r = client.post(f'/hooks/{new_id}/edit', data={'phrase': '編集後フック'})
 print('POST edit:', r.status_code, r.get_json())
@@ -341,11 +342,14 @@ print('POST edit:', r.status_code, r.get_json())
 r = client.post(f'/hooks/{new_id}/delete')
 print('POST delete:', r.status_code, r.get_json())
 
+r = client.post('/hooks/999999/delete')
+print('POST delete (存在しないid):', r.status_code)
+
 with app.app_context():
     print('削除後の存在確認:', db.session.get(Hook, new_id))
 "
 ```
-Expected: `GET /hooks/1`が200、`GET /hooks/999`が404、追加・編集・削除がいずれも`{'ok': True, ...}`、削除後の存在確認が`None`。
+Expected: `hooks_page ルート登録確認: True`、追加・編集・削除がいずれも`{'ok': True, ...}`、存在しないアカウント/idへのPOSTはいずれも404、削除後の存在確認が`None`。
 
 - [ ] **Step 6: Commit**
 
