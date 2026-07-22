@@ -69,6 +69,17 @@ class ThreadsAccount(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
+class Hook(db.Model):
+    __tablename__ = "hooks"
+
+    id = db.Column(db.Integer, primary_key=True)
+    account_id = db.Column(db.Integer, db.ForeignKey("threads_accounts.id"), nullable=False, index=True)
+    phrase = db.Column(db.String(200), nullable=False)
+    display_order = db.Column(db.Integer, nullable=False, default=0)
+    last_used_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 def get_active_account(app, account_id: int = None) -> dict:
     """Threadsアカウント情報を取得する。
 
