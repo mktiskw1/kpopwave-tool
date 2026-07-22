@@ -1271,7 +1271,11 @@ def switch_account(id):
     """サイドバーのアカウント切り替えドロップダウンから呼ばれる。セッションに保存して元のページへ戻る。"""
     account = ThreadsAccount.query.get_or_404(id)
     session["active_account_id"] = account.id
-    return redirect(request.referrer or url_for("index"))
+    referrer = request.referrer or ""
+    # /hooks/<id>はURLにaccount_idを直接含むため、他ページと違いセッション更新だけでは切り替わらない
+    if urlparse(referrer).path.startswith("/hooks/"):
+        return redirect(url_for("hooks_page", account_id=account.id))
+    return redirect(referrer or url_for("index"))
 
 
 @app.route("/hooks/<int:account_id>")
