@@ -430,9 +430,11 @@
   <a href="{{ url_for('learning') }}" class="{% if request.endpoint=='learning' %}active{% endif %}">
     <i class="bi bi-lightning-charge-fill"></i> 学習
   </a>
+  {% if nav_active_account_id %}
   <a href="{{ url_for('hooks_page', account_id=nav_active_account_id) }}" class="{% if request.endpoint=='hooks_page' %}active{% endif %}">
     <i class="bi bi-magic"></i> フック
   </a>
+  {% endif %}
   <a href="{{ url_for('settings') }}" class="{% if request.endpoint=='settings' %}active{% endif %}">
     <i class="bi bi-gear-fill"></i> 設定
   </a>
@@ -514,11 +516,13 @@
             <i class="bi bi-lightning-charge-fill"></i> 学習
           </a>
         </li>
+        {% if nav_active_account_id %}
         <li class="nav-item">
           <a class="nav-link {% if request.endpoint=='hooks_page' %}active{% endif %}" href="{{ url_for('hooks_page', account_id=nav_active_account_id) }}">
             <i class="bi bi-magic"></i> フック管理
           </a>
         </li>
+        {% endif %}
         <li class="nav-item">
           <a class="nav-link {% if request.endpoint=='settings' %}active{% endif %}" href="{{ url_for('settings') }}">
             <i class="bi bi-gear-fill"></i> 設定
