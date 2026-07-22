@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 import anthropic
 import requests
 
-from database import Article, BuzzPost, Setting, ThreadsAccount, db
+from database import Article, BuzzPost, Hook, Setting, ThreadsAccount, db
 
 logger = logging.getLogger(__name__)
 
@@ -48,46 +48,6 @@ _FETCH_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
-
-# フックパターン（KPOP用・カテゴリ別）
-_KPOP_HOOKS: dict[str, list[str]] = {
-    "衝撃・驚き型": [
-        "待って、これやばい。", "ちょっと待って、これ見て。", "え、この子なに。",
-        "は？天才なんだけど。", "待って無理。", "え、待って。", "ちょっとこれ見て。",
-        "やば、これは。", "うわ、やばいの見つけた。", "これ、レベルが違いすぎる。",
-        "ちょっと落ち着いて見て。", "待って、完成度が高すぎる。",
-    ],
-    "こっそり・共有型": [
-        "これ知ってる人少ないと思う。", "みんなにも見てほしい。", "布教させてください。",
-        "一人で見るのもったいない。", "こっそり共有。", "これ広まってほしい。",
-        "みんな見た？", "内緒で教える。", "これ埋もれてるのもったいない。",
-        "もっと評価されるべき。",
-    ],
-    "問いかけ型": [
-        "この子やばくない？", "これ好きな人いる？", "私だけじゃないよね？",
-        "なんでこんなに上手いの。", "これ見て何も思わない人いる？",
-        "好きにならない方が無理じゃない？", "これ反則じゃない？",
-        "こんなのずるくない？", "みんなどう思う？", "これやばいって思うの私だけ？",
-    ],
-    "保存促進型": [
-        "これは保存案件。", "保存して何回も見て。", "見返したくなるやつ。",
-        "保存推奨。", "あとで見返すやつ。", "保存しないと損。", "これはフォルダ行き。",
-    ],
-    "感情爆発型": [
-        "語彙力消えた。", "もう無理、好き。", "尊すぎる。", "何回見ても飽きない。",
-        "好きすぎてしんどい。", "沼確定。", "優勝。", "もう優勝でいい。",
-        "ぐうの音も出ない。", "完全にやられた。", "降参です。", "好きが止まらない。",
-    ],
-    "限定・希少型": [
-        "今のうちに見て。", "これ伸びる前に保存して。", "これは絶対見てほしい。",
-        "今見とくべき。", "後で絶対話題になる。", "見逃したら後悔する。", "今が旬。",
-    ],
-    "独り言・つぶやき型": [
-        "なんで知らなかったんだろ。", "もっと早く出会いたかった。", "今日のハイライトこれ。",
-        "これ見れただけで満足。", "今日もありがとう。", "だから推しはやめられない。",
-        "これだから沼から出られない。",
-    ],
-}
 
 # ランダム表現選択リスト（カテゴリ別）
 EXPRESSIONS_VISUAL = [
@@ -212,6 +172,32 @@ def _title_only_summary(title: str, body_max: int) -> str:
     if len(title) <= body_max:
         return title
     return title[: body_max - 1] + "…"
+
+
+def _get_next_hook(app, account_id: int) -> str | None:
+    """アカウントのフックをローテーションで1件取得し、last_used_atを更新する。
+    未使用のフックが常に最優先（last_used_at IS NULLはASC順で先頭に来る）。"""
+    with app.app_context():
+        hook = (
+            Hook.query.filter_by(account_id=account_id)
+            .order_by(Hook.last_used_at.asc(), Hook.display_order.asc())
+            .first()
+        )
+        if not hook:
+            return None
+        hook.last_used_at = datetime.utcnow()
+        db.session.commit()
+        return hook.phrase
+
+
+def _attach_hook(hook: str | None, body: str, body_max: int) -> str:
+    """フックを本文の先頭に連結する。上限超過時は安全側で切り詰める。"""
+    if not hook:
+        return body
+    combined = hook + body
+    if len(combined) > body_max:
+        combined = combined[:body_max - 1] + "…"
+    return combined
 
 
 def _detect_group_name(feed_source: str, title: str) -> str:
@@ -405,9 +391,6 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
     logger.info("[summarize_article] article=%d style=%r scheduled_at=%r", article_id, style, scheduled_at)
     style_conf = _STYLE_PROMPTS.get(style, _STYLE_PROMPTS["つぶやき型"])
     style_tone = style_conf["tone"]
-    all_hooks = [h for hooks in _KPOP_HOOKS.values() for h in hooks]
-    selected_hook = random.choice(all_hooks)
-    logger.info("[summarize_article] selected_hook=%r", selected_hook)
     time_hint  = _get_time_style_hint()
 
     # ── 今回使う表現をランダムに選択 ────────────────────────────────────────
@@ -473,6 +456,7 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
         thumbnail_url = article.thumbnail_url or ""
         is_ja_src     = _is_japanese_source(feed_source)
         content_type  = article.content_type or "article"
+        article_account_id = article.account_id
         content_topic = ""
         if article.account_id:
             acc = db.session.get(ThreadsAccount, article.account_id)
@@ -481,10 +465,11 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
 
     is_video_post = (content_type == "video")
     body_max = BODY_MAX_VIDEO if is_video_post else BODY_MAX_ARTICLE
+    hook = _get_next_hook(app, article_account_id) if article_account_id else None
 
     # ── AI生成フラグ確認（無効ならタイトルそのままで即保存して終了） ──────────
     if not _ai_summary_enabled(app):
-        post_text = _title_only_summary(title, body_max)
+        post_text = _attach_hook(hook, _title_only_summary(title, body_max), body_max)
         with app.app_context():
             art = db.session.get(Article, article_id)
             if art:
@@ -548,9 +533,7 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
                 max_tokens=200,
                 messages=[{"role": "user", "content": generic_prompt}],
             )
-            post_text = msg.content[0].text.strip()
-            if len(post_text) > body_max:
-                post_text = post_text[:body_max - 1] + "…"
+            post_text = _attach_hook(hook, msg.content[0].text.strip(), body_max)
         except Exception as exc:
             logger.error("Generic summarize error for article %d: %s", article_id, exc, exc_info=True)
             _save_error(app, article_id, f"{type(exc).__name__}: {exc}")
@@ -576,14 +559,6 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
     group_hint = f"・「{group_name}」の名前を自然に含めること" if group_name else ""
 
     # ── 共通ブロック ───────────────────────────────────────────────────────
-    HOOK_SECTION = (
-        f"━━ 冒頭フック（厳守・最重要） ━━\n"
-        f"今回の冒頭フック: 「{selected_hook}」\n"
-        f"このフックで投稿文を必ず始めること。フックより前に何も置かない。\n"
-        f"記事の内容にどうしても合わない場合のみ自分でフックを考えてよい。\n"
-        f"ただし必ずフックで始めること。"
-    )
-
     STRUCTURE_SECTION = (
         "━━ 投稿構造 ━━\n"
         "1行目：フックで引き込む\n"
@@ -750,7 +725,6 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
             f"{PERSONA}\n"
             f"この動画を見た瞬間の一言リアクションをそのまま書く。動画の内容説明は絶対にしない。感情だけ。\n\n"
             f"【動画タイトル】{title}\n\n"
-            f"{HOOK_SECTION}\n\n"
             f"━━ 出力ルール ━━\n"
             f"・フック（1行目）＋一言だけ。それ以上は書かない\n"
             f"・{body_max}文字以内（厳守）\n"
@@ -776,7 +750,6 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
             f"{PERSONA}\n"
             f"動画の存在を知って「やばい」と思っている自分として書く。内容を詳しく説明せず、グループ名・動画タイトルと感情表現だけで伝える。\n\n"
             f"【動画情報】\nタイトル: {title}\n{article_body[:1000]}\n\n"
-            f"{HOOK_SECTION}\n\n"
             f"{STRUCTURE_SECTION}\n\n"
             f"━━ スタイル: {style} ━━\n{style_tone}"
             f"{time_section}\n"
@@ -795,7 +768,6 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
         step1_prompt = (
             f"{PERSONA}\n"
             f"このランキングを自分が直接見つけた情報として書く。「〜と発表された」など伝聞表現は一切不可。\n\n"
-            f"{HOOK_SECTION}\n\n"
             f"━━ 出力フォーマット ━━\n"
             f"・1行目: フックで始まる導入一言\n"
             f"・続き: 下記ランキングデータをそのまま全行出力（省略禁止）\n"
@@ -817,7 +789,6 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
             f"{PERSONA}\n"
             f"このニュース・出来事を自分が直接体験・発見したかのように書く。記事・情報源は存在しない。完全に一人称の意見・感情として書く。\n\n"
             f"【情報】\nタイトル: {title}\n{article_body[:2000]}\n\n"
-            f"{HOOK_SECTION}\n\n"
             f"{STRUCTURE_SECTION}\n\n"
             f"━━ スタイル: {style} ━━\n{style_tone}"
             f"{time_section}\n"
@@ -844,7 +815,6 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
         if is_video_post:
             step2_base = (
                 "この文章から余計な説明を全部削って、感情だけ残してください。\n"
-                "【厳守】1行目のフックフレーズは絶対に変えないこと。そのまま残す。\n"
                 "一言で言い切る。フック+感情の一言だけ。\n"
                 f"絵文字なし・ハッシュタグなし・URLなし。必ず{body_max}文字以内。\n"
                 "【絶対厳守】グループ名・メンバー名・曲名・動画タイトルのいずれか最低1つを必ず残すこと。固有名詞が一つもない場合は出力禁止。\n"
@@ -854,7 +824,6 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
         else:
             step2_base = (
                 "この文章を25歳の日本人女性が友達にLINEで送るメッセージに変換してください。\n"
-                "【厳守】1行目のフックフレーズは絶対に変えないこと。そのまま残す。\n"
                 "・説明文を感情に変える\n"
                 "・長い文を短く切る\n"
                 "・AIっぽい言い回しを口語に変える\n"
@@ -883,7 +852,7 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
             logger.warning("再生成上限到達、強制切り詰め: article=%d", article_id)
 
         # ── DB保存（ハッシュタグ・URLなし） ──────────────────────────────────
-        post_text = summary_text
+        post_text = _attach_hook(hook, summary_text, body_max)
 
         with app.app_context():
             art = db.session.get(Article, article_id)
