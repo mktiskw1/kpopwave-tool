@@ -1,0 +1,140 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0 fw-bold">フック管理 — {{ account.account_label }}</h4>
+</div>
+
+<div class="card p-3 mb-3">
+  <form id="add-form" class="row g-2 align-items-end" onsubmit="return addHook(event)">
+    <div class="col">
+      <label style="font-size:.78rem;color:var(--text-muted);display:block;margin-bottom:2px">新しいフレーズ</label>
+      <input type="text" id="add-phrase" class="form-control form-control-sm" placeholder="例: これマジで欲しい…" required maxlength="200">
+    </div>
+    <div class="col-auto">
+      <button type="submit" class="btn btn-sm btn-accent">追加</button>
+    </div>
+  </form>
+</div>
+
+<div class="table-responsive">
+  <table class="table table-hover mb-0" style="font-size:.85rem">
+    <thead>
+      <tr>
+        <th style="width:60px"></th>
+        <th>フレーズ</th>
+        <th style="width:180px">最終使用日時</th>
+        <th style="width:110px"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for h in hooks %}
+      <tr>
+        <td>
+          {% if h.id == next_hook_id %}
+          <span class="badge" style="background:var(--accent)">次に使う</span>
+          {% endif %}
+        </td>
+        <td>
+          <span id="hook-display-{{ h.id }}">{{ h.phrase }}</span>
+          <span id="hook-edit-{{ h.id }}" style="display:none">
+            <input type="text" id="hook-input-{{ h.id }}" class="form-control form-control-sm d-inline-block"
+                   value="{{ h.phrase }}" maxlength="200" style="width:260px;font-size:.85rem">
+            <button type="button" class="btn btn-sm py-0 px-1 btn-success" style="font-size:.72rem"
+                    onclick="saveHook({{ h.id }})">✓</button>
+            <button type="button" class="btn btn-sm py-0 px-1 btn-outline-secondary" style="font-size:.72rem"
+                    onclick="cancelEditHook({{ h.id }})">✕</button>
+          </span>
+        </td>
+        <td style="color:var(--text-muted)">
+          {{ h.last_used_at | utc_to_jst if h.last_used_at else "未使用" }}
+        </td>
+        <td class="text-end">
+          <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2" style="font-size:.75rem"
+                  onclick="startEditHook({{ h.id }})">
+            <i class="bi bi-pencil"></i>
+          </button>
+          <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" style="font-size:.75rem"
+                  onclick="deleteHook({{ h.id }})">
+            <i class="bi bi-trash3"></i>
+          </button>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="text-muted text-center py-3">フックが登録されていません</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+function addHook(event) {
+  event.preventDefault();
+  const input = document.getElementById("add-phrase");
+  const phrase = input.value.trim();
+  if (!phrase) return false;
+  fetch(window.location.pathname + "/add", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ phrase: phrase }).toString(),
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        location.reload();
+      } else {
+        alert(d.error || "追加に失敗しました");
+      }
+    })
+    .catch(() => alert("追加に失敗しました"));
+  return false;
+}
+
+function startEditHook(id) {
+  document.getElementById("hook-display-" + id).style.display = "none";
+  document.getElementById("hook-edit-" + id).style.display = "inline-block";
+  const input = document.getElementById("hook-input-" + id);
+  input.focus();
+  input.select();
+}
+function cancelEditHook(id) {
+  document.getElementById("hook-edit-" + id).style.display = "none";
+  document.getElementById("hook-display-" + id).style.display = "";
+}
+function saveHook(id) {
+  const input = document.getElementById("hook-input-" + id);
+  const phrase = input.value.trim();
+  if (!phrase) return;
+  fetch(`/hooks/${id}/edit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ phrase: phrase }).toString(),
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        location.reload();
+      } else {
+        alert(d.error || "更新に失敗しました");
+      }
+    })
+    .catch(() => alert("更新に失敗しました"));
+}
+function deleteHook(id) {
+  if (!confirm("このフックを削除しますか？")) return;
+  fetch(`/hooks/${id}/delete`, { method: "POST" })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        location.reload();
+      } else {
+        alert(d.error || "削除に失敗しました");
+      }
+    })
+    .catch(() => alert("削除に失敗しました"));
+}
+</script>
+{% endblock %}
