@@ -126,19 +126,25 @@ _ARTICLE_IMG_EXCLUDE_HINTS = [
 ]
 
 
-def _is_gachapara_content_image(url: str) -> bool:
-    """gachapara.jpドメインの画像で、広告・バナー・アイコン等でないものだけ許可する。"""
+def _registrable_domain(host: str) -> str:
+    """ホスト名の登録ドメイン部分（末尾2ラベル）を返す。例: hobby.dengeki.com → dengeki.com"""
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _is_same_site_content_image(url: str, allowed_domain: str) -> bool:
+    """記事と同じサイト（登録ドメインが一致）の画像で、広告・バナー・アイコン等でないものだけ許可する。"""
     if not url or not url.startswith("http"):
         return False
     host = urlparse(url).netloc.lower()
-    if host != "gachapara.jp" and not host.endswith(".gachapara.jp"):
+    if host != allowed_domain and not host.endswith("." + allowed_domain):
         return False
     low = url.lower()
     return not any(h in low for h in _ARTICLE_IMG_EXCLUDE_HINTS)
 
 
 def _fetch_article_images(url: str, max_body_images: int = 6) -> list:
-    """記事ページのOGP画像＋本文内画像（gachapara.jpドメインのみ）を取得する。
+    """記事ページのOGP画像＋本文内画像（記事と同じ登録ドメインのみ）を取得する。
     先頭がOGP画像、以降が本文画像。取得失敗時は空リストを返す。"""
     try:
         resp = requests.get(url, headers={"User-Agent": "KpopWaveBot/1.0"}, timeout=10)
@@ -147,11 +153,12 @@ def _fetch_article_images(url: str, max_body_images: int = 6) -> list:
 
         html = resp.text
         images = []
+        allowed_domain = _registrable_domain(urlparse(url).netloc.lower())
 
         m = _OGP_IMAGE_RE.search(html)
         if m:
             og_img = (m.group(1) or m.group(2) or "").strip()
-            if _is_gachapara_content_image(og_img):
+            if _is_same_site_content_image(og_img, allowed_domain):
                 images.append(og_img)
 
         for section_tag in ("article", "main"):
@@ -160,7 +167,7 @@ def _fetch_article_images(url: str, max_body_images: int = 6) -> list:
                 continue
             for img_src in re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', sm.group(1), re.IGNORECASE):
                 resolved = urljoin(url, img_src)
-                if _is_gachapara_content_image(resolved) and resolved not in images:
+                if _is_same_site_content_image(resolved, allowed_domain) and resolved not in images:
                     images.append(resolved)
                     if len(images) >= max_body_images + 1:
                         break
