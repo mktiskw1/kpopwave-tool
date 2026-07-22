@@ -648,7 +648,23 @@ print('account_id=2のとき /hooks/2 リンクあり:', '/hooks/2' in html)
 ```
 Expected: 両方とも`True`。
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: 既存ページ（`/hooks/1`自体を含む）が問題なくレンダリングされることも確認する**
+
+（base.htmlは全ページ共通レイアウトのため、他のページも壊れていないことを確認する）
+
+```bash
+venv/Scripts/python.exe -c "
+from app import app
+
+client = app.test_client()
+for path in ('/', '/pending', '/queue', '/settings', '/hooks/1', '/hooks/2'):
+    r = client.get(path)
+    print(path, '->', r.status_code)
+"
+```
+Expected: いずれも`200`。
+
+- [ ] **Step 5: Commit**
 
 ```bash
 git add templates/base.html
