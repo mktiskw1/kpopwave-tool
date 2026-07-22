@@ -1,0 +1,30 @@
+(1323, '電撃ホビーウェブ（食玩）', 'メガカイリュー、黒いメガレックウザ、10まんボルトを出してい', True, 5)
+  thumb: https://hobby.dengeki.com/ss/hobby/2026/07/card_omrdWn8CEfVgk3g4m4B7l0DqgCAvtMTI_I6_vDOAyAUe91_3-AysNImYgG-f-veud.jpg
+(1322, '電撃ホビーウェブ（食玩）', '『ちいかわ』のコレクションカード付きウエハースが登場！メタリ', True, 3)
+  thumb: https://hobby.dengeki.com/ss/hobby/2026/07/DTWcard_wauDDkx1_6ZOIg8ij7U0BujNQMxtgSLj_YJi5A00XtQPY2SYW-0ehDcJGHFj4AFPS.jpg
+(1321, '電撃ホビーウェブ（食玩）', '「IVE」の4連フォトカードつきチョコクランチが登場！メンバ', True, 6)
+  thumb: https://hobby.dengeki.com/ss/hobby/2026/07/samu_-yKO3btHW2PhY6XjXJpyyqkoULhPN3x1_vse93xux2tl-kFryVeE7-h9mkuSedWhI.jpg
+(1320, '電撃ホビーウェブ（食玩）', '『ドラゴンボール』カード付きスナック「イタジャガ」の第10弾', True, 6)
+  thumb: https://hobby.dengeki.com/ss/hobby/2026/07/samu_wpFPddb8TOSMVMRDsffAHhI6Ia95WtQ7_qJQKXnm6OJSX6x6WlhFyf2W7ZfJPv3_7.jpg
+(1319, '電撃ホビーウェブ（食玩）', 'ヒトハ・フタバのグミに出会えたらラッキー！『映画ちいかわ 人', True, 4)
+  thumb: https://hobby.dengeki.com/ss/hobby/2026/07/ae46b1f460ee46f789c27b264a6cb421_FT6KBo1QHmbY1EPOMSxNRKo7LM0J_q_B_RZVgwQ6jfFUQ4MarvrcDgabzLSzfRLAt.jpg
+(1318, '電撃ホビーウェブ（食玩）', '「BT21」のダイカットステッカー付きスナックが登場！みんな', True, 4)
+  thumb: https://hobby.dengeki.com/ss/hobby/2026/07/samu_F09qJ3O13m8Q5F5qycxp_f-0ycDT1C5m_s4MoNOrXpNJaX39nVzXMpuPfMAk2Sw8n.jpg
+(1317, '電撃ホビーウェブ（食玩）', 'オリジナルネームプレートが作れる『名探偵プリキュア！』の食玩', True, 6)
+  thumb: https://hobby.dengeki.com/ss/hobby/2026/07/samu_HuWKLlHvdPHtj0OKeLqcB3Zcs4Pliny9_VhHST0iZ6yPcabWTaYYdmiIJvDfyNZ8C.jpg
+(1316, '電撃ホビーウェブ（食玩）', '『超宇宙刑事ギャバン インフィニティ』の「ミニプラ」第2弾と', True, 6)
+  thumb: https://hobby.dengeki.com/ss/hobby/2026/07/sa_0zxd1Uh1H5FKiFvwR8kN3zUPxeNhHs70_-y3wMMJdlSceG2Zzohi39rOInNXpxaRq.jpg
+(1315, '電撃ホビーウェブ（食玩）', '『ブルーロック』がシール付きウエハース「にふぉるめーしょん」', True, 6)
+  thumb: https://hobby.dengeki.com/ss/hobby/2026/07/samu_hDIDgl_GECN9US6GoljxLl0QmXrFAUTu_8zhdizEbLsmJqVMySBcu_jCNiFtHTiKu.jpg
+(1314, '電撃ホビーウェブ（食玩）', '『トイ・ストーリー』などのピクサー作品の名場面もラインナップ', True, 6)
+  thumb: https://hobby.dengeki.com/ss/hobby/2026/07/samu_h-NO0TjhDg2ScEZVX5ALD8QLqoAJAXeV_onhLNM0bYIm-4t7tr66aVpWBijqd-PGJ.jpg
+(1310, 'ガチャパラ', '『サンリオキャラクターズ』ふわふわフリルがかわいいカプセルト', True, 6)
+  thumb: https://gachapara.jp/wp-content/uploads/2026/07/26071611.jpg
+(1309, 'ガチャパラ', 'タイ発の人気キャラクター『バターベア』がカプセルトイとして日', True, 6)
+  thumb: https://gachapara.jp/wp-content/uploads/2026/07/26071621.jpg
+(1308, 'ガチャパラ', '『ムーミン\u3000アソートコレクション』がカプセルトイに登場！全国', True, 6)
+  thumb: https://gachapara.jp/wp-content/uploads/2026/07/main.jpg
+(1307, 'ガチャパラ', 'サンリオキャラクターズとMUZIK TIGERがコラボ！カプ', True, 6)
+  thumb: https://gachapara.jp/wp-content/uploads/2026/07/26072131.jpg
+(1306, 'ガチャパラ', '「なかよしラッコ\u3000フロッキーキーホルダー」カプセルトイで発売', True, 6)
+  thumb: https://gachapara.jp/wp-content/uploads/2026/07/26072211.jpg
