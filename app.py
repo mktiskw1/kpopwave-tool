@@ -13,7 +13,7 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, sen
 from sqlalchemy import or_
 
 from config import Config
-from database import Article, BuzzPost, Comment, Setting, ThreadsAccount, get_active_account, db
+from database import Article, BuzzPost, Comment, Hook, Setting, ThreadsAccount, get_active_account, db
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -170,6 +170,28 @@ def _migrate_db():
                 conn.execute(text(f"ALTER TABLE comments ADD COLUMN {col} {typedef}"))
                 conn.commit()
                 logger.info("DB migration: comments.%s added", col)
+
+    # hooks テーブル: デフォルトフックの初回投入
+    if Hook.query.count() == 0:
+        default_hooks = {
+            1: [
+                "待って、これやばい。", "え、この子なに。", "これ知ってる人少ないと思う。",
+                "布教させてください。", "好きにならない方が無理じゃない？", "これ好きな人いる？",
+                "保存推奨。", "語彙力消えた。", "今のうちに見て。", "なんで知らなかったんだろ。",
+            ],
+            2: [
+                "これマジで欲しい…", "新作きてる…！", "見つけた瞬間テンション上がった。",
+                "これは即回さなきゃ。", "ガチャ勢は絶対チェックして。", "今回のクオリティやばい。",
+                "うわ、これ欲しすぎる。", "推しキャラのガチャ来た…！", "この造形細かすぎない？",
+                "コンプリートしたくなる…",
+            ],
+        }
+        for account_id, phrases in default_hooks.items():
+            for order, phrase in enumerate(phrases):
+                db.session.add(Hook(account_id=account_id, phrase=phrase, display_order=order))
+        db.session.commit()
+        logger.info("DB migration: hooks にデフォルトフックを投入 (account_id=1: %d件, account_id=2: %d件)",
+                    len(default_hooks[1]), len(default_hooks[2]))
 
 
 def _init_default_settings():
@@ -1250,6 +1272,50 @@ def switch_account(id):
     account = ThreadsAccount.query.get_or_404(id)
     session["active_account_id"] = account.id
     return redirect(request.referrer or url_for("index"))
+
+
+@app.route("/hooks/<int:account_id>")
+def hooks_page(account_id):
+    account = ThreadsAccount.query.get_or_404(account_id)
+    hooks = (
+        Hook.query.filter_by(account_id=account_id)
+        .order_by(Hook.last_used_at.asc(), Hook.display_order.asc())
+        .all()
+    )
+    next_hook_id = hooks[0].id if hooks else None
+    return render_template("hooks.html", account=account, hooks=hooks, next_hook_id=next_hook_id)
+
+
+@app.route("/hooks/<int:account_id>/add", methods=["POST"])
+def add_hook(account_id):
+    ThreadsAccount.query.get_or_404(account_id)
+    phrase = (request.form.get("phrase") or "").strip()
+    if not phrase:
+        return jsonify({"ok": False, "error": "フレーズを入力してください"}), 400
+    max_order = db.session.query(db.func.max(Hook.display_order)).filter(Hook.account_id == account_id).scalar()
+    hook = Hook(account_id=account_id, phrase=phrase, display_order=(max_order or 0) + 1)
+    db.session.add(hook)
+    db.session.commit()
+    return jsonify({"ok": True, "id": hook.id})
+
+
+@app.route("/hooks/<int:id>/edit", methods=["POST"])
+def edit_hook(id):
+    hook = Hook.query.get_or_404(id)
+    phrase = (request.form.get("phrase") or "").strip()
+    if not phrase:
+        return jsonify({"ok": False, "error": "フレーズを入力してください"}), 400
+    hook.phrase = phrase
+    db.session.commit()
+    return jsonify({"ok": True, "phrase": hook.phrase})
+
+
+@app.route("/hooks/<int:id>/delete", methods=["POST"])
+def delete_hook(id):
+    hook = Hook.query.get_or_404(id)
+    db.session.delete(hook)
+    db.session.commit()
+    return jsonify({"ok": True})
 
 
 @app.route("/auth/threads/manual")
