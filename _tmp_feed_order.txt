@@ -1,0 +1,14 @@
+0: {'name': 'Soompi', 'url': 'https://www.soompi.com/feed/'}
+1: {'name': 'Koreaboo', 'url': 'https://www.koreaboo.com/feed/'}
+2: {'name': 'Hellokpop', 'url': 'https://www.hellokpop.com/feed/'}
+3: {'name': 'KpopPost', 'url': 'https://kpoppost.com/feed/'}
+4: {'name': 'NME K-Pop', 'url': 'https://www.nme.com/tag/k-pop/feed'}
+5: {'name': 'AsianJunkie', 'url': 'https://www.asianjunkie.com/feed/'}
+6: {'name': 'TheBiasList', 'url': 'https://thebiaslist.com/feed/'}
+7: {'name': 'KpopReviewed', 'url': 'https://kpopreviewed.com/feed/'}
+8: {'name': 'SeoulBeats', 'url': 'https://seoulbeats.com/feed/'}
+9: {'name': 'Kstyle', 'url': 'https://news.google.com/rss/search?q=site:kstyle.com&hl=ja&gl=JP&ceid=JP:ja'}
+10: {'name': 'BARKS', 'url': 'https://barks.jp/feed/'}
+11: {'name': 'Daebak Tokyo', 'url': 'https://daebak.tokyo/feed/'}
+12: {'name': 'ガチャパラ', 'url': 'https://gachapara.jp/feed/', 'account_id': 2, 'lang': 'ja'}
+13: {'name': '電撃ホビーウェブ（食玩）', 'url': 'https://hobby.dengeki.com/tag/syokugan/feed/', 'account_id': 2, 'lang': 'ja'}

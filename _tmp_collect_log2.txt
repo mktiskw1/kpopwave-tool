@@ -1,0 +1,27 @@
+2026-07-27 23:49:59,751 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 400 Bad Request"
+2026-07-27 23:49:59,752 ERROR rss_collector: AI判定エラー（フォールバック: 全件通過）: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011CdSkN5XidcmSbDarhTspj'}
+2026-07-27 23:49:59,767 INFO rss_collector: [Soompi][en] 追加:1 除外(日付):0 除外(KW):37 除外(AI):0 重複:12
+2026-07-27 23:50:01,018 INFO rss_collector: [Koreaboo] 追加:0 除外(日付):0 除外(KW):4 重複:6
+2026-07-27 23:50:01,346 INFO rss_collector: [Hellokpop] 追加:0 除外(日付):0 除外(KW):1 重複:2
+2026-07-27 23:50:01,730 INFO rss_collector: [KpopPost] 追加:0 除外(日付):7 除外(KW):3 重複:0
+2026-07-27 23:50:02,707 INFO rss_collector: [NME K-Pop] 追加:0 除外(日付):10 除外(KW):0 重複:0
+2026-07-27 23:50:03,053 INFO rss_collector: [AsianJunkie] 追加:0 除外(日付):1 除外(KW):7 重複:2
+2026-07-27 23:50:03,829 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 400 Bad Request"
+2026-07-27 23:50:03,830 ERROR rss_collector: AI判定エラー（フォールバック: 全件通過）: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011CdSkNPEqGsRY6HrCgBFX2'}
+2026-07-27 23:50:03,840 INFO rss_collector: [TheBiasList][en] 追加:2 除外(日付):0 除外(KW):5 除外(AI):0 重複:3
+2026-07-27 23:50:04,070 INFO rss_collector: [KpopReviewed] 追加:0 除外(日付):8 除外(KW):1 重複:1
+2026-07-27 23:50:05,574 INFO rss_collector: [SeoulBeats] 追加:0 除外(日付):9 除外(KW):1 重複:0
+2026-07-27 23:50:06,650 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 400 Bad Request"
+2026-07-27 23:50:06,651 ERROR rss_collector: AI判定エラー（フォールバック: 全件通過）: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011CdSkNbY1Me4vi2mjBJV8a'}
+2026-07-27 23:50:06,664 INFO rss_collector: [Kstyle][en] 追加:1 除外(日付):0 除外(KW):33 除外(AI):0 重複:16
+2026-07-27 23:50:08,309 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 400 Bad Request"
+2026-07-27 23:50:08,310 ERROR rss_collector: AI判定エラー（フォールバック: 全件通過）: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011CdSkNhnJQrQkdKVszDnyo'}
+2026-07-27 23:50:08,318 INFO rss_collector: [BARKS][en] 追加:1 除外(日付):0 除外(KW):2 除外(AI):0 重複:7
+2026-07-27 23:50:08,878 INFO rss_collector: [Daebak Tokyo] 追加:0 除外(日付):0 除外(KW):5 重複:5
+2026-07-27 23:50:09,991 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 400 Bad Request"
+2026-07-27 23:50:09,992 ERROR rss_collector: AI判定エラー（フォールバック: 全件通過）: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011CdSkNqnWQ9VnDBNyeLLbT'}
+2026-07-27 23:50:10,236 INFO rss_collector: [ガチャパラ][ja] 追加:2 除外(日付):0 除外(KW):0 除外(AI):0 重複:8
+2026-07-27 23:50:12,257 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 400 Bad Request"
+2026-07-27 23:50:12,257 ERROR rss_collector: AI判定エラー（フォールバック: 全件通過）: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'}, 'request_id': 'req_011CdSkP1WegNyVY4AvremoF'}
+2026-07-27 23:50:12,323 INFO rss_collector: [電撃ホビーウェブ（食玩）][ja] 追加:1 除外(日付):0 除外(KW):0 除外(AI):0 重複:9
+2026-07-27 23:50:12,323 INFO rss_collector: 収集完了 — 新規追加合計: 8 件

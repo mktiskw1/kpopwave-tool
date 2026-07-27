@@ -1,0 +1,34 @@
+===== gachapara =====
+bozo: False None
+status: 200
+etag: None
+modified: None
+total entries: 10
+0 parsed=2026-07-27 07:46:54 raw_pubdate='Mon, 27 Jul 2026 07:46:54 +0000' link=https://gachapara.jp/14827/ title='カプセルトイ『体格ブラザーズ ビッグボディー コレクション』全国のカプセル自販機で順次発売'
+1 parsed=2026-07-27 07:23:39 raw_pubdate='Mon, 27 Jul 2026 07:23:39 +0000' link=https://gachapara.jp/14825/ title='『パ・リーグ6球団 カラフルマルチチャーム』の販売を開始！ガチャガチャの森・Pon限定で販売'
+2 parsed=2026-07-27 07:01:40 raw_pubdate='Mon, 27 Jul 2026 07:01:40 +0000' link=https://gachapara.jp/14790/ title='『パ・リーグ6球団 応援バットキーホルダー』の販売を開始！ガチャガチャの森・Pon限定で販売'
+3 parsed=2026-07-24 08:08:49 raw_pubdate='Fri, 24 Jul 2026 08:08:49 +0000' link=https://gachapara.jp/14787/ title='「Sky 星を紡ぐ子どもたち めじるしアクセサリー™」発売！ガシャポン®との大人気コラボ'
+4 parsed=2026-07-24 07:43:29 raw_pubdate='Fri, 24 Jul 2026 07:43:29 +0000' link=https://gachapara.jp/14769/ title='『銀河特急 ミルキー☆サブウェイ』のポーチ＆バッグコレクションが登場！全国のカプセルトイ売場にて'
+5 parsed=2026-07-23 07:47:52 raw_pubdate='Thu, 23 Jul 2026 07:47:52 +0000' link=https://gachapara.jp/14767/ title='「KOROKORO SNOOPY\u3000ミニ！ラウンドポーチ」がカプセルトイに登場！全国のカプセルトイ売場'
+6 parsed=2026-07-23 07:43:02 raw_pubdate='Thu, 23 Jul 2026 07:43:02 +0000' link=https://gachapara.jp/14764/ title='「セサミストリート ミニランチBOXキーホルダー」全国のカプセルトイ自販機にて順次発売'
+7 parsed=2026-07-22 06:08:52 raw_pubdate='Wed, 22 Jul 2026 06:08:52 +0000' link=https://gachapara.jp/14745/ title='セサミストリートデザインの「レコード盤風フラットポーチ」全国のカプセルトイ自販機にて順次発売'
+8 parsed=2026-07-22 05:58:50 raw_pubdate='Wed, 22 Jul 2026 05:58:50 +0000' link=https://gachapara.jp/14743/ title='「なかよしラッコ\u3000フロッキーキーホルダー」カプセルトイで発売！2匹セットのかわいいキーホルダー'
+9 parsed=2026-07-21 07:54:58 raw_pubdate='Tue, 21 Jul 2026 07:54:58 +0000' link=https://gachapara.jp/14720/ title='サンリオキャラクターズとMUZIK TIGERがコラボ！カプセルサイズのぬいぐるみマスコットが登場'
+
+===== dengeki =====
+bozo: False None
+status: 200
+etag: None
+modified: None
+total entries: 10
+0 parsed=2026-07-27 09:00:00 raw_pubdate='Mon, 27 Jul 2026 09:00:00 +0000' link=https://hobby.dengeki.com/reviews/3087425/ title='ガオレンジャー“幻”のパワーアニマルと精霊王が史上初の商品化!!バンダイ「SMPパワーアニマルシリー'
+1 parsed=2026-07-26 10:00:00 raw_pubdate='Sun, 26 Jul 2026 10:00:00 +0000' link=https://hobby.dengeki.com/news/3088470/ title='日曜劇場「VIVANT」より、ステッカー付きグミが登場！乃木たちのセリフやタイトルロゴなどをデザイン'
+2 parsed=2026-07-26 01:00:00 raw_pubdate='Sun, 26 Jul 2026 01:00:00 +0000' link=https://hobby.dengeki.com/event/3091609/ title='「超電磁ロボ コン・バトラーV Ver.2.0」、「VRVロボ」などのSMPや、装動「仮面ライダーゼ'
+3 parsed=2026-07-24 23:30:00 raw_pubdate='Fri, 24 Jul 2026 23:30:00 +0000' link=https://hobby.dengeki.com/news/3088360/ title='『角醒ハンター オメガホーン』より、キーアイテム「エゴルギア」が食玩に登場！別売りの「角獣覚醒器DX'
+4 parsed=2026-07-24 09:30:00 raw_pubdate='Fri, 24 Jul 2026 09:30:00 +0000' link=https://hobby.dengeki.com/news/3088455/ title='『映画ちいかわ 人魚の島のひみつ』のコレクションカード付きウエハースが登場！映画の登場キャラクターた'
+5 parsed=2026-07-24 05:00:00 raw_pubdate='Fri, 24 Jul 2026 05:00:00 +0000' link=https://hobby.dengeki.com/news/3088486/ title='『マインクラフト』のマスコット付きビスケットが登場！ドロップアイテムをデザインしたミニチャーム付き！'
+6 parsed=2026-07-23 22:30:00 raw_pubdate='Thu, 23 Jul 2026 22:30:00 +0000' link=https://hobby.dengeki.com/news/3088219/ title='限定スペシャルカラーのエモルギアが貰えるキャンペーンも実施！「PROJECT R.E.D. チョコ」'
+7 parsed=2026-07-23 14:30:00 raw_pubdate='Thu, 23 Jul 2026 14:30:00 +0000' link=https://hobby.dengeki.com/news/3088016/ title='シロノワールやブーツ型グラスが可愛いクリームソーダなど、人気メニューをミニチュア化！「コメダ珈琲店」'
+8 parsed=2026-07-23 06:30:00 raw_pubdate='Thu, 23 Jul 2026 06:30:00 +0000' link=https://hobby.dengeki.com/news/3088395/ title='『トイ・ストーリー5』のキャラクターたちを収録した食玩ソフビ「フレンズ」シリーズが登場！ウッディやジ'
+9 parsed=2026-07-19 23:00:00 raw_pubdate='Sun, 19 Jul 2026 23:00:00 +0000' link=https://hobby.dengeki.com/news/3079830/ title='『トイ・ストーリー』などのピクサー作品の名場面もラインナップ！食玩「Disney Character'
+

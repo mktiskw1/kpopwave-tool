@@ -1,0 +1,31 @@
+total account_id=2 articles: 48
+1426 url=https://hobby.dengeki.com/reviews/3087425/ published_at=2026-07-27 09:00:00 created_at=2026-07-27 12:23:36.264160 status=pending
+1400 url=https://gachapara.jp/14720/ published_at=2026-07-21 07:54:58 created_at=2026-07-27 01:08:41.671485 status=posted
+1399 url=https://gachapara.jp/14764/ published_at=2026-07-23 07:43:02 created_at=2026-07-27 01:08:41.671481 status=queued
+1398 url=https://gachapara.jp/14767/ published_at=2026-07-23 07:47:52 created_at=2026-07-27 01:08:41.671478 status=queued
+1397 url=https://gachapara.jp/14769/ published_at=2026-07-24 07:43:29 created_at=2026-07-27 01:08:41.671474 status=queued
+1396 url=https://gachapara.jp/14787/ published_at=2026-07-24 08:08:49 created_at=2026-07-27 01:08:41.671466 status=queued
+1331 url=https://hobby.dengeki.com/news/3088395/ published_at=2026-07-23 06:30:00 created_at=2026-07-27 01:08:24.297246 status=queued
+1330 url=https://hobby.dengeki.com/news/3088016/ published_at=2026-07-23 14:30:00 created_at=2026-07-27 01:08:24.297240 status=pending
+1329 url=https://hobby.dengeki.com/news/3088219/ published_at=2026-07-23 22:30:00 created_at=2026-07-27 01:08:24.297233 status=pending
+1328 url=https://hobby.dengeki.com/news/3088486/ published_at=2026-07-24 05:00:00 created_at=2026-07-27 01:08:24.297226 status=pending
+1327 url=https://hobby.dengeki.com/news/3088455/ published_at=2026-07-24 09:30:00 created_at=2026-07-27 01:08:24.297220 status=pending
+1326 url=https://hobby.dengeki.com/news/3088360/ published_at=2026-07-24 23:30:00 created_at=2026-07-27 01:08:24.297213 status=pending
+1325 url=https://hobby.dengeki.com/event/3091609/ published_at=2026-07-26 01:00:00 created_at=2026-07-27 01:08:24.297206 status=pending
+1324 url=https://hobby.dengeki.com/news/3088470/ published_at=2026-07-26 10:00:00 created_at=2026-07-27 01:08:24.297192 status=queued
+1323 url=https://hobby.dengeki.com/news/3085957/ published_at=2026-07-17 07:00:00 created_at=2026-07-22 13:00:33.954781 status=posted
+1322 url=https://hobby.dengeki.com/news/3085896/ published_at=2026-07-17 07:30:00 created_at=2026-07-22 13:00:33.954776 status=posted
+1321 url=https://hobby.dengeki.com/news/3086281/ published_at=2026-07-17 07:50:59 created_at=2026-07-22 13:00:33.954771 status=posted
+1320 url=https://hobby.dengeki.com/news/3080133/ published_at=2026-07-17 23:00:00 created_at=2026-07-22 13:00:33.954765 status=posted
+1316 url=https://hobby.dengeki.com/news/3080023/ published_at=2026-07-18 23:00:00 created_at=2026-07-22 13:00:33.954743 status=posted
+1310 url=https://gachapara.jp/14613/ published_at=2026-07-16 08:09:10 created_at=2026-07-22 12:13:51.898243 status=posted
+1309 url=https://gachapara.jp/14623/ published_at=2026-07-16 08:14:12 created_at=2026-07-22 12:13:51.898241 status=posted
+1308 url=https://gachapara.jp/14713/ published_at=2026-07-21 07:45:44 created_at=2026-07-22 12:13:51.898239 status=posted
+1306 url=https://gachapara.jp/14743/ published_at=2026-07-22 05:58:50 created_at=2026-07-22 12:13:51.898234 status=posted
+1305 url=https://gachapara.jp/14745/ published_at=2026-07-22 06:08:52 created_at=2026-07-22 12:13:51.898229 status=posted
+1241 url=https://gachapara.jp/14718/ published_at=2026-07-21 07:50:40 created_at=2026-07-21 14:51:09.173516 status=posted
+1104 url=text-post:660b8dcf9ede4ce48b23d68d94bf0144 published_at=None created_at=2026-07-16 06:55:40.305618 status=posted
+1103 url=text-post:5fbde56b0a97466a96ac16ea92612a11 published_at=None created_at=2026-07-16 06:51:29.662469 status=posted
+1095 url=text-post:81aada39e90a473194145f2bc98aba93 published_at=None created_at=2026-07-13 08:18:48.181055 status=posted
+1094 url=text-post:ac7f0f59efb3497b8a93543017a8ba10 published_at=None created_at=2026-07-13 08:14:00.145573 status=posted
+1093 url=text-post:740fd061ebbd4b11882909577dab8c35 published_at=None created_at=2026-07-13 08:08:38.801871 status=posted

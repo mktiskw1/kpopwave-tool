@@ -1,0 +1,15 @@
+2026-07-27 21:34:27,256 INFO rss_collector: [Soompi] 追加:0 除外(日付):0 除外(KW):37 重複:13
+2026-07-27 21:34:27,324 INFO rss_collector: [Koreaboo] 追加:0 除外(日付):0 除外(KW):4 重複:6
+2026-07-27 21:34:27,547 INFO rss_collector: [Hellokpop] 追加:0 除外(日付):0 除外(KW):1 重複:2
+2026-07-27 21:34:27,732 INFO rss_collector: [KpopPost] 追加:0 除外(日付):7 除外(KW):3 重複:0
+2026-07-27 21:34:28,010 INFO rss_collector: [NME K-Pop] 追加:0 除外(日付):10 除外(KW):0 重複:0
+2026-07-27 21:34:28,209 INFO rss_collector: [AsianJunkie] 追加:0 除外(日付):1 除外(KW):7 重複:2
+2026-07-27 21:34:28,765 INFO rss_collector: [TheBiasList] 追加:0 除外(日付):0 除外(KW):5 重複:5
+2026-07-27 21:34:28,945 INFO rss_collector: [KpopReviewed] 追加:0 除外(日付):8 除外(KW):1 重複:1
+2026-07-27 21:34:30,221 INFO rss_collector: [SeoulBeats] 追加:0 除外(日付):9 除外(KW):1 重複:0
+2026-07-27 21:34:30,876 INFO rss_collector: [Kstyle] 追加:0 除外(日付):0 除外(KW):33 重複:17
+2026-07-27 21:34:31,276 INFO rss_collector: [BARKS] 追加:0 除外(日付):0 除外(KW):3 重複:7
+2026-07-27 21:34:31,697 INFO rss_collector: [Daebak Tokyo] 追加:0 除外(日付):0 除外(KW):5 重複:5
+2026-07-27 21:34:32,354 INFO rss_collector: [ガチャパラ] 追加:0 除外(日付):0 除外(KW):2 重複:8
+2026-07-27 21:34:32,494 INFO rss_collector: [電撃ホビーウェブ（食玩）] 追加:0 除外(日付):1 除外(KW):0 重複:9
+2026-07-27 21:34:32,494 INFO rss_collector: 収集完了 — 新規追加合計: 0 件
