@@ -92,17 +92,6 @@ def _check_excluded(title: str, content: str) -> bool:
     return any(kw in text for kw in EXCLUDE_KEYWORDS)
 
 
-# ── content_topicアカウント（非KPOP）向け除外キーワード ──────────────────────
-# 現状ガチャ沼の住人（ガチャガチャ・カプセルトイ）向け。将来別のcontent_topic
-# アカウントが増えた場合はアカウント別リストへの汎用化を検討する。
-CONTENT_TOPIC_EXCLUDE_KEYWORDS = ["オープン", "ゲームセンター", "ゲーセン"]
-
-
-def _check_content_topic_excluded(title: str, content: str) -> bool:
-    text = title + " " + content
-    return any(kw in text for kw in CONTENT_TOPIC_EXCLUDE_KEYWORDS)
-
-
 def _is_recent(published_at) -> bool:
     if published_at is None:
         return True
@@ -335,15 +324,10 @@ def collect_articles(app) -> int:
                 plain_content = _strip_html(content)
                 title = (entry.get("title") or "")
 
-                # content_topic 設定済みアカウント（非KPOP）のフィードは、女性KPOP
-                # キーワード辞書の代わりにcontent_topic向け除外キーワードを適用する。
+                # content_topic 設定済みアカウント（非KPOP）のフィードは
+                # 女性KPOPキーワード辞書と無関係なためキーワードフィルタを丸ごとスキップする。
                 # KPOPアカウント（content_topic未設定）は既存通り、日本語フィードのみスキップ。
-                if content_topic:
-                    # ── フィルター2': content_topic向け除外キーワード ─────
-                    if _check_content_topic_excluded(title, plain_content):
-                        skipped_kw += 1
-                        continue
-                elif not is_ja:
+                if not content_topic and not is_ja:
                     # ── フィルター2: 除外キーワード ──────────────────────
                     if _check_excluded(title, plain_content):
                         skipped_kw += 1
