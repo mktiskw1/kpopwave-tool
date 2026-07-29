@@ -1709,7 +1709,7 @@ def _run_trim_job(app, job_id):
             if job.end is not None:
                 cmd += ["-t", str(job.end - job.start)]
             cmd += [
-                "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+                "-c:v", "libx264", "-crf", "23", "-preset", "veryfast",
                 "-c:a", "aac", "-b:a", "128k",
                 "-avoid_negative_ts", "make_zero",
                 "-movflags", "+faststart",
