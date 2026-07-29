@@ -56,6 +56,20 @@ class Article(db.Model):
         }
 
 
+class VideoTrimJob(db.Model):
+    __tablename__ = "video_trim_jobs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    source_article_id = db.Column(db.Integer, db.ForeignKey("articles.id"), nullable=False, index=True)
+    start = db.Column(db.Float, nullable=False)
+    end = db.Column(db.Float, nullable=True)
+    status = db.Column(db.String(20), nullable=False, default="processing")
+    result_article_id = db.Column(db.Integer, nullable=True)
+    error_message = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class ThreadsAccount(db.Model):
     __tablename__ = "threads_accounts"
 
