@@ -1786,6 +1786,12 @@ def trim_video(article_id):
     if not os.path.exists(ffmpeg_exe):
         return jsonify({"ok": False, "error": "ffmpeg.exe が見つかりません"}), 500
 
+    existing_job = VideoTrimJob.query.filter_by(
+        source_article_id=article_id, status="processing"
+    ).first()
+    if existing_job:
+        return jsonify({"ok": False, "error": "この動画は既にトリミング処理中です", "job_id": existing_job.id}), 409
+
     job = VideoTrimJob(source_article_id=article_id, start=start, end=end, status="processing")
     db.session.add(job)
     db.session.commit()

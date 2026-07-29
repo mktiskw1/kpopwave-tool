@@ -605,7 +605,14 @@ function pollTrimJob(articleId, jobId, btn, origBtnHtml) {
   origBtnHtml = origBtnHtml || '✂️ 切り取って別投稿として追加';
   const check = function() {
     fetch('/api/videos/trim-jobs/' + jobId)
-      .then(function(r) { return r.json(); })
+      .then(function(r) {
+        if (r.status === 404) {
+          const err = new Error('job not found');
+          err.stopPolling = true;
+          throw err;
+        }
+        return r.json();
+      })
       .then(function(d) {
         if (d.status === 'processing') {
           setTimeout(check, 3000);
@@ -621,7 +628,17 @@ function pollTrimJob(articleId, jobId, btn, origBtnHtml) {
           alert('切り取り失敗: ' + (d.error || '不明なエラー'));
         }
       })
-      .catch(function() { setTimeout(check, 3000); });
+      .catch(function(e) {
+        if (e && e.stopPolling) {
+          if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = origBtnHtml;
+          }
+          alert('トリミングジョブが見つかりませんでした。');
+        } else {
+          setTimeout(check, 3000);
+        }
+      });
   };
   check();
 }
