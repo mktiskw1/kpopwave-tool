@@ -343,7 +343,9 @@
 </form>
 
 <!-- 全削除用の隠しフォーム -->
-<form id="delete-all-form" action="{{ url_for('delete_all_pending') }}" method="post"></form>
+<form id="delete-all-form" action="{{ url_for('delete_all_pending') }}" method="post">
+  <input type="hidden" name="account_id" value="{{ nav_active_account_id or '' }}">
+</form>
 
 {% else %}
 <div class="card p-5 text-center" style="color:var(--text-muted)">

@@ -240,14 +240,22 @@ def inject_globals():
     def _scope(query):
         return _account_query_scope(query, Article, account_id, legacy_id)
 
+    nav_accounts = ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).all()
+    active_account = next((a for a in nav_accounts if a.id == account_id), None)
+    # KPOP専用収集機能（YouTube収集・動画収集）の表示判定。
+    # content_topic未設定＝KPOPアカウントという既存の運用規約に従う。
+    # アカウントを解決できない場合は従来通り表示する（後方互換）。
+    nav_is_kpop_account = (active_account is None) or not (active_account.content_topic or "").strip()
+
     return {
         "pending_count": _scope(Article.query.filter_by(status="pending")).count(),
         "queued_count": _scope(Article.query.filter_by(status="queued")).count(),
         "unread_comments_count": Comment.query.filter_by(is_read=0).count(),
         "youtube_min_view_count": Setting.get("youtube_min_view_count", "5000000"),
         "youtube_max_view_count": Setting.get("youtube_max_view_count", "0"),
-        "nav_accounts": ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).all(),
+        "nav_accounts": nav_accounts,
         "nav_active_account_id": account_id,
+        "nav_is_kpop_account": nav_is_kpop_account,
     }
 
 
@@ -350,6 +358,19 @@ def _account_query_scope(query, model_cls, account_id, legacy_id):
     if account_id == legacy_id:
         return query.filter(or_(model_cls.account_id == account_id, model_cls.account_id.is_(None)))
     return query.filter(model_cls.account_id == account_id)
+
+
+def _explicit_account_id(source):
+    """操作対象アカウントIDを解決する。フロントから明示的に渡された値を最優先とし、
+    未指定・不正値の場合のみ現在表示中アカウント（セッション経由）にフォールバックする。
+    セッションは複数タブ間で共有され食い違いうるため、画面に描画された値を優先する。"""
+    raw = source.get("account_id")
+    if raw:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    return _selected_account_id()
 
 
 _PREVIEW_EXCLUDE = (
@@ -520,16 +541,22 @@ def bulk_delete_articles():
 
 @app.route("/pending/delete-all", methods=["POST"])
 def delete_all_pending():
+    account_id = _explicit_account_id(request.form)
+    legacy = get_active_account(app)
+    legacy_id = legacy["id"] if legacy else None
+
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-    articles = Article.query.filter_by(status="pending").all()
+    articles = _account_query_scope(
+        Article.query.filter_by(status="pending"), Article, account_id, legacy_id
+    ).all()
     for a in articles:
         if a.video_file_path:
             _delete_video_files(a.video_file_path, static_dir)
     count = len(articles)
-    Article.query.filter_by(status="pending").delete(synchronize_session=False)
+    Article.query.filter(Article.id.in_([a.id for a in articles])).delete(synchronize_session=False)
     db.session.commit()
     flash(f"承認待ち記事 {count} 件をすべて削除しました", "warning")
-    return redirect(url_for("pending"))
+    return redirect(url_for("pending", account_id=account_id) if account_id else url_for("pending"))
 
 
 @app.route("/articles/<int:id>/approve", methods=["POST"])
@@ -701,6 +728,7 @@ def add_article_from_url():
         raw_content=content,
         thumbnail_url=thumbnail_url or None,
         status="pending",
+        account_id=_explicit_account_id(data),
     )
     db.session.add(article)
     db.session.commit()
@@ -1652,9 +1680,10 @@ def privacy():
 def collect():
     from rss_collector import collect_articles
 
-    new = collect_articles(app)
+    account_id = _explicit_account_id(request.form)
+    new = collect_articles(app, account_id=account_id)
     flash(f"RSS 収集完了: {new} 件の新記事を取得しました（承認待ち画面で要約を生成してください）", "success")
-    return redirect(url_for("index"))
+    return redirect(url_for("index", account_id=account_id) if account_id else url_for("index"))
 
 
 @app.route("/collect-youtube", methods=["POST"])
@@ -1737,6 +1766,7 @@ def _run_trim_job(app, job_id):
                 thumbnail_url=article.thumbnail_url,
                 video_file_path=clip_rel_path,
                 published_at=article.published_at,
+                account_id=article.account_id,
             )
             db.session.add(new_article)
             db.session.flush()  # new_article.id を確定させる（コミット前は未割当のため）
@@ -2084,6 +2114,7 @@ def add_video_manual():
         content_type="video",
         video_file_path=f"videos/{dest_filename}",
         view_count=full.get("view_count"),
+        account_id=_explicit_account_id(data),
     )
     db.session.add(article)
     db.session.commit()

@@ -105,6 +105,8 @@
 
 {% block scripts %}
 <script>
+var CURRENT_ACCOUNT_ID = {{ nav_active_account_id | tojson }};
+
 function addFromUrl() {
   var input = document.getElementById('add-url-input');
   var btn   = document.getElementById('add-url-btn');
@@ -127,7 +129,7 @@ function addFromUrl() {
   fetch('/articles/add-from-url', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: url })
+    body: JSON.stringify({ url: url, account_id: CURRENT_ACCOUNT_ID })
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {
@@ -165,7 +167,7 @@ function addVideoManual() {
   fetch('/api/videos/add-manual', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({url: url})
+    body: JSON.stringify({url: url, account_id: CURRENT_ACCOUNT_ID})
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {

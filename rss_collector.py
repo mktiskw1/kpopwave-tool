@@ -262,8 +262,13 @@ def _is_japanese_feed(feed_info) -> bool:
     return False
 
 
-def collect_articles(app) -> int:
-    """全RSSフィードから新着記事を取得してDBに保存する。新記事数を返す。"""
+def collect_articles(app, account_id: int = None) -> int:
+    """RSSフィードから新着記事を取得してDBに保存する。新記事数を返す。
+
+    account_id 指定時は、そのアカウントに紐づくフィードのみを対象にする
+    （現在表示中のアカウントの操作が他アカウントに影響しないようにするため）。
+    省略時は全フィードを対象にする（後方互換）。
+    """
     feeds = get_feed_list(app)
     with app.app_context():
         api_key = Setting.get("anthropic_api_key", "") or os.getenv("ANTHROPIC_API_KEY", "")
@@ -279,8 +284,10 @@ def collect_articles(app) -> int:
         url  = feed_info.get("url", "") if isinstance(feed_info, dict) else str(feed_info)
         name = feed_info.get("name", url) if isinstance(feed_info, dict) else url
         is_ja = _is_japanese_feed(feed_info)
-        account_id = feed_info.get("account_id", 1) if isinstance(feed_info, dict) else 1
-        content_topic = topic_by_account.get(account_id, "")
+        feed_account_id = feed_info.get("account_id", 1) if isinstance(feed_info, dict) else 1
+        if account_id is not None and feed_account_id != account_id:
+            continue
+        content_topic = topic_by_account.get(feed_account_id, "")
         if not url:
             continue
 
@@ -350,7 +357,7 @@ def collect_articles(app) -> int:
                     "raw_content":  plain_content[:5000],
                     "feed_source":  name,
                     "lang":         "ja" if is_ja else "en",
-                    "account_id":   account_id,
+                    "account_id":   feed_account_id,
                 })
 
         if not candidates:
