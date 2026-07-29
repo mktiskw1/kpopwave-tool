@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import uuid
 from datetime import datetime, timedelta
 from urllib.parse import urlencode, urlparse, parse_qs
@@ -13,7 +14,7 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, sen
 from sqlalchemy import or_
 
 from config import Config
-from database import Article, BuzzPost, Comment, Hook, Setting, ThreadsAccount, get_active_account, db
+from database import Article, BuzzPost, Comment, Hook, Setting, ThreadsAccount, VideoTrimJob, get_active_account, db
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -485,8 +486,17 @@ def pending():
             images_map[a.id] = imgs
             logger.debug("pending preview article=%d imgs=%d", a.id, len(imgs))
 
+    active_trim_jobs = {
+        j.source_article_id: j.id
+        for j in VideoTrimJob.query.filter(
+            VideoTrimJob.source_article_id.in_([a.id for a in articles]),
+            VideoTrimJob.status == "processing",
+        ).all()
+    } if articles else {}
+
     return render_template("pending.html", articles=articles, images_map=images_map,
-                           active_tab=tab, counts=counts, now_utc=datetime.utcnow())
+                           active_tab=tab, counts=counts, now_utc=datetime.utcnow(),
+                           active_trim_jobs=active_trim_jobs)
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
@@ -1656,107 +1666,142 @@ def collect_youtube():
     return redirect(url_for("index"))
 
 
+def _run_trim_job(app, job_id):
+    import subprocess as _sp
+    import shutil as _shutil
+    import time as _time
+
+    with app.app_context():
+        job = db.session.get(VideoTrimJob, job_id)
+        if not job:
+            return
+        try:
+            article = db.session.get(Article, job.source_article_id)
+            static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+            video_path = os.path.join(static_dir, article.video_file_path)
+
+            ffmpeg_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin", "ffmpeg.exe")
+            videos_dir = os.path.join(static_dir, "videos")
+
+            # 元ファイルのベース名（拡張子なし）
+            # video_file_path は "videos/{video_id}.mp4" 形式
+            base_name = os.path.splitext(os.path.basename(video_path))[0]
+
+            # 元ファイルを _original として保持（まだなければリネーム）
+            original_filename = base_name + "_original.mp4"
+            original_path = os.path.join(videos_dir, original_filename)
+            if not os.path.exists(original_path):
+                _shutil.copy2(video_path, original_path)
+
+            # clip 連番を決定（既存の clip ファイル数をカウント）
+            existing_clips = [
+                f for f in os.listdir(videos_dir)
+                if f.startswith(base_name + "_clip_") and f.endswith(".mp4")
+            ]
+            clip_num = len(existing_clips) + 1
+            clip_filename = f"{base_name}_clip_{clip_num}.mp4"
+            clip_path = os.path.join(videos_dir, clip_filename)
+
+            # -ss を -i より前に置くキーフレームシークで高速化する。
+            # この場合 -to は使えない（シーク後の相対時刻ではなく元の絶対時刻のままになるため）ので、
+            # 代わりに相対時間指定の -t (end - start) を使う。
+            cmd = [ffmpeg_exe, "-y", "-ss", str(job.start), "-i", video_path]
+            if job.end is not None:
+                cmd += ["-t", str(job.end - job.start)]
+            cmd += [
+                "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+                "-c:a", "aac", "-b:a", "128k",
+                "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart",
+                clip_path,
+            ]
+
+            result = _sp.run(cmd, capture_output=True, timeout=600)
+            if result.returncode != 0:
+                err = result.stderr.decode("utf-8", errors="replace")[-500:]
+                job.status = "failed"
+                job.error_message = err
+                db.session.commit()
+                logger.error("動画トリミング失敗(ffmpeg): job_id=%d article_id=%d error=%s",
+                             job_id, job.source_article_id, err)
+                return
+
+            # 新しい Article レコードを作成（元記事はそのまま残す）
+            clip_rel_path = f"videos/{clip_filename}"
+            new_article = Article(
+                feed_source=article.feed_source,
+                title=f"{article.title} [クリップ {clip_num}]",
+                url=f"{article.url}#clip_{int(_time.time())}",
+                status="pending",
+                content_type="video",
+                thumbnail_url=article.thumbnail_url,
+                video_file_path=clip_rel_path,
+                published_at=article.published_at,
+            )
+            db.session.add(new_article)
+            db.session.flush()  # new_article.id を確定させる（コミット前は未割当のため）
+            job.status = "done"
+            job.result_article_id = new_article.id
+            db.session.commit()
+
+            logger.info("動画クリップ作成完了: job_id=%d 元article_id=%d -> new_article_id=%d clip=%s",
+                        job_id, job.source_article_id, new_article.id, clip_filename)
+        except Exception as exc:
+            logger.exception("動画トリミング失敗(例外): job_id=%d", job_id)
+            job.status = "failed"
+            job.error_message = str(exc)
+            db.session.commit()
+
+
 @app.route("/api/videos/<int:article_id>/trim", methods=["POST"])
 def trim_video(article_id):
-    import subprocess as _sp
-    from werkzeug.exceptions import NotFound
+    data = request.get_json(force=True, silent=True) or {}
 
     try:
-        data = request.get_json(force=True, silent=True) or {}
+        start = float(data.get("start", 0) or 0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "開始秒数が不正です"}), 400
+    start = round(start * 2) / 2
 
+    end_raw = data.get("end")
+    end = None
+    if end_raw is not None and end_raw != "":
         try:
-            start = float(data.get("start", 0) or 0)
+            end = float(end_raw)
         except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "開始秒数が不正です"}), 400
-        start = round(start * 2) / 2
+            return jsonify({"ok": False, "error": "終了秒数が不正です"}), 400
+        end = round(end * 2) / 2
 
-        end_raw = data.get("end")
-        end = None
-        if end_raw is not None and end_raw != "":
-            try:
-                end = float(end_raw)
-            except (TypeError, ValueError):
-                return jsonify({"ok": False, "error": "終了秒数が不正です"}), 400
-            end = round(end * 2) / 2
+    article = Article.query.get_or_404(article_id)
+    if not article.video_file_path:
+        return jsonify({"ok": False, "error": "動画ファイルがありません"}), 400
 
-        article = Article.query.get_or_404(article_id)
-        if not article.video_file_path:
-            return jsonify({"ok": False, "error": "動画ファイルがありません"}), 400
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    video_path = os.path.join(static_dir, article.video_file_path)
+    if not os.path.exists(video_path):
+        return jsonify({"ok": False, "error": "ファイルが見つかりません"}), 404
 
-        static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-        video_path = os.path.join(static_dir, article.video_file_path)
-        if not os.path.exists(video_path):
-            return jsonify({"ok": False, "error": "ファイルが見つかりません"}), 404
+    ffmpeg_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin", "ffmpeg.exe")
+    if not os.path.exists(ffmpeg_exe):
+        return jsonify({"ok": False, "error": "ffmpeg.exe が見つかりません"}), 500
 
-        ffmpeg_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin", "ffmpeg.exe")
-        if not os.path.exists(ffmpeg_exe):
-            return jsonify({"ok": False, "error": "ffmpeg.exe が見つかりません"}), 500
+    job = VideoTrimJob(source_article_id=article_id, start=start, end=end, status="processing")
+    db.session.add(job)
+    db.session.commit()
 
-        videos_dir = os.path.join(static_dir, "videos")
+    threading.Thread(target=_run_trim_job, args=(app, job.id), daemon=True).start()
 
-        # 元ファイルのベース名（拡張子なし）
-        # video_file_path は "videos/{video_id}.mp4" 形式
-        base_name = os.path.splitext(os.path.basename(video_path))[0]
+    return jsonify({"ok": True, "job_id": job.id})
 
-        # 元ファイルを _original として保持（まだなければリネーム）
-        original_filename = base_name + "_original.mp4"
-        original_path = os.path.join(videos_dir, original_filename)
-        if not os.path.exists(original_path):
-            import shutil as _shutil
-            _shutil.copy2(video_path, original_path)
 
-        # clip 連番を決定（既存の clip ファイル数をカウント）
-        existing_clips = [
-            f for f in os.listdir(videos_dir)
-            if f.startswith(base_name + "_clip_") and f.endswith(".mp4")
-        ]
-        clip_num = len(existing_clips) + 1
-        clip_filename = f"{base_name}_clip_{clip_num}.mp4"
-        clip_path = os.path.join(videos_dir, clip_filename)
-
-        # -ss を -i より前に置くキーフレームシークで高速化する。
-        # この場合 -to は使えない（シーク後の相対時刻ではなく元の絶対時刻のままになるため）ので、
-        # 代わりに相対時間指定の -t (end - start) を使う。
-        cmd = [ffmpeg_exe, "-y", "-ss", str(start), "-i", video_path]
-        if end is not None:
-            cmd += ["-t", str(end - start)]
-        cmd += [
-            "-c:v", "libx264", "-crf", "23", "-preset", "fast",
-            "-c:a", "aac", "-b:a", "128k",
-            "-avoid_negative_ts", "make_zero",
-            "-movflags", "+faststart",
-            clip_path,
-        ]
-
-        result = _sp.run(cmd, capture_output=True, timeout=600)
-        if result.returncode != 0:
-            err = result.stderr.decode("utf-8", errors="replace")[-500:]
-            return jsonify({"ok": False, "error": err}), 500
-
-        # 新しい Article レコードを作成（元記事はそのまま残す）
-        import time as _time
-        clip_rel_path = f"videos/{clip_filename}"
-        new_article = Article(
-            feed_source=article.feed_source,
-            title=f"{article.title} [クリップ {clip_num}]",
-            url=f"{article.url}#clip_{int(_time.time())}",
-            status="pending",
-            content_type="video",
-            thumbnail_url=article.thumbnail_url,
-            video_file_path=clip_rel_path,
-            published_at=article.published_at,
-        )
-        db.session.add(new_article)
-        db.session.commit()
-
-        logger.info("動画クリップ作成完了: 元article_id=%d -> new_article_id=%d clip=%s",
-                    article_id, new_article.id, clip_filename)
-        return jsonify({"ok": True, "new_article_id": new_article.id})
-    except NotFound:
-        raise
-    except Exception as exc:
-        logger.exception("動画トリミング失敗: article_id=%d", article_id)
-        return jsonify({"ok": False, "error": str(exc)}), 500
+@app.route("/api/videos/trim-jobs/<int:job_id>")
+def trim_job_status(job_id):
+    job = VideoTrimJob.query.get_or_404(job_id)
+    return jsonify({
+        "status": job.status,
+        "error": job.error_message,
+        "new_article_id": job.result_article_id,
+    })
 
 
 @app.route("/api/articles/<int:article_id>/requeue", methods=["POST"])
