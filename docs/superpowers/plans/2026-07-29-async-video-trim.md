@@ -387,6 +387,7 @@ def _run_trim_job(app, job_id):
                         job_id, job.source_article_id, new_article.id, clip_filename)
         except Exception as exc:
             logger.exception("動画トリミング失敗(例外): job_id=%d", job_id)
+            db.session.rollback()
             job.status = "failed"
             job.error_message = str(exc)
             db.session.commit()
