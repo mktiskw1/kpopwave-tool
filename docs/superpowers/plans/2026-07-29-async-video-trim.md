@@ -378,6 +378,7 @@ def _run_trim_job(app, job_id):
                 published_at=article.published_at,
             )
             db.session.add(new_article)
+            db.session.flush()  # new_article.id を確定させる（コミット前は未割当のため）
             job.status = "done"
             job.result_article_id = new_article.id
             db.session.commit()
