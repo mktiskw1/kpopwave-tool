@@ -232,17 +232,25 @@
             </button>
           </div>
           <!-- 切り取りボタン -->
-          <button type="button"
+          <button type="button" id="trim-btn-{{ a.id }}"
                   onclick="trimVideo({{ a.id }}, this)"
+                  {% if active_trim_jobs.get(a.id) %}disabled{% endif %}
                   style="padding:4px 14px;border-radius:6px;border:1px solid var(--accent);
                          background:var(--accent-soft);color:var(--accent);font-size:.82rem;
                          cursor:pointer;font-weight:700">
+            {% if active_trim_jobs.get(a.id) %}
+            <span class="spinner-border spinner-border-sm"></span> 処理中...
+            {% else %}
             ✂️ 切り取って別投稿として追加
+            {% endif %}
           </button>
           <div id="trim-msg-{{ a.id }}" style="display:none;margin-top:6px;padding:4px 10px;
                border-radius:6px;background:#e8f5ed;color:#2e7d32;font-weight:700;font-size:.82rem">
             ✅ 承認待ちに追加しました！
           </div>
+          {% if active_trim_jobs.get(a.id) %}
+          <div id="trim-job-{{ a.id }}" data-job-id="{{ active_trim_jobs.get(a.id) }}" style="display:none"></div>
+          {% endif %}
         </div>
       </div>
 
@@ -577,20 +585,45 @@ function trimVideo(id, btn) {
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {
-    btn.disabled = false;
-    btn.innerHTML = orig;
     if (d.ok) {
-      var msg = document.getElementById('trim-msg-' + id);
-      if (msg) msg.style.display = 'block';
-      setTimeout(function() { location.href = '/pending?tab=video'; }, 1000);
+      pollTrimJob(id, d.job_id, btn, orig);
     } else {
+      btn.disabled = false;
+      btn.innerHTML = orig;
       alert('切り取り失敗: ' + (d.error || '不明なエラー'));
     }
   })
   .catch(function() {
-    alert('通信が中断されました。処理が完了している可能性があるため、一覧を更新して確認します。');
-    location.href = '/pending?tab=video';
+    btn.disabled = false;
+    btn.innerHTML = orig;
+    alert('通信エラーが発生しました。もう一度お試しください。');
   });
+}
+
+function pollTrimJob(articleId, jobId, btn, origBtnHtml) {
+  btn = btn || document.getElementById('trim-btn-' + articleId);
+  origBtnHtml = origBtnHtml || '✂️ 切り取って別投稿として追加';
+  const check = function() {
+    fetch('/api/videos/trim-jobs/' + jobId)
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.status === 'processing') {
+          setTimeout(check, 3000);
+        } else if (d.status === 'done') {
+          var msg = document.getElementById('trim-msg-' + articleId);
+          if (msg) msg.style.display = 'block';
+          setTimeout(function() { location.href = '/pending?tab=video'; }, 1000);
+        } else {
+          if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = origBtnHtml;
+          }
+          alert('切り取り失敗: ' + (d.error || '不明なエラー'));
+        }
+      })
+      .catch(function() { setTimeout(check, 3000); });
+  };
+  check();
 }
 
 // ── 動画ソート ────────────────────────────────────────────────────────────
@@ -740,6 +773,14 @@ document.addEventListener('DOMContentLoaded', function() {
   if (!card) return;
   enterEditMode(editId);
   card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+});
+
+document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('[id^="trim-job-"]').forEach(function(el) {
+    const articleId = el.id.replace('trim-job-', '');
+    const jobId = el.dataset.jobId;
+    if (jobId) pollTrimJob(articleId, jobId);
+  });
 });
 </script>
 {% endblock %}
