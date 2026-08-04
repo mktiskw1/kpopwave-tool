@@ -12,6 +12,7 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, flash, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 
 from config import Config
 from database import Article, BuzzPost, Comment, Hook, Setting, ThreadsAccount, VideoTrimJob, get_active_account, db
@@ -591,13 +592,70 @@ def reject_article(id):
     return redirect(request.referrer or url_for("pending"))
 
 
+_ARTICLE_RESTORE_FIELDS = [
+    "feed_source", "title", "url", "published_at", "raw_content", "summary",
+    "status", "thumbnail_url", "scheduled_at", "posted_at", "threads_post_id",
+    "error_message", "created_at", "like_count", "view_count", "reply_count",
+    "repost_count", "quote_count", "engagement_fetched_at", "post_style",
+    "image_urls", "content_type", "video_file_path", "is_fancam", "account_id",
+]
+_ARTICLE_DATETIME_FIELDS = {
+    "published_at", "scheduled_at", "posted_at", "created_at", "engagement_fetched_at",
+}
+
+
+def _article_snapshot(article):
+    """削除前の記事を元に戻せるよう、復元に必要な全カラムをJSON化する（undo用）。"""
+    data = {}
+    for field in _ARTICLE_RESTORE_FIELDS:
+        value = getattr(article, field)
+        if field in _ARTICLE_DATETIME_FIELDS and value is not None:
+            value = value.isoformat()
+        data[field] = value
+    return data
+
+
+def _article_from_snapshot(snapshot):
+    kwargs = {}
+    for field in _ARTICLE_RESTORE_FIELDS:
+        value = snapshot.get(field)
+        if field in _ARTICLE_DATETIME_FIELDS and value:
+            value = datetime.fromisoformat(value)
+        kwargs[field] = value
+    return Article(**kwargs)
+
+
 @app.route("/articles/<int:id>/delete", methods=["POST"])
 def delete_article(id):
     article = Article.query.get_or_404(id)
+    is_fetch = request.headers.get("X-Requested-With") == "fetch"
+    snapshot = _article_snapshot(article) if is_fetch else None
     db.session.delete(article)
     db.session.commit()
+    if is_fetch:
+        return jsonify({"ok": True, "snapshot": snapshot})
     flash("記事を削除しました", "warning")
     return redirect(request.referrer or url_for("pending"))
+
+
+@app.route("/articles/restore", methods=["POST"])
+def restore_article():
+    """deleteAjaxのundo用: スナップショットから記事を再作成する。"""
+    data = request.get_json(force=True, silent=True) or {}
+    snapshot = data.get("snapshot")
+    if not isinstance(snapshot, dict):
+        return jsonify({"ok": False, "error": "復元データがありません"}), 400
+    try:
+        article = _article_from_snapshot(snapshot)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": f"復元データが不正です: {exc}"}), 400
+    db.session.add(article)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"ok": False, "error": "同じURLの記事が既に存在するため復元できませんでした"}), 409
+    return jsonify({"ok": True, "id": article.id})
 
 
 # ── URL手動追加 ────────────────────────────────────────────────────────────
