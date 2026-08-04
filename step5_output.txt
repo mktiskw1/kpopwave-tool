@@ -1,0 +1,4 @@
+POST elapsed: 0.01 s, status: 200
+final job status: {'error': None, 'new_article_id': 1441, 'status': 'done'}
+clip path: static\videos/PLW5wOVk-AKkE0LCCQTgSxe9HNpOPl3UE__clip_1.mp4 exists: True
+clip duration: 60.049640 (expected ~60s)
