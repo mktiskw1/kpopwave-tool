@@ -209,7 +209,7 @@
           </div>
           <!-- 手入力（補助） -->
           <div class="d-flex align-items-center gap-2 flex-wrap mb-2" style="font-size:.78rem;color:var(--text-muted)">
-            <span>手入力(分:秒):</span>
+            <span>手入力(分:秒 または 秒のみ):</span>
             <label style="margin:0">開始</label>
             <input id="trim-start-min-{{ a.id }}" type="number" min="0" step="1" value="0"
                    oninput="syncTrimDisplay('start', {{ a.id }})" title="分"
@@ -220,6 +220,12 @@
                    oninput="syncTrimDisplay('start', {{ a.id }})" title="秒"
                    style="width:48px;padding:2px 4px;border-radius:6px;border:1px solid var(--border);
                           background:#fff;color:var(--text);font-size:.78rem">
+            <span style="color:var(--text-muted)">または</span>
+            <input id="trim-start-totalsec-{{ a.id }}" type="number" min="0" step="0.5" value="0"
+                   oninput="syncFromTotalSeconds('start', {{ a.id }})" title="秒数のみ"
+                   style="width:56px;padding:2px 4px;border-radius:6px;border:1px solid var(--border);
+                          background:#fff;color:var(--text);font-size:.78rem">
+            <span>秒</span>
             <button type="button" onclick="seekToTrim('start', {{ a.id }})"
                     style="padding:2px 9px;border-radius:6px;border:1px solid var(--border);
                            background:#fff;color:var(--text);font-size:.78rem;cursor:pointer">
@@ -235,6 +241,12 @@
                    oninput="syncTrimDisplay('end', {{ a.id }})" title="秒"
                    style="width:48px;padding:2px 4px;border-radius:6px;border:1px solid var(--border);
                           background:#fff;color:var(--text);font-size:.78rem">
+            <span style="color:var(--text-muted)">または</span>
+            <input id="trim-end-totalsec-{{ a.id }}" type="number" min="0" step="0.5" placeholder="秒数"
+                   oninput="syncFromTotalSeconds('end', {{ a.id }})" title="秒数のみ"
+                   style="width:56px;padding:2px 4px;border-radius:6px;border:1px solid var(--border);
+                          background:#fff;color:var(--text);font-size:.78rem">
+            <span>秒</span>
             <button type="button" onclick="seekToTrim('end', {{ a.id }})"
                     style="padding:2px 9px;border-radius:6px;border:1px solid var(--border);
                            background:#fff;color:var(--text);font-size:.78rem;cursor:pointer">
@@ -642,13 +654,39 @@ function markTrimPoint(type, id) {
   var s = t - m * 60;
   document.getElementById('trim-' + type + '-min-' + id).value = m;
   document.getElementById('trim-' + type + '-sec-' + id).value = s;
-  document.getElementById('trim-' + type + '-display-' + id).textContent = formatTime(t);
+  syncTrimDisplay(type, id);
 }
 
+// 分・秒欄が編集されたときに呼ばれる。表示ラベルと「秒のみ」欄を最新の合計秒数に合わせる。
 function syncTrimDisplay(type, id) {
   var val = getTrimSeconds(type, id);
   var el = document.getElementById('trim-' + type + '-display-' + id);
   if (el) el.textContent = (val === null || isNaN(val)) ? '--:--' : formatTime(val);
+  var totalEl = document.getElementById('trim-' + type + '-totalsec-' + id);
+  if (totalEl) totalEl.value = (val === null || isNaN(val)) ? '' : val;
+}
+
+// 「秒のみ」欄が編集されたときに呼ばれる。分・秒欄と表示ラベルを合計秒数から逆算して合わせる。
+function syncFromTotalSeconds(type, id) {
+  var totalEl = document.getElementById('trim-' + type + '-totalsec-' + id);
+  var minEl = document.getElementById('trim-' + type + '-min-' + id);
+  var secEl = document.getElementById('trim-' + type + '-sec-' + id);
+  var el = document.getElementById('trim-' + type + '-display-' + id);
+  if (!totalEl || !minEl || !secEl) return;
+
+  if (totalEl.value === '') {
+    minEl.value = '';
+    secEl.value = '';
+    if (el) el.textContent = '--:--';
+    return;
+  }
+  var val = parseFloat(totalEl.value);
+  if (isNaN(val) || val < 0) return;
+  var m = Math.floor(val / 60);
+  var s = val - m * 60;
+  minEl.value = m;
+  secEl.value = s;
+  if (el) el.textContent = formatTime(val);
 }
 
 function seekToTrim(type, id) {
