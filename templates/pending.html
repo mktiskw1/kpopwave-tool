@@ -211,9 +211,14 @@
           <div class="d-flex align-items-center gap-2 flex-wrap mb-2" style="font-size:.78rem;color:var(--text-muted)">
             <span>手入力(分:秒):</span>
             <label style="margin:0">開始</label>
-            <input id="trim-start-{{ a.id }}" type="text" inputmode="numeric" value="0:00" placeholder="例: 1:30"
-                   oninput="syncTrimDisplay('start', {{ a.id }})"
-                   style="width:64px;padding:2px 5px;border-radius:6px;border:1px solid var(--border);
+            <input id="trim-start-min-{{ a.id }}" type="number" min="0" step="1" value="0"
+                   oninput="syncTrimDisplay('start', {{ a.id }})" title="分"
+                   style="width:40px;padding:2px 4px;border-radius:6px;border:1px solid var(--border);
+                          background:#fff;color:var(--text);font-size:.78rem">
+            <span>:</span>
+            <input id="trim-start-sec-{{ a.id }}" type="number" min="0" max="59.5" step="0.5" value="0"
+                   oninput="syncTrimDisplay('start', {{ a.id }})" title="秒"
+                   style="width:48px;padding:2px 4px;border-radius:6px;border:1px solid var(--border);
                           background:#fff;color:var(--text);font-size:.78rem">
             <button type="button" onclick="seekToTrim('start', {{ a.id }})"
                     style="padding:2px 9px;border-radius:6px;border:1px solid var(--border);
@@ -221,9 +226,14 @@
               移動
             </button>
             <label style="margin:0">終了</label>
-            <input id="trim-end-{{ a.id }}" type="text" inputmode="numeric" placeholder="例: 1:00"
-                   oninput="syncTrimDisplay('end', {{ a.id }})"
-                   style="width:64px;padding:2px 5px;border-radius:6px;border:1px solid var(--border);
+            <input id="trim-end-min-{{ a.id }}" type="number" min="0" step="1" placeholder="分"
+                   oninput="syncTrimDisplay('end', {{ a.id }})" title="分"
+                   style="width:40px;padding:2px 4px;border-radius:6px;border:1px solid var(--border);
+                          background:#fff;color:var(--text);font-size:.78rem">
+            <span>:</span>
+            <input id="trim-end-sec-{{ a.id }}" type="number" min="0" max="59.5" step="0.5" placeholder="秒"
+                   oninput="syncTrimDisplay('end', {{ a.id }})" title="秒"
+                   style="width:48px;padding:2px 4px;border-radius:6px;border:1px solid var(--border);
                           background:#fff;color:var(--text);font-size:.78rem">
             <button type="button" onclick="seekToTrim('end', {{ a.id }})"
                     style="padding:2px 9px;border-radius:6px;border:1px solid var(--border);
@@ -606,18 +616,17 @@ function formatTime(sec) {
   return m + ':' + (s % 60 < 10 ? '0' : '') + (s % 60) + suffix;
 }
 
-// "1:30" "1:30.5" (分:秒) 形式と、従来通りの秒数のみの入力の両方を受け付ける。
-// 分:秒形式の秒側が0〜59の範囲外（例: "1:75"）の場合はNaNを返す。
-function parseTimeInput(str) {
-  str = (str || '').trim();
-  if (str === '') return NaN;
-  if (str.indexOf(':') === -1) return parseFloat(str);
-  var parts = str.split(':');
-  if (parts.length !== 2) return NaN;
-  var m = parseInt(parts[0], 10);
-  var s = parseFloat(parts[1]);
-  if (isNaN(m) || isNaN(s) || m < 0 || s < 0 || s >= 60) return NaN;
-  return m * 60 + s;
+// 分・秒の2つのnumber入力欄から合計秒数を求める。
+// 両方空欄の場合はnull（未入力）、秒が0〜59の範囲外など不正な場合はNaNを返す。
+function getTrimSeconds(type, id) {
+  var minEl = document.getElementById('trim-' + type + '-min-' + id);
+  var secEl = document.getElementById('trim-' + type + '-sec-' + id);
+  if (!minEl || !secEl) return NaN;
+  if (minEl.value === '' && secEl.value === '') return null;
+  var minVal = minEl.value === '' ? 0 : parseFloat(minEl.value);
+  var secVal = secEl.value === '' ? 0 : parseFloat(secEl.value);
+  if (isNaN(minVal) || isNaN(secVal) || minVal < 0 || secVal < 0 || secVal >= 60) return NaN;
+  return minVal * 60 + secVal;
 }
 
 function updateVidTime(id, vid) {
@@ -629,36 +638,37 @@ function markTrimPoint(type, id) {
   var vid = document.getElementById('vid-' + id);
   if (!vid) return;
   var t = Math.round(vid.currentTime * 2) / 2;
-  document.getElementById('trim-' + type + '-' + id).value = formatTime(t);
+  var m = Math.floor(t / 60);
+  var s = t - m * 60;
+  document.getElementById('trim-' + type + '-min-' + id).value = m;
+  document.getElementById('trim-' + type + '-sec-' + id).value = s;
   document.getElementById('trim-' + type + '-display-' + id).textContent = formatTime(t);
 }
 
 function syncTrimDisplay(type, id) {
-  var val = parseTimeInput(document.getElementById('trim-' + type + '-' + id).value);
+  var val = getTrimSeconds(type, id);
   var el = document.getElementById('trim-' + type + '-display-' + id);
-  if (el) el.textContent = isNaN(val) ? '--:--' : formatTime(val);
+  if (el) el.textContent = (val === null || isNaN(val)) ? '--:--' : formatTime(val);
 }
 
 function seekToTrim(type, id) {
   var vid = document.getElementById('vid-' + id);
-  var input = document.getElementById('trim-' + type + '-' + id);
-  if (!vid || !input) return;
-  var val = parseTimeInput(input.value);
-  if (isNaN(val) || val < 0) return;
+  if (!vid) return;
+  var val = getTrimSeconds(type, id);
+  if (val === null || isNaN(val) || val < 0) return;
   vid.currentTime = val;
 }
 
 // ── 動画切り取り（別投稿として追加） ────────────────────────────────────────
 function trimVideo(id, btn) {
-  const start = parseTimeInput(document.getElementById('trim-start-' + id).value) || 0;
-  const endVal = document.getElementById('trim-end-' + id).value;
-  const end = endVal !== '' ? parseTimeInput(endVal) : null;
-  if (end !== null && isNaN(end)) {
-    alert('終了時間の形式が正しくありません（分:秒で入力してください。例: 1:30）');
+  const start = getTrimSeconds('start', id);
+  if (start === null || isNaN(start)) {
+    alert('開始時間の入力が正しくありません（分・秒を確認してください。秒は0〜59の範囲で入力してください）');
     return;
   }
-  if (isNaN(start)) {
-    alert('開始時間の形式が正しくありません（分:秒で入力してください。例: 1:30）');
+  const end = getTrimSeconds('end', id);
+  if (isNaN(end)) {
+    alert('終了時間の入力が正しくありません（秒は0〜59の範囲で入力してください）');
     return;
   }
   if (end !== null && end <= start) {
