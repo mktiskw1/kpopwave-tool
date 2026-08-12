@@ -209,9 +209,9 @@
           </div>
           <!-- 手入力（補助） -->
           <div class="d-flex align-items-center gap-2 flex-wrap mb-2" style="font-size:.78rem;color:var(--text-muted)">
-            <span>手入力(秒):</span>
+            <span>手入力(分:秒):</span>
             <label style="margin:0">開始</label>
-            <input id="trim-start-{{ a.id }}" type="number" min="0" step="0.5" value="0"
+            <input id="trim-start-{{ a.id }}" type="text" inputmode="numeric" value="0:00" placeholder="例: 1:30"
                    oninput="syncTrimDisplay('start', {{ a.id }})"
                    style="width:64px;padding:2px 5px;border-radius:6px;border:1px solid var(--border);
                           background:#fff;color:var(--text);font-size:.78rem">
@@ -221,7 +221,7 @@
               移動
             </button>
             <label style="margin:0">終了</label>
-            <input id="trim-end-{{ a.id }}" type="number" min="0.5" step="0.5" placeholder="例: 60"
+            <input id="trim-end-{{ a.id }}" type="text" inputmode="numeric" placeholder="例: 1:00"
                    oninput="syncTrimDisplay('end', {{ a.id }})"
                    style="width:64px;padding:2px 5px;border-radius:6px;border:1px solid var(--border);
                           background:#fff;color:var(--text);font-size:.78rem">
@@ -606,6 +606,20 @@ function formatTime(sec) {
   return m + ':' + (s % 60 < 10 ? '0' : '') + (s % 60) + suffix;
 }
 
+// "1:30" "1:30.5" (分:秒) 形式と、従来通りの秒数のみの入力の両方を受け付ける。
+// 分:秒形式の秒側が0〜59の範囲外（例: "1:75"）の場合はNaNを返す。
+function parseTimeInput(str) {
+  str = (str || '').trim();
+  if (str === '') return NaN;
+  if (str.indexOf(':') === -1) return parseFloat(str);
+  var parts = str.split(':');
+  if (parts.length !== 2) return NaN;
+  var m = parseInt(parts[0], 10);
+  var s = parseFloat(parts[1]);
+  if (isNaN(m) || isNaN(s) || m < 0 || s < 0 || s >= 60) return NaN;
+  return m * 60 + s;
+}
+
 function updateVidTime(id, vid) {
   var el = document.getElementById('vid-time-' + id);
   if (el) el.textContent = formatTime(vid.currentTime);
@@ -615,12 +629,12 @@ function markTrimPoint(type, id) {
   var vid = document.getElementById('vid-' + id);
   if (!vid) return;
   var t = Math.round(vid.currentTime * 2) / 2;
-  document.getElementById('trim-' + type + '-' + id).value = t;
+  document.getElementById('trim-' + type + '-' + id).value = formatTime(t);
   document.getElementById('trim-' + type + '-display-' + id).textContent = formatTime(t);
 }
 
 function syncTrimDisplay(type, id) {
-  var val = parseFloat(document.getElementById('trim-' + type + '-' + id).value);
+  var val = parseTimeInput(document.getElementById('trim-' + type + '-' + id).value);
   var el = document.getElementById('trim-' + type + '-display-' + id);
   if (el) el.textContent = isNaN(val) ? '--:--' : formatTime(val);
 }
@@ -629,16 +643,24 @@ function seekToTrim(type, id) {
   var vid = document.getElementById('vid-' + id);
   var input = document.getElementById('trim-' + type + '-' + id);
   if (!vid || !input) return;
-  var val = parseFloat(input.value);
+  var val = parseTimeInput(input.value);
   if (isNaN(val) || val < 0) return;
   vid.currentTime = val;
 }
 
 // ── 動画切り取り（別投稿として追加） ────────────────────────────────────────
 function trimVideo(id, btn) {
-  const start = parseFloat(document.getElementById('trim-start-' + id).value) || 0;
+  const start = parseTimeInput(document.getElementById('trim-start-' + id).value) || 0;
   const endVal = document.getElementById('trim-end-' + id).value;
-  const end = endVal !== '' ? parseFloat(endVal) : null;
+  const end = endVal !== '' ? parseTimeInput(endVal) : null;
+  if (end !== null && isNaN(end)) {
+    alert('終了時間の形式が正しくありません（分:秒で入力してください。例: 1:30）');
+    return;
+  }
+  if (isNaN(start)) {
+    alert('開始時間の形式が正しくありません（分:秒で入力してください。例: 1:30）');
+    return;
+  }
   if (end !== null && end <= start) {
     alert('終了時間は開始時間より大きい値を入力してください');
     return;
