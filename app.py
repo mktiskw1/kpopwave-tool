@@ -4,6 +4,7 @@ import os
 import re
 import secrets
 import threading
+import unicodedata
 import uuid
 from datetime import datetime, timedelta
 from urllib.parse import urlencode, urlparse, parse_qs
@@ -11,11 +12,14 @@ from urllib.parse import urlencode, urlparse, parse_qs
 import requests
 from dotenv import load_dotenv
 from flask import Flask, flash, jsonify, redirect, render_template, request, send_from_directory, session, url_for
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
 
 from config import Config
-from database import Article, BuzzPost, Comment, Hook, Setting, ThreadsAccount, VideoTrimJob, get_active_account, db
+from database import (
+    Article, BuzzPost, Comment, DailyStat, Group, Hook, Member, PostStat,
+    Setting, ThreadsAccount, VideoTrimJob, get_active_account, db,
+)
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -94,6 +98,8 @@ def _migrate_db():
         ("is_fancam", "INTEGER DEFAULT 0"),
         ("view_count", "INTEGER"),
         ("account_id", "INTEGER"),
+        ("group_id", "INTEGER"),
+        ("member_id", "INTEGER"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -516,9 +522,11 @@ def pending():
         ).all()
     } if articles else {}
 
+    all_groups = Group.query.order_by(Group.name.asc()).all()
+
     return render_template("pending.html", articles=articles, images_map=images_map,
                            active_tab=tab, counts=counts, now_utc=datetime.utcnow(),
-                           active_trim_jobs=active_trim_jobs)
+                           active_trim_jobs=active_trim_jobs, all_groups=all_groups)
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
@@ -560,6 +568,43 @@ def delete_all_pending():
     return redirect(url_for("pending", account_id=account_id) if account_id else url_for("pending"))
 
 
+def _normalize_tag_name(name: str) -> str:
+    """グループ・メンバー名の表記ゆれ（前後空白・全角/半角・大文字小文字）を吸収する正規化キーを作る。"""
+    return unicodedata.normalize("NFKC", (name or "").strip()).lower()
+
+
+def _resolve_group_and_member(group_name: str, member_name: str) -> tuple:
+    """自由入力のグループ名・メンバー名からgroup_id・member_idを解決する。
+    マスタに存在しなければ自動作成する。group_nameが空なら (None, None)。
+    group_nameが空でmember_nameだけある場合はmember_nameを無視する。"""
+    group_name = (group_name or "").strip()
+    member_name = (member_name or "").strip()
+
+    if not group_name:
+        if member_name:
+            logger.warning("グループ名なしでメンバー名のみ指定されたため無視: member_name=%r", member_name)
+        return None, None
+
+    norm = _normalize_tag_name(group_name)
+    group = Group.query.filter_by(normalized_name=norm).first()
+    if not group:
+        group = Group(name=group_name, normalized_name=norm)
+        db.session.add(group)
+        db.session.flush()
+
+    if not member_name:
+        return group.id, None
+
+    mnorm = _normalize_tag_name(member_name)
+    member = Member.query.filter_by(group_id=group.id, normalized_name=mnorm).first()
+    if not member:
+        member = Member(group_id=group.id, name=member_name, normalized_name=mnorm)
+        db.session.add(member)
+        db.session.flush()
+
+    return group.id, member.id
+
+
 @app.route("/articles/<int:id>/approve", methods=["POST"])
 def approve_article(id):
     from scheduler import next_post_slot
@@ -567,6 +612,14 @@ def approve_article(id):
 
     article = Article.query.get_or_404(id)
     article.status = "queued"
+
+    tag_data = request.get_json(silent=True) or {}
+    group_name = tag_data.get("group_name", "")
+    member_name = tag_data.get("member_name", "")
+    if group_name or member_name:
+        group_id, member_id = _resolve_group_and_member(group_name, member_name)
+        article.group_id = group_id
+        article.member_id = member_id
 
     slot_utc = next_post_slot(app, account_id=article.account_id)
     if slot_utc:
