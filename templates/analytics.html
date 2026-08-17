@@ -1,0 +1,188 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0 fw-bold">分析</h4>
+</div>
+
+<!-- フォロワー数・閲覧数の推移 -->
+<div class="card p-3 mb-4">
+  <h6 class="fw-bold mb-3">フォロワー数・閲覧数の推移</h6>
+  {% if daily_rows %}
+  <canvas id="daily-chart" height="90"></canvas>
+  {% else %}
+  <p class="text-muted mb-0">データがありません。下のフォームから過去分を投入するか、日次スナップショットの実行を待ってください。</p>
+  {% endif %}
+</div>
+
+<!-- 手動データ投入フォーム -->
+<div class="card p-3 mb-4">
+  <h6 class="fw-bold mb-3">過去分データの手動投入</h6>
+  <form id="daily-stat-form" class="row g-2 align-items-end" onsubmit="return submitDailyStat(event)">
+    <div class="col-auto">
+      <label class="form-label" style="font-size:.78rem">日付（大まかでよい）</label>
+      <input type="date" id="stat-date" class="form-control form-control-sm" required>
+    </div>
+    <div class="col-auto">
+      <label class="form-label" style="font-size:.78rem">フォロワー数</label>
+      <input type="number" id="stat-followers" class="form-control form-control-sm" min="0" required style="width:120px">
+    </div>
+    <div class="col-auto">
+      <label class="form-label" style="font-size:.78rem">閲覧数（任意）</label>
+      <input type="number" id="stat-views" class="form-control form-control-sm" min="0" style="width:120px">
+    </div>
+    <div class="col-auto">
+      <button type="submit" class="btn btn-sm btn-accent">投入</button>
+    </div>
+    <div class="col-auto" id="daily-stat-result" style="font-size:.8rem"></div>
+  </form>
+</div>
+
+<!-- グループ別・メンバー別 -->
+<div class="row g-3 mb-4">
+  <div class="col-md-6">
+    <div class="card p-3 h-100">
+      <h6 class="fw-bold mb-3">グループ別平均パフォーマンス（7日確定値）</h6>
+      {% if group_rows %}
+      <div class="table-responsive">
+        <table class="table table-hover mb-0" style="font-size:.85rem">
+          <thead>
+            <tr><th>グループ</th><th class="text-end">投稿数</th><th class="text-end">平均いいね</th><th class="text-end">平均閲覧数</th></tr>
+          </thead>
+          <tbody>
+            {% for row in group_rows %}
+            <tr>
+              <td>{{ row.name }}</td>
+              <td class="text-end">{{ row.post_count }}</td>
+              <td class="text-end">{{ "%.1f"|format(row.avg_likes or 0) }}</td>
+              <td class="text-end">{{ "%.1f"|format(row.avg_views or 0) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="text-muted mb-0">7日確定値のあるグループ付き投稿がまだありません。</p>
+      {% endif %}
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card p-3 h-100">
+      <h6 class="fw-bold mb-3">メンバー別平均パフォーマンス（7日確定値）</h6>
+      {% if member_rows %}
+      <div class="table-responsive">
+        <table class="table table-hover mb-0" style="font-size:.85rem">
+          <thead>
+            <tr><th>グループ</th><th>メンバー</th><th class="text-end">投稿数</th><th class="text-end">平均いいね</th><th class="text-end">平均閲覧数</th></tr>
+          </thead>
+          <tbody>
+            {% for row in member_rows %}
+            <tr>
+              <td>{{ row.group_name }}</td>
+              <td>{{ row.member_name }}</td>
+              <td class="text-end">{{ row.post_count }}</td>
+              <td class="text-end">{{ "%.1f"|format(row.avg_likes or 0) }}</td>
+              <td class="text-end">{{ "%.1f"|format(row.avg_views or 0) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="text-muted mb-0">7日確定値のあるメンバー付き投稿がまだありません。</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- 時間帯別 -->
+<div class="card p-3 mb-4">
+  <h6 class="fw-bold mb-3">投稿時刻の時間帯別平均パフォーマンス（JST、7日確定値）</h6>
+  {% if hour_rows %}
+  <div class="table-responsive">
+    <table class="table table-hover mb-0" style="font-size:.85rem">
+      <thead>
+        <tr><th>時間帯</th><th class="text-end">投稿数</th><th class="text-end">平均いいね</th><th class="text-end">平均閲覧数</th></tr>
+      </thead>
+      <tbody>
+        {% for row in hour_rows %}
+        <tr>
+          <td>{{ "%02d"|format(row.hour) }}時台</td>
+          <td class="text-end">{{ row.post_count }}</td>
+          <td class="text-end">{{ "%.1f"|format(row.avg_likes or 0) }}</td>
+          <td class="text-end">{{ "%.1f"|format(row.avg_views or 0) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="text-muted mb-0">7日確定値のある投稿がまだありません。</p>
+  {% endif %}
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+{% if daily_rows %}
+new Chart(document.getElementById('daily-chart'), {
+  type: 'line',
+  data: {
+    labels: {{ daily_labels | tojson }},
+    datasets: [
+      {
+        label: 'フォロワー数',
+        data: {{ daily_followers | tojson }},
+        borderColor: '#c9699f',
+        backgroundColor: 'rgba(201,105,159,.15)',
+        yAxisID: 'y',
+        tension: .25,
+      },
+      {
+        label: '閲覧数',
+        data: {{ daily_views | tojson }},
+        borderColor: '#7b93cf',
+        backgroundColor: 'rgba(123,147,207,.15)',
+        yAxisID: 'y1',
+        tension: .25,
+      },
+    ],
+  },
+  options: {
+    responsive: true,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      y:  { type: 'linear', position: 'left', title: { display: true, text: 'フォロワー数' } },
+      y1: { type: 'linear', position: 'right', title: { display: true, text: '閲覧数' }, grid: { drawOnChartArea: false } },
+    },
+  },
+});
+{% endif %}
+
+function submitDailyStat(event) {
+  event.preventDefault();
+  const stat_date = document.getElementById('stat-date').value;
+  const followers_count = document.getElementById('stat-followers').value;
+  const views_count = document.getElementById('stat-views').value;
+  const resultEl = document.getElementById('daily-stat-result');
+  fetch('/analytics/daily-stats/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ stat_date, followers_count, views_count }).toString(),
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.ok) {
+      location.reload();
+    } else {
+      resultEl.textContent = d.error || '投入に失敗しました';
+      resultEl.style.color = 'var(--accent)';
+    }
+  })
+  .catch(() => { resultEl.textContent = '通信エラーが発生しました'; });
+  return false;
+}
+</script>
+{% endblock %}
