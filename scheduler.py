@@ -482,6 +482,20 @@ def _video_cleanup_job(app):
         logger.info("動画クリーンアップ: %d件対象 %dファイル削除 %dレコード削除", len(targets), deleted_files, len(targets))
 
 
+def _post_stats_job(app):
+    """KPOPアカウント（account_id=1）の投稿別7日間パフォーマンスを日次取得する。"""
+    from analytics_tracker import track_post_stats
+    result = track_post_stats(app, account_id=1)
+    logger.info("投稿別7日間パフォーマンス定期取得: %s", result)
+
+
+def _daily_snapshot_job(app):
+    """KPOPアカウント（account_id=1）のフォロワー数・閲覧数を日次スナップショットする。"""
+    from analytics_tracker import snapshot_daily_stats
+    result = snapshot_daily_stats(app, account_id=1)
+    logger.info("日次フォロワー・閲覧数スナップショット: %s", result)
+
+
 def setup_scheduler(app):
     """スケジューラを初期化して起動する。"""
     _setup_weekly_post_jobs(app)
@@ -528,8 +542,27 @@ def setup_scheduler(app):
         replace_existing=True,
     )
 
+    scheduler.add_job(
+        _post_stats_job,
+        CronTrigger(hour=2, minute=30, timezone="Asia/Tokyo"),
+        args=[app],
+        id="post_stats_daily",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        _daily_snapshot_job,
+        CronTrigger(hour=3, minute=30, timezone="Asia/Tokyo"),
+        args=[app],
+        id="daily_snapshot",
+        replace_existing=True,
+    )
+
     app.reschedule_post_jobs = lambda: _setup_weekly_post_jobs(app)
 
     scheduler.start()
-    logger.info("Scheduler started (post backup 5min, comments/rollover 30min, engagement 2:00 JST, video cleanup 3:00 JST)")
+    logger.info(
+        "Scheduler started (post backup 5min, comments/rollover 30min, engagement 2:00 JST, "
+        "video cleanup 3:00 JST, post stats 2:30 JST, daily snapshot 3:30 JST)"
+    )
     return scheduler
