@@ -357,6 +357,38 @@
   <input type="hidden" name="account_id" value="{{ nav_active_account_id or '' }}">
 </form>
 
+{% if nav_is_kpop_account %}
+<!-- グループ・メンバータグ付けモーダル -->
+<div id="tag-modal" class="d-none"
+     style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;"
+     onclick="if(event.target===this)closeTagModal()">
+  <div style="background:#fff;border-radius:16px;width:min(400px,94vw);padding:20px;position:relative;"
+       onclick="event.stopPropagation()">
+    <button type="button" onclick="closeTagModal()"
+            style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:1.3rem;cursor:pointer;color:#888;line-height:1;padding:0">✕</button>
+    <h6 class="fw-bold mb-3" style="color:#000">グループ・メンバーを入力（任意）</h6>
+    <div class="mb-2">
+      <label class="form-label" style="font-size:.8rem">グループ名</label>
+      <input type="text" id="tag-group-input" class="form-control form-control-sm"
+             list="tag-group-suggestions" placeholder="例: IVE">
+      <datalist id="tag-group-suggestions">
+        {% for g in all_groups %}
+        <option value="{{ g.name }}">
+        {% endfor %}
+      </datalist>
+    </div>
+    <div class="mb-3">
+      <label class="form-label" style="font-size:.8rem">メンバー名（空欄可）</label>
+      <input type="text" id="tag-member-input" class="form-control form-control-sm" placeholder="例: ウォニョン">
+    </div>
+    <div class="d-flex gap-2 justify-content-end">
+      <button type="button" class="btn btn-sm btn-outline-secondary" onclick="closeTagModal()">キャンセル</button>
+      <button type="button" class="btn btn-sm btn-success" onclick="confirmApprove()">承認してキューへ</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 {% else %}
 <div class="card p-5 text-center" style="color:var(--text-muted)">
   <i class="bi bi-inbox" style="font-size:2.5rem;display:block;margin-bottom:.5rem"></i>
@@ -477,13 +509,45 @@ function showUndoToast(message, snapshot) {
 }
 
 // ── 承認（Ajax：ページ遷移なし） ───────────────────────────────────────
+let pendingApproveId = null;
+let pendingApproveBtn = null;
+
 function approveArticle(id, btn) {
+  var modal = document.getElementById('tag-modal');
+  if (modal) {
+    pendingApproveId = id;
+    pendingApproveBtn = btn;
+    document.getElementById('tag-group-input').value = '';
+    document.getElementById('tag-member-input').value = '';
+    modal.classList.remove('d-none');
+    return;
+  }
+  doApprove(id, btn, '', '');
+}
+
+function closeTagModal() {
+  document.getElementById('tag-modal').classList.add('d-none');
+  pendingApproveId = null;
+  pendingApproveBtn = null;
+}
+
+function confirmApprove() {
+  var groupName = document.getElementById('tag-group-input').value.trim();
+  var memberName = document.getElementById('tag-member-input').value.trim();
+  var id = pendingApproveId;
+  var btn = pendingApproveBtn;
+  document.getElementById('tag-modal').classList.add('d-none');
+  doApprove(id, btn, groupName, memberName);
+}
+
+function doApprove(id, btn, groupName, memberName) {
   btn.disabled = true;
   const orig = btn.innerHTML;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
   fetch('/articles/' + id + '/approve', {
     method: 'POST',
-    headers: { 'X-Requested-With': 'fetch' }
+    headers: { 'X-Requested-With': 'fetch', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_name: groupName, member_name: memberName })
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {
