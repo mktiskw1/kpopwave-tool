@@ -435,6 +435,11 @@
     <i class="bi bi-magic"></i> フック
   </a>
   {% endif %}
+  {% if nav_is_kpop_account %}
+  <a href="{{ url_for('analytics') }}" class="{% if request.endpoint=='analytics' %}active{% endif %}">
+    <i class="bi bi-bar-chart-fill"></i> 分析
+  </a>
+  {% endif %}
   <a href="{{ url_for('settings') }}" class="{% if request.endpoint=='settings' %}active{% endif %}">
     <i class="bi bi-gear-fill"></i> 設定
   </a>
@@ -520,6 +525,13 @@
         <li class="nav-item">
           <a class="nav-link {% if request.endpoint=='hooks_page' %}active{% endif %}" href="{{ url_for('hooks_page', account_id=nav_active_account_id) }}">
             <i class="bi bi-magic"></i> フック管理
+          </a>
+        </li>
+        {% endif %}
+        {% if nav_is_kpop_account %}
+        <li class="nav-item">
+          <a class="nav-link {% if request.endpoint=='analytics' %}active{% endif %}" href="{{ url_for('analytics') }}">
+            <i class="bi bi-bar-chart-fill"></i> 分析
           </a>
         </li>
         {% endif %}
