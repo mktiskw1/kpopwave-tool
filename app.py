@@ -651,6 +651,7 @@ _ARTICLE_RESTORE_FIELDS = [
     "error_message", "created_at", "like_count", "view_count", "reply_count",
     "repost_count", "quote_count", "engagement_fetched_at", "post_style",
     "image_urls", "content_type", "video_file_path", "is_fancam", "account_id",
+    "group_id", "member_id",
 ]
 _ARTICLE_DATETIME_FIELDS = {
     "published_at", "scheduled_at", "posted_at", "created_at", "engagement_fetched_at",
@@ -1493,7 +1494,7 @@ def analytics():
             FROM post_stats ps
             JOIN articles a ON a.id = ps.article_id
             JOIN groups g ON g.id = a.group_id
-            WHERE ps.is_final = 1 AND a.account_id = :account_id
+            WHERE ps.is_final = 1 AND ps.day_index <= 7 AND a.account_id = :account_id
             GROUP BY g.id
             ORDER BY avg_likes DESC
         """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
@@ -1507,7 +1508,7 @@ def analytics():
             JOIN articles a ON a.id = ps.article_id
             JOIN members m ON m.id = a.member_id
             JOIN groups g ON g.id = m.group_id
-            WHERE ps.is_final = 1 AND a.account_id = :account_id AND a.member_id IS NOT NULL
+            WHERE ps.is_final = 1 AND ps.day_index <= 7 AND a.account_id = :account_id AND a.member_id IS NOT NULL
             GROUP BY m.id
             ORDER BY avg_likes DESC
         """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
@@ -1520,7 +1521,7 @@ def analytics():
                    AVG(ps.likes) AS avg_likes, AVG(ps.views) AS avg_views
             FROM post_stats ps
             JOIN articles a ON a.id = ps.article_id
-            WHERE ps.is_final = 1 AND a.account_id = :account_id AND a.posted_at IS NOT NULL
+            WHERE ps.is_final = 1 AND ps.day_index <= 7 AND a.account_id = :account_id AND a.posted_at IS NOT NULL
             GROUP BY hour
             ORDER BY hour ASC
         """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()

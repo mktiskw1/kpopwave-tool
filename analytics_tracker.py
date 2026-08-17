@@ -87,12 +87,18 @@ def track_post_stats(app, account_id: int = 1) -> dict:
             skipped += 1
             continue
 
+        day_index = _compute_day_index(posted_at, now)
         insights = _fetch_media_insights(post_id, token)
+
         if not insights:
             errors += 1
-            continue
+            if day_index < 7:
+                # まだ7日以内なので今回は記録せず、翌日以降の再取得に委ねる
+                continue
+            # 7日を過ぎても取得できない投稿は、無期限リトライを避けるため
+            # 0値のまま確定させて追跡対象から外す
+            insights = {}
 
-        day_index = _compute_day_index(posted_at, now)
         is_final = day_index >= 7
 
         with app.app_context():
