@@ -42,6 +42,9 @@ class Article(db.Model):
     is_fancam = db.Column(db.Boolean, nullable=True, default=False)
     # マルチアカウント対応
     account_id = db.Column(db.Integer, db.ForeignKey("threads_accounts.id"), nullable=True)
+    # KPOP分析機能: グループ・メンバータグ付け
+    group_id = db.Column(db.Integer, db.ForeignKey("groups.id"), nullable=True)
+    member_id = db.Column(db.Integer, db.ForeignKey("members.id"), nullable=True)
 
     def to_dict(self):
         return {
@@ -184,3 +187,53 @@ class BuzzPost(db.Model):
     memo = db.Column(db.Text, nullable=True)
     analysis = db.Column(db.Text, nullable=True)  # JSON文字列
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class Group(db.Model):
+    __tablename__ = "groups"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    normalized_name = db.Column(db.String(100), nullable=False, unique=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class Member(db.Model):
+    __tablename__ = "members"
+
+    id = db.Column(db.Integer, primary_key=True)
+    group_id = db.Column(db.Integer, db.ForeignKey("groups.id"), nullable=False, index=True)
+    name = db.Column(db.String(100), nullable=False)
+    normalized_name = db.Column(db.String(100), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    __table_args__ = (db.UniqueConstraint("group_id", "normalized_name", name="uq_member_group_normalized"),)
+
+
+class PostStat(db.Model):
+    __tablename__ = "post_stats"
+
+    id = db.Column(db.Integer, primary_key=True)
+    article_id = db.Column(db.Integer, db.ForeignKey("articles.id"), nullable=False, index=True)
+    day_index = db.Column(db.Integer, nullable=False)
+    likes = db.Column(db.Integer, default=0)
+    views = db.Column(db.Integer, default=0)
+    replies = db.Column(db.Integer, default=0)
+    reposts = db.Column(db.Integer, default=0)
+    quotes = db.Column(db.Integer, default=0)
+    is_final = db.Column(db.Boolean, nullable=False, default=False)
+    fetched_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class DailyStat(db.Model):
+    __tablename__ = "daily_stats"
+
+    id = db.Column(db.Integer, primary_key=True)
+    account_id = db.Column(db.Integer, nullable=False, index=True)
+    stat_date = db.Column(db.Date, nullable=False)
+    followers_count = db.Column(db.Integer, nullable=True)
+    views_count = db.Column(db.Integer, nullable=True)
+    source = db.Column(db.String(10), nullable=False, default="api")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    __table_args__ = (db.UniqueConstraint("account_id", "stat_date", name="uq_daily_stat_account_date"),)
