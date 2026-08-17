@@ -1471,6 +1471,102 @@ def delete_hook(id):
     return jsonify({"ok": True})
 
 
+_ANALYTICS_ACCOUNT_ID = 1
+
+
+@app.route("/analytics")
+def analytics():
+    daily_rows = (
+        DailyStat.query
+        .filter_by(account_id=_ANALYTICS_ACCOUNT_ID)
+        .order_by(DailyStat.stat_date.asc())
+        .all()
+    )
+    daily_labels = [d.stat_date.strftime("%Y-%m-%d") for d in daily_rows]
+    daily_followers = [d.followers_count for d in daily_rows]
+    daily_views = [d.views_count for d in daily_rows]
+
+    group_rows = [
+        dict(row) for row in db.session.execute(text("""
+            SELECT g.name AS name, COUNT(*) AS post_count,
+                   AVG(ps.likes) AS avg_likes, AVG(ps.views) AS avg_views
+            FROM post_stats ps
+            JOIN articles a ON a.id = ps.article_id
+            JOIN groups g ON g.id = a.group_id
+            WHERE ps.is_final = 1 AND a.account_id = :account_id
+            GROUP BY g.id
+            ORDER BY avg_likes DESC
+        """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
+    ]
+
+    member_rows = [
+        dict(row) for row in db.session.execute(text("""
+            SELECT g.name AS group_name, m.name AS member_name, COUNT(*) AS post_count,
+                   AVG(ps.likes) AS avg_likes, AVG(ps.views) AS avg_views
+            FROM post_stats ps
+            JOIN articles a ON a.id = ps.article_id
+            JOIN members m ON m.id = a.member_id
+            JOIN groups g ON g.id = m.group_id
+            WHERE ps.is_final = 1 AND a.account_id = :account_id AND a.member_id IS NOT NULL
+            GROUP BY m.id
+            ORDER BY avg_likes DESC
+        """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
+    ]
+
+    hour_rows = [
+        dict(row) for row in db.session.execute(text("""
+            SELECT CAST(strftime('%H', datetime(a.posted_at, '+9 hours')) AS INTEGER) AS hour,
+                   COUNT(*) AS post_count,
+                   AVG(ps.likes) AS avg_likes, AVG(ps.views) AS avg_views
+            FROM post_stats ps
+            JOIN articles a ON a.id = ps.article_id
+            WHERE ps.is_final = 1 AND a.account_id = :account_id AND a.posted_at IS NOT NULL
+            GROUP BY hour
+            ORDER BY hour ASC
+        """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
+    ]
+
+    return render_template(
+        "analytics.html",
+        daily_labels=daily_labels,
+        daily_followers=daily_followers,
+        daily_views=daily_views,
+        daily_rows=daily_rows,
+        group_rows=group_rows,
+        member_rows=member_rows,
+        hour_rows=hour_rows,
+    )
+
+
+@app.route("/analytics/daily-stats/add", methods=["POST"])
+def add_daily_stat():
+    date_str = (request.form.get("stat_date") or "").strip()
+    followers_str = (request.form.get("followers_count") or "").strip()
+    views_str = (request.form.get("views_count") or "").strip()
+
+    if not date_str or not followers_str:
+        return jsonify({"ok": False, "error": "日付とフォロワー数は必須です"}), 400
+    try:
+        stat_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        followers_count = int(followers_str)
+        views_count = int(views_str) if views_str else None
+    except ValueError:
+        return jsonify({"ok": False, "error": "入力値が不正です"}), 400
+
+    row = DailyStat.query.filter_by(account_id=_ANALYTICS_ACCOUNT_ID, stat_date=stat_date).first()
+    if row:
+        row.followers_count = followers_count
+        row.views_count = views_count
+        row.source = "manual"
+    else:
+        db.session.add(DailyStat(
+            account_id=_ANALYTICS_ACCOUNT_ID, stat_date=stat_date,
+            followers_count=followers_count, views_count=views_count, source="manual",
+        ))
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
 @app.route("/auth/threads/manual")
 def threads_auth_manual():
     app_id = Setting.get("meta_app_id")
