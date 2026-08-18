@@ -2239,9 +2239,24 @@ def fill_video_view_counts():
     return jsonify({"ok": True, "updated": updated, "skipped": skipped})
 
 
+def _parse_time_input(s: str | None) -> float | None:
+    """"H:MM:SS" / "MM:SS" / "SS" 形式の文字列を秒数(float)に変換する。空文字列・Noneは None。"""
+    s = (s or "").strip()
+    if not s:
+        return None
+    parts = s.split(":")
+    if len(parts) > 3:
+        raise ValueError("時刻の形式が不正です")
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60 + float(part)
+    return seconds
+
+
 @app.route("/api/videos/add-manual", methods=["POST"])
 def add_video_manual():
     import shutil, tempfile
+    from yt_dlp.utils import download_range_func
 
     data = request.get_json(force=True) or {}
     yt_url = (data.get("url") or "").strip()
@@ -2251,7 +2266,16 @@ def add_video_manual():
     if "youtube.com/watch" not in yt_url and "youtu.be/" not in yt_url and "youtube.com/shorts/" not in yt_url:
         return jsonify({"ok": False, "error": "YouTube動画のURLを入力してください"}), 400
 
-    if Article.query.filter(
+    try:
+        start_time = _parse_time_input(data.get("start_time"))
+        end_time = _parse_time_input(data.get("end_time"))
+    except ValueError:
+        return jsonify({"ok": False, "error": "開始・終了時刻の形式が不正です（例: 1:00:00 または 5:30）"}), 400
+    if start_time is not None and end_time is not None and end_time <= start_time:
+        return jsonify({"ok": False, "error": "終了時刻は開始時刻より後にしてください"}), 400
+    has_range = start_time is not None or end_time is not None
+
+    if not has_range and Article.query.filter(
         Article.url == yt_url,
         Article.status.in_(["pending", "queued"])
     ).first():
@@ -2277,9 +2301,16 @@ def add_video_manual():
 
     title = (full.get("title") or "YouTube動画")[:500]
 
+    # 範囲指定時は動画IDのみでは同一動画の別範囲と衝突するため、範囲をファイル名・URLに含めて一意化する
+    range_suffix = ""
+    if has_range:
+        start_label = int(start_time or 0)
+        end_label = int(end_time) if end_time is not None else ""
+        range_suffix = f"_{start_label}-{end_label}"
+
     tmp_dir = os.path.join(tempfile.gettempdir(), "kpopwave_videos")
     os.makedirs(tmp_dir, exist_ok=True)
-    outtmpl = os.path.join(tmp_dir, f"{vid_id}.%(ext)s")
+    outtmpl = os.path.join(tmp_dir, f"{vid_id}{range_suffix}.%(ext)s")
     ffmpeg_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin")
 
     dl_opts = {
@@ -2291,6 +2322,10 @@ def add_video_manual():
         "no_warnings": True,
         "ignoreerrors": True,
     }
+    if has_range:
+        dl_opts["download_ranges"] = download_range_func(
+            [], [(start_time or 0, end_time if end_time is not None else float("inf"))]
+        )
 
     try:
         with yt_dlp.YoutubeDL(dl_opts) as ydl:
@@ -2299,14 +2334,14 @@ def add_video_manual():
         return jsonify({"ok": False, "error": f"ダウンロードエラー: {str(exc)[:120]}"}), 500
 
     from video_collector import _find_downloaded_file
-    found = _find_downloaded_file(tmp_dir, vid_id)
+    found = _find_downloaded_file(tmp_dir, vid_id + range_suffix)
     if not found:
         return jsonify({"ok": False, "error": "ダウンロードファイルが見つかりません"}), 500
 
     local_path, ext = found
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
     os.makedirs(static_dir, exist_ok=True)
-    dest_filename = f"{vid_id}.{ext}"
+    dest_filename = f"{vid_id}{range_suffix}.{ext}"
     dest_path = os.path.join(static_dir, dest_filename)
 
     try:
@@ -2327,10 +2362,11 @@ def add_video_manual():
             pass
 
     uploader = full.get("uploader") or full.get("channel") or "YouTube"
+    article_url = f"{yt_url}#t={range_suffix[1:]}" if has_range else yt_url
     article = Article(
         feed_source=f"YouTube動画: {uploader}",
         title=title,
-        url=yt_url,
+        url=article_url,
         published_at=published_at,
         raw_content=(full.get("description") or "")[:5000],
         thumbnail_url=full.get("thumbnail") or None,
