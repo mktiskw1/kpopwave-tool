@@ -32,6 +32,10 @@ _ffmpeg_bin_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmp
 if _ffmpeg_bin_dir not in os.environ.get("PATH", ""):
     os.environ["PATH"] = _ffmpeg_bin_dir + os.pathsep + os.environ.get("PATH", "")
 
+# 人気動画ではYouTube側のBot対策によりCookie無しのアクセスが403で拒否されることがあるため、
+# 存在すればこのCookieファイル(Netscape形式)をyt-dlpに渡す。未配置ならNoneのまま(=従来通り無認証)。
+_YOUTUBE_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance", "youtube_cookies.txt")
+
 _THREADS_SCOPES = (
     "threads_basic,threads_content_publish,threads_manage_replies,"
     "threads_read_replies,threads_manage_mentions,threads_manage_insights,"
@@ -2294,6 +2298,8 @@ def add_video_manual():
         return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
 
     info_opts = {"quiet": True, "no_warnings": True, "ignoreerrors": True}
+    if os.path.exists(_YOUTUBE_COOKIE_FILE):
+        info_opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
     try:
         with yt_dlp.YoutubeDL(info_opts) as ydl:
             full = ydl.extract_info(yt_url, download=False)
@@ -2329,6 +2335,8 @@ def add_video_manual():
         "no_warnings": True,
         "ignoreerrors": True,
     }
+    if os.path.exists(_YOUTUBE_COOKIE_FILE):
+        dl_opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
     if has_range:
         dl_opts["download_ranges"] = download_range_func(
             [], [(start_time or 0, end_time if end_time is not None else float("inf"))]
