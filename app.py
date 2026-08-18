@@ -25,6 +25,13 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# yt-dlpの部分ダウンロード可否チェック(FFmpegFD.available())はffmpeg_locationを見ず
+# システムPATHしか見ない上に結果をプロセス内でキャッシュするため、最初のyt-dlp呼び出しより
+# 前、モジュール読み込み時点でPATHに同梱ffmpegを追加しておく必要がある
+_ffmpeg_bin_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin")
+if _ffmpeg_bin_dir not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = _ffmpeg_bin_dir + os.pathsep + os.environ.get("PATH", "")
+
 _THREADS_SCOPES = (
     "threads_basic,threads_content_publish,threads_manage_replies,"
     "threads_read_replies,threads_manage_mentions,threads_manage_insights,"
