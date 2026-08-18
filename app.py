@@ -1527,6 +1527,21 @@ def analytics():
         """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
     ]
 
+    _WEEKDAY_LABELS = {0: "日", 1: "月", 2: "火", 3: "水", 4: "木", 5: "金", 6: "土"}
+    weekday_rows = [
+        {**dict(row), "weekday_label": _WEEKDAY_LABELS[row["weekday"]]}
+        for row in db.session.execute(text("""
+            SELECT CAST(strftime('%w', datetime(a.posted_at, '+9 hours')) AS INTEGER) AS weekday,
+                   COUNT(*) AS post_count,
+                   AVG(ps.likes) AS avg_likes, AVG(ps.views) AS avg_views
+            FROM post_stats ps
+            JOIN articles a ON a.id = ps.article_id
+            WHERE ps.is_final = 1 AND ps.day_index <= 7 AND a.account_id = :account_id AND a.posted_at IS NOT NULL
+            GROUP BY weekday
+            ORDER BY CASE weekday WHEN 0 THEN 7 ELSE weekday END ASC
+        """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
+    ]
+
     return render_template(
         "analytics.html",
         daily_labels=daily_labels,
@@ -1536,6 +1551,7 @@ def analytics():
         group_rows=group_rows,
         member_rows=member_rows,
         hour_rows=hour_rows,
+        weekday_rows=weekday_rows,
     )
 
 
