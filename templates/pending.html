@@ -782,8 +782,15 @@ function pollTrimJob(articleId, jobId, btn, origBtnHtml) {
           setTimeout(check, 3000);
         } else if (d.status === 'done') {
           var msg = document.getElementById('trim-msg-' + articleId);
-          if (msg) msg.style.display = 'block';
-          setTimeout(function() { location.href = '/pending?tab=video'; }, 1000);
+          if (msg) {
+            msg.innerHTML = '✅ 完了！新しいクリップが承認待ちに追加されました　' +
+              '<a href="/pending?tab=video" style="color:#2e7d32;text-decoration:underline;font-weight:700">一覧を更新</a>';
+            msg.style.display = 'block';
+          }
+          if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = origBtnHtml;
+          }
         } else {
           if (btn) {
             btn.disabled = false;
