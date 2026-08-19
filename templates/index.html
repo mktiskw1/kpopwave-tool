@@ -170,9 +170,52 @@ function addVideoManual() {
   var url = input.value.trim();
   if (!url) { input.focus(); return; }
 
+  var startVal = startInput.value.trim();
+  var endVal   = endInput.value.trim();
+
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>ダウンロード中...';
   result.innerHTML = '<span style="color:var(--text-muted)"><span class="spinner-border spinner-border-sm me-1"></span>動画をダウンロード中... しばらくお待ちください</span>';
+
+  if (!startVal && !endVal) {
+    fetch('/api/videos/chapters/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ url: url, account_id: CURRENT_ACCOUNT_ID })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok && d.has_chapters) {
+        window.location.href = '/videos/chapters/' + d.job_id;
+        return;
+      }
+      if (d.ok && !d.has_chapters) {
+        submitAddVideoManual(url, startVal, endVal);
+        return;
+      }
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-camera-video-fill me-1"></i>動画を追加';
+      result.innerHTML =
+        '<span style="color:var(--accent)"><i class="bi bi-exclamation-circle-fill me-1"></i>' +
+        escHtml(d.error) + '</span>';
+    })
+    .catch(function() {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-camera-video-fill me-1"></i>動画を追加';
+      result.innerHTML = '<span style="color:var(--accent)">通信エラーが発生しました</span>';
+    });
+    return;
+  }
+
+  submitAddVideoManual(url, startVal, endVal);
+}
+
+function submitAddVideoManual(url, startVal, endVal) {
+  var input  = document.getElementById('add-video-input');
+  var btn    = document.getElementById('add-video-btn');
+  var result = document.getElementById('add-video-result');
+  var startInput = document.getElementById('add-video-start');
+  var endInput   = document.getElementById('add-video-end');
 
   fetch('/api/videos/add-manual', {
     method: 'POST',
@@ -180,8 +223,8 @@ function addVideoManual() {
     body: JSON.stringify({
       url: url,
       account_id: CURRENT_ACCOUNT_ID,
-      start_time: startInput.value.trim(),
-      end_time: endInput.value.trim()
+      start_time: startVal,
+      end_time: endVal
     })
   })
   .then(function(r) { return r.json(); })
