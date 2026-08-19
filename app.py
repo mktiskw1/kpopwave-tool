@@ -2163,13 +2163,12 @@ def requeue_article(article_id):
             "outtmpl": os.path.join(tmp_dir, f"{vid_id}.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
-            "ignoreerrors": True,
         }
         try:
             with yt_dlp.YoutubeDL(dl_opts) as ydl:
                 ydl.download([yt_url])
         except Exception as exc:
-            return jsonify({"ok": False, "error": f"ダウンロードエラー: {str(exc)[:120]}"}), 500
+            return jsonify({"ok": False, "error": f"ダウンロードエラー: {_classify_ytdlp_error(exc, False)}"}), 500
 
         from video_collector import _find_downloaded_file
         found = _find_downloaded_file(tmp_dir, vid_id)
@@ -2290,6 +2289,30 @@ def _parse_time_input(s: str | None) -> float | None:
     return seconds
 
 
+def _classify_ytdlp_error(exc: Exception, cookie_used: bool) -> str:
+    """yt-dlp/ffmpegの例外を、原因が推測しやすい日本語メッセージに分類する。
+    どのパターンにも一致しない場合は元のエラーメッセージの要点(先頭数行)を返す。"""
+    text = str(exc)
+    lower = text.lower()
+
+    if "403" in text or "forbidden" in lower:
+        if cookie_used:
+            return ("YouTube側の認証エラーです(403 Forbidden)。Cookieの有効期限が切れている可能性があります。"
+                     "Cookieを再エクスポートしてお試しください。")
+        return ("YouTube側の認証エラーです(403 Forbidden)。Cookie未設定のため拒否された可能性があります。"
+                 f"{_YOUTUBE_COOKIE_FILE} にCookieを配置すると解決する場合があります。")
+
+    if "cookie" in lower and any(k in lower for k in ("no such file", "not found", "cannot read", "permission denied")):
+        return f"Cookieファイルが見つからないか読み込めません({_YOUTUBE_COOKIE_FILE} を確認してください)。"
+
+    if any(k in lower for k in ("incomplete youtube id", "is not a valid url", "unsupported url", "looks truncated", "invalid url")):
+        return "URLが正しくない可能性があります。動画IDが省略・欠落していないか確認してください。"
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    summary = " / ".join(lines[:3])[:300]
+    return summary if summary else "不明なエラーが発生しました。"
+
+
 class _YouTubeDownloadNotFoundError(Exception):
     """ダウンロード自体は成功したが、ローカルに出力ファイルが見つからない場合に送出する。"""
 
@@ -2315,7 +2338,6 @@ def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, 
         "outtmpl": outtmpl,
         "quiet": True,
         "no_warnings": True,
-        "ignoreerrors": True,
         **_YT_DLP_JS_OPTS,
     }
     if os.path.exists(_YOUTUBE_COOKIE_FILE):
@@ -2366,8 +2388,9 @@ def add_video_manual():
     except ImportError:
         return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
 
-    info_opts = {"quiet": True, "no_warnings": True, "ignoreerrors": True, **_YT_DLP_JS_OPTS}
-    if os.path.exists(_YOUTUBE_COOKIE_FILE):
+    cookie_used = os.path.exists(_YOUTUBE_COOKIE_FILE)
+    info_opts = {"quiet": True, "no_warnings": True, **_YT_DLP_JS_OPTS}
+    if cookie_used:
         info_opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
     try:
         with yt_dlp.YoutubeDL(info_opts) as ydl:
@@ -2375,7 +2398,7 @@ def add_video_manual():
         if not full:
             return jsonify({"ok": False, "error": "動画情報を取得できませんでした"}), 400
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"動画情報取得エラー: {str(exc)[:120]}"}), 500
+        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_classify_ytdlp_error(exc, cookie_used)}"}), 500
 
     vid_id = full.get("id", "")
     if not vid_id:
@@ -2400,7 +2423,8 @@ def add_video_manual():
     except _YouTubeDownloadNotFoundError:
         return jsonify({"ok": False, "error": "ダウンロードファイルが見つかりません"}), 500
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"ダウンロードエラー: {str(exc)[:120]}"}), 500
+        error_msg = _classify_ytdlp_error(exc, os.path.exists(_YOUTUBE_COOKIE_FILE))
+        return jsonify({"ok": False, "error": f"ダウンロードエラー: {error_msg}"}), 500
 
     local_path, ext = found
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
@@ -2504,7 +2528,7 @@ def _run_chapter_job(app, job_id):
                 any_success = True
             except Exception as exc:
                 clip.status = "failed"
-                clip.error_message = str(exc)[:500]
+                clip.error_message = _classify_ytdlp_error(exc, os.path.exists(_YOUTUBE_COOKIE_FILE))
                 logger.warning("チャプタークリップ取得失敗: job_id=%d chapter_index=%d error=%s",
                                 job_id, clip.chapter_index, clip.error_message)
 
@@ -2533,8 +2557,9 @@ def start_chapter_job():
     except ImportError:
         return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
 
-    info_opts = {"quiet": True, "no_warnings": True, "ignoreerrors": True, **_YT_DLP_JS_OPTS}
-    if os.path.exists(_YOUTUBE_COOKIE_FILE):
+    cookie_used = os.path.exists(_YOUTUBE_COOKIE_FILE)
+    info_opts = {"quiet": True, "no_warnings": True, **_YT_DLP_JS_OPTS}
+    if cookie_used:
         info_opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
     try:
         with yt_dlp.YoutubeDL(info_opts) as ydl:
@@ -2542,7 +2567,7 @@ def start_chapter_job():
         if not full:
             return jsonify({"ok": False, "error": "動画情報を取得できませんでした"}), 400
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"動画情報取得エラー: {str(exc)[:120]}"}), 500
+        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_classify_ytdlp_error(exc, cookie_used)}"}), 500
 
     vid_id = full.get("id", "")
     if not vid_id:
