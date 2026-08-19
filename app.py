@@ -36,6 +36,12 @@ if _ffmpeg_bin_dir not in os.environ.get("PATH", ""):
 # 存在すればこのCookieファイル(Netscape形式)をyt-dlpに渡す。未配置ならNoneのまま(=従来通り無認証)。
 _YOUTUBE_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance", "youtube_cookies.txt")
 
+# Cookie認証時、yt-dlpはJS署名解読が必要なクライアント(web_creator等)を使うようになる。
+# デフォルトではJSランタイムはdenoのみが有効(このマシンには無い)で、node自体があってもyt-dlp公式の
+# 署名解読スクリプト(GitHub上のyt-dlp/ejsから取得)のダウンロードが既定で禁止されているため失敗する。
+# このマシンにはNode.js(v20以上)が入っているため、両方を明示的に有効化する。
+_YT_DLP_JS_OPTS = {"js_runtimes": {"node": {}}, "remote_components": {"ejs:github"}}
+
 _THREADS_SCOPES = (
     "threads_basic,threads_content_publish,threads_manage_replies,"
     "threads_read_replies,threads_manage_mentions,threads_manage_insights,"
@@ -2297,7 +2303,7 @@ def add_video_manual():
     except ImportError:
         return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
 
-    info_opts = {"quiet": True, "no_warnings": True, "ignoreerrors": True}
+    info_opts = {"quiet": True, "no_warnings": True, "ignoreerrors": True, **_YT_DLP_JS_OPTS}
     if os.path.exists(_YOUTUBE_COOKIE_FILE):
         info_opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
     try:
@@ -2334,6 +2340,7 @@ def add_video_manual():
         "quiet": True,
         "no_warnings": True,
         "ignoreerrors": True,
+        **_YT_DLP_JS_OPTS,
     }
     if os.path.exists(_YOUTUBE_COOKIE_FILE):
         dl_opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
