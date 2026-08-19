@@ -237,3 +237,35 @@ class DailyStat(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     __table_args__ = (db.UniqueConstraint("account_id", "stat_date", name="uq_daily_stat_account_date"),)
+
+
+class ChapterJob(db.Model):
+    __tablename__ = "chapter_jobs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    source_url = db.Column(db.String(1000), nullable=False)
+    video_id = db.Column(db.String(50), nullable=False)
+    video_title = db.Column(db.String(500), nullable=True)
+    thumbnail_url = db.Column(db.String(500), nullable=True)
+    account_id = db.Column(db.Integer, nullable=True)
+    status = db.Column(db.String(20), nullable=False, default="processing")  # processing / done / failed
+    error_message = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ChapterClip(db.Model):
+    __tablename__ = "chapter_clips"
+
+    id = db.Column(db.Integer, primary_key=True)
+    job_id = db.Column(db.Integer, db.ForeignKey("chapter_jobs.id"), nullable=False, index=True)
+    chapter_index = db.Column(db.Integer, nullable=False)
+    title = db.Column(db.String(500), nullable=False)
+    start_time = db.Column(db.Float, nullable=False)
+    end_time = db.Column(db.Float, nullable=True)
+    status = db.Column(db.String(20), nullable=False, default="pending")  # pending / downloading / done / failed
+    video_file_path = db.Column(db.String(500), nullable=True)
+    duration = db.Column(db.Float, nullable=True)
+    guessed_group_id = db.Column(db.Integer, db.ForeignKey("groups.id"), nullable=True)
+    error_message = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)

@@ -17,8 +17,8 @@ from sqlalchemy.exc import IntegrityError
 
 from config import Config
 from database import (
-    Article, BuzzPost, Comment, DailyStat, Group, Hook, Member, PostStat,
-    Setting, ThreadsAccount, VideoTrimJob, get_active_account, db,
+    Article, BuzzPost, ChapterClip, ChapterJob, Comment, DailyStat, Group, Hook, Member,
+    PostStat, Setting, ThreadsAccount, VideoTrimJob, get_active_account, db,
 )
 
 load_dotenv()
@@ -620,6 +620,26 @@ def _resolve_group_and_member(group_name: str, member_name: str) -> tuple:
         db.session.flush()
 
     return group.id, member.id
+
+
+def _guess_group_id(chapter_title: str) -> int | None:
+    """"グループ名 (ハングル等) - 曲名" 形式のチャプタータイトルから、既存groupsマスタと
+    正規化キーで完全一致するものがあれば group.id を返す。一致しなければ None(新規作成はしない)。"""
+    if " - " not in chapter_title:
+        return None
+    candidate = chapter_title.split(" - ", 1)[0].strip()
+    if not candidate:
+        return None
+
+    stripped = re.sub(r"\s*\([^)]*\)\s*$", "", candidate).strip()
+    for name in (stripped, candidate):
+        if not name:
+            continue
+        norm = _normalize_tag_name(name)
+        group = Group.query.filter_by(normalized_name=norm).first()
+        if group:
+            return group.id
+    return None
 
 
 @app.route("/articles/<int:id>/approve", methods=["POST"])
