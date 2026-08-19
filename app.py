@@ -2631,6 +2631,7 @@ def chapter_job_confirm(job_id):
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
     added = 0
+    paths_to_delete = []
     for clip in clips:
         if clip.id in selected_ids and clip.status == "done" and clip.video_file_path:
             start_label = int(clip.start_time)
@@ -2649,16 +2650,18 @@ def chapter_job_confirm(job_id):
             db.session.add(article)
             added += 1
         elif clip.video_file_path:
-            full_path = os.path.join(static_dir, clip.video_file_path)
-            if os.path.exists(full_path):
-                try:
-                    os.remove(full_path)
-                except OSError:
-                    pass
+            paths_to_delete.append(os.path.join(static_dir, clip.video_file_path))
 
     ChapterClip.query.filter_by(job_id=job_id).delete(synchronize_session=False)
     db.session.delete(job)
     db.session.commit()
+
+    for full_path in paths_to_delete:
+        if os.path.exists(full_path):
+            try:
+                os.remove(full_path)
+            except OSError:
+                pass
 
     flash(f"{added} 件のクリップを承認待ちに追加しました", "success")
     return redirect(url_for("pending"))
