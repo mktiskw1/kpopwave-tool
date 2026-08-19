@@ -2584,6 +2584,39 @@ def start_chapter_job():
     return jsonify({"ok": True, "has_chapters": True, "job_id": job.id})
 
 
+@app.route("/api/videos/chapters/<int:job_id>/status")
+def chapter_job_status(job_id):
+    job = ChapterJob.query.get_or_404(job_id)
+    clips = ChapterClip.query.filter_by(job_id=job_id).all()
+    completed = sum(1 for c in clips if c.status in ("done", "failed"))
+    failed = sum(1 for c in clips if c.status == "failed")
+    return jsonify({
+        "status": job.status,
+        "total": len(clips),
+        "completed": completed,
+        "failed": failed,
+    })
+
+
+@app.route("/videos/chapters/<int:job_id>")
+def chapter_job_view(job_id):
+    job = ChapterJob.query.get_or_404(job_id)
+    clips = ChapterClip.query.filter_by(job_id=job_id).order_by(ChapterClip.chapter_index).all()
+    total = len(clips)
+    completed = sum(1 for c in clips if c.status in ("done", "failed"))
+
+    group_names = {}
+    group_ids = {c.guessed_group_id for c in clips if c.guessed_group_id}
+    if group_ids:
+        for g in Group.query.filter(Group.id.in_(group_ids)).all():
+            group_names[g.id] = g.name
+
+    return render_template(
+        "chapter_clips.html",
+        job=job, clips=clips, total=total, completed=completed, group_names=group_names,
+    )
+
+
 @app.route("/collect-videos", methods=["POST"])
 def collect_videos():
     from video_collector import collect_youtube_videos as collect_yt_dlp_videos

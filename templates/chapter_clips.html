@@ -1,0 +1,119 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0 fw-bold"><i class="bi bi-collection-play-fill me-2"></i>チャプター分割クリップの確認</h4>
+  <a href="/" class="btn btn-outline-secondary btn-sm">ダッシュボードへ戻る</a>
+</div>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <div class="fw-bold mb-1">{{ job.video_title or job.video_id }}</div>
+    <div style="font-size:.85rem;color:var(--text-muted)">{{ job.source_url }}</div>
+  </div>
+</div>
+
+{% if job.status == "processing" %}
+<div class="card" id="progress-card">
+  <div class="card-body text-center py-5">
+    <div class="spinner-border mb-3" role="status"></div>
+    <div id="progress-text">クリップをダウンロード中... (<span id="progress-completed">{{ completed }}</span> / <span id="progress-total">{{ total }}</span>)</div>
+  </div>
+</div>
+<script>
+(function poll() {
+  fetch('/api/videos/chapters/{{ job.id }}/status')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      document.getElementById('progress-completed').textContent = d.completed;
+      document.getElementById('progress-total').textContent = d.total;
+      if (d.status === 'processing') {
+        setTimeout(poll, 2000);
+      } else {
+        window.location.reload();
+      }
+    })
+    .catch(function() { setTimeout(poll, 3000); });
+})();
+</script>
+
+{% else %}
+
+{% if job.status == "failed" %}
+<div class="alert alert-danger">{{ job.error_message or "ダウンロードに失敗しました" }}</div>
+{% endif %}
+
+<form method="post" action="/videos/chapters/{{ job.id }}/confirm">
+  <div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>クリップを選択(<span>{{ clips | selectattr("status", "equalto", "done") | list | length }}</span> 件が利用可能)</span>
+      <div>
+        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAll(true)">全選択</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAll(false)">全解除</button>
+      </div>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-hover mb-0" style="font-size:.85rem">
+        <thead>
+          <tr>
+            <th style="width:2.5rem"></th>
+            <th style="width:5rem">サムネイル</th>
+            <th>タイトル</th>
+            <th style="width:6rem">長さ</th>
+            <th style="width:10rem">グループ</th>
+            <th style="width:6rem">状態</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in clips %}
+          <tr>
+            <td>
+              {% if c.status == "done" %}
+              <input type="checkbox" class="clip-checkbox" name="clip_ids" value="{{ c.id }}" checked>
+              {% endif %}
+            </td>
+            <td>
+              {% if job.thumbnail_url %}
+              <img src="{{ job.thumbnail_url }}" style="width:64px;height:36px;object-fit:cover;border-radius:4px">
+              {% endif %}
+            </td>
+            <td>{{ c.title }}</td>
+            <td>
+              {% if c.duration %}
+              {{ (c.duration // 60) | int }}:{{ '%02d' % (c.duration % 60) }}
+              {% endif %}
+            </td>
+            <td>
+              {% if c.guessed_group_id and group_names.get(c.guessed_group_id) %}
+              <span class="badge bg-info-subtle text-info-emphasis">{{ group_names[c.guessed_group_id] }}</span>
+              {% else %}
+              <span style="color:var(--text-muted)">未検出</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if c.status == "done" %}<span class="badge badge-posted">OK</span>
+              {% elif c.status == "failed" %}<span class="badge badge-failed" title="{{ c.error_message }}">失敗</span>
+              {% else %}<span class="badge badge-pending">{{ c.status }}</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="mt-3">
+    <button type="submit" class="btn btn-accent px-4">
+      <i class="bi bi-check-circle-fill me-1"></i>選択したクリップを承認待ちに追加
+    </button>
+  </div>
+</form>
+
+<script>
+function toggleAll(checked) {
+  document.querySelectorAll('.clip-checkbox').forEach(function(cb) { cb.checked = checked; });
+}
+</script>
+{% endif %}
+
+{% endblock %}
