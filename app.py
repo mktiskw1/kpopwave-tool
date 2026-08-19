@@ -2290,10 +2290,53 @@ def _parse_time_input(s: str | None) -> float | None:
     return seconds
 
 
+class _YouTubeDownloadNotFoundError(Exception):
+    """ダウンロード自体は成功したが、ローカルに出力ファイルが見つからない場合に送出する。"""
+
+
+def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, end_time: float | None, suffix: str) -> tuple[str, str]:
+    """指定範囲(start_time が None なら動画全体)をダウンロードし、(ローカルの一時ファイルパス, 拡張子) を返す。
+    ダウンロード自体の失敗は例外をそのまま送出する。ダウンロードは成功したがファイルが見つからない場合は
+    _YouTubeDownloadNotFoundError を送出する。"""
+    import tempfile
+    import yt_dlp
+    from yt_dlp.utils import download_range_func
+    from video_collector import _find_downloaded_file
+
+    tmp_dir = os.path.join(tempfile.gettempdir(), "kpopwave_videos")
+    os.makedirs(tmp_dir, exist_ok=True)
+    outtmpl = os.path.join(tmp_dir, f"{vid_id}{suffix}.%(ext)s")
+    ffmpeg_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin")
+
+    dl_opts = {
+        "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]",
+        "ffmpeg_location": ffmpeg_bin,
+        "merge_output_format": "mp4",
+        "outtmpl": outtmpl,
+        "quiet": True,
+        "no_warnings": True,
+        "ignoreerrors": True,
+        **_YT_DLP_JS_OPTS,
+    }
+    if os.path.exists(_YOUTUBE_COOKIE_FILE):
+        dl_opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
+    if start_time is not None:
+        dl_opts["download_ranges"] = download_range_func(
+            [], [(start_time, end_time if end_time is not None else float("inf"))]
+        )
+
+    with yt_dlp.YoutubeDL(dl_opts) as ydl:
+        ydl.download([yt_url])
+
+    found = _find_downloaded_file(tmp_dir, vid_id + suffix)
+    if not found:
+        raise _YouTubeDownloadNotFoundError("ダウンロードファイルが見つかりません")
+    return found
+
+
 @app.route("/api/videos/add-manual", methods=["POST"])
 def add_video_manual():
-    import shutil, tempfile
-    from yt_dlp.utils import download_range_func
+    import shutil
 
     data = request.get_json(force=True) or {}
     yt_url = (data.get("url") or "").strip()
@@ -2347,38 +2390,17 @@ def add_video_manual():
         end_label = int(end_time) if end_time is not None else ""
         range_suffix = f"_{start_label}-{end_label}"
 
-    tmp_dir = os.path.join(tempfile.gettempdir(), "kpopwave_videos")
-    os.makedirs(tmp_dir, exist_ok=True)
-    outtmpl = os.path.join(tmp_dir, f"{vid_id}{range_suffix}.%(ext)s")
-    ffmpeg_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin")
-
-    dl_opts = {
-        "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]",
-        "ffmpeg_location": ffmpeg_bin,
-        "merge_output_format": "mp4",
-        "outtmpl": outtmpl,
-        "quiet": True,
-        "no_warnings": True,
-        "ignoreerrors": True,
-        **_YT_DLP_JS_OPTS,
-    }
-    if os.path.exists(_YOUTUBE_COOKIE_FILE):
-        dl_opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
-    if has_range:
-        dl_opts["download_ranges"] = download_range_func(
-            [], [(start_time or 0, end_time if end_time is not None else float("inf"))]
-        )
-
     try:
-        with yt_dlp.YoutubeDL(dl_opts) as ydl:
-            ydl.download([yt_url])
+        found = _download_youtube_range(
+            yt_url, vid_id,
+            (start_time or 0) if has_range else None,
+            end_time if has_range else None,
+            range_suffix,
+        )
+    except _YouTubeDownloadNotFoundError:
+        return jsonify({"ok": False, "error": "ダウンロードファイルが見つかりません"}), 500
     except Exception as exc:
         return jsonify({"ok": False, "error": f"ダウンロードエラー: {str(exc)[:120]}"}), 500
-
-    from video_collector import _find_downloaded_file
-    found = _find_downloaded_file(tmp_dir, vid_id + range_suffix)
-    if not found:
-        return jsonify({"ok": False, "error": "ダウンロードファイルが見つかりません"}), 500
 
     local_path, ext = found
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
