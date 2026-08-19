@@ -2617,6 +2617,53 @@ def chapter_job_view(job_id):
     )
 
 
+@app.route("/videos/chapters/<int:job_id>/confirm", methods=["POST"])
+def chapter_job_confirm(job_id):
+    job = ChapterJob.query.get_or_404(job_id)
+    selected_ids = set()
+    for raw_id in request.form.getlist("clip_ids"):
+        try:
+            selected_ids.add(int(raw_id))
+        except (TypeError, ValueError):
+            pass
+
+    clips = ChapterClip.query.filter_by(job_id=job_id).all()
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+    added = 0
+    for clip in clips:
+        if clip.id in selected_ids and clip.status == "done" and clip.video_file_path:
+            start_label = int(clip.start_time)
+            end_label = int(clip.end_time) if clip.end_time is not None else ""
+            article = Article(
+                feed_source=f"YouTube動画: {job.video_title or job.video_id}",
+                title=clip.title[:500],
+                url=f"{job.source_url}#t={start_label}-{end_label}",
+                thumbnail_url=job.thumbnail_url,
+                status="pending",
+                content_type="video",
+                video_file_path=clip.video_file_path,
+                group_id=clip.guessed_group_id,
+                account_id=job.account_id,
+            )
+            db.session.add(article)
+            added += 1
+        elif clip.video_file_path:
+            full_path = os.path.join(static_dir, clip.video_file_path)
+            if os.path.exists(full_path):
+                try:
+                    os.remove(full_path)
+                except OSError:
+                    pass
+
+    ChapterClip.query.filter_by(job_id=job_id).delete(synchronize_session=False)
+    db.session.delete(job)
+    db.session.commit()
+
+    flash(f"{added} 件のクリップを承認待ちに追加しました", "success")
+    return redirect(url_for("pending"))
+
+
 @app.route("/collect-videos", methods=["POST"])
 def collect_videos():
     from video_collector import collect_youtube_videos as collect_yt_dlp_videos
