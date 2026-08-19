@@ -2447,6 +2447,143 @@ def add_video_manual():
     return jsonify({"ok": True, "title": title})
 
 
+def _probe_duration(path: str) -> float | None:
+    """ffprobeで動画ファイルの長さ(秒)を取得する。失敗時はNone。"""
+    import subprocess as _sp
+
+    ffprobe_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin", "ffprobe.exe")
+    try:
+        result = _sp.run(
+            [ffprobe_exe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, timeout=30,
+        )
+        return float(result.stdout.decode("utf-8", errors="replace").strip())
+    except Exception:
+        return None
+
+
+def _run_chapter_job(app, job_id):
+    import shutil as _shutil
+    import time as _time
+
+    with app.app_context():
+        job = db.session.get(ChapterJob, job_id)
+        if not job:
+            return
+
+        clips = ChapterClip.query.filter_by(job_id=job_id).order_by(ChapterClip.chapter_index).all()
+        static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
+        os.makedirs(static_dir, exist_ok=True)
+        any_success = False
+
+        for clip in clips:
+            clip.status = "downloading"
+            db.session.commit()
+
+            start_label = int(clip.start_time)
+            end_label = int(clip.end_time) if clip.end_time is not None else ""
+            suffix = f"_{start_label}-{end_label}"
+
+            try:
+                local_path, ext = _download_youtube_range(
+                    job.source_url, job.video_id, clip.start_time, clip.end_time, suffix
+                )
+                dest_filename = f"{job.video_id}{suffix}.{ext}"
+                dest_path = os.path.join(static_dir, dest_filename)
+                _shutil.copy2(local_path, dest_path)
+                try:
+                    os.remove(local_path)
+                except Exception:
+                    pass
+
+                clip.video_file_path = f"videos/{dest_filename}"
+                clip.duration = _probe_duration(dest_path)
+                clip.guessed_group_id = _guess_group_id(clip.title)
+                clip.status = "done"
+                any_success = True
+            except Exception as exc:
+                clip.status = "failed"
+                clip.error_message = str(exc)[:500]
+                logger.warning("チャプタークリップ取得失敗: job_id=%d chapter_index=%d error=%s",
+                                job_id, clip.chapter_index, clip.error_message)
+
+            db.session.commit()
+            _time.sleep(1.5)
+
+        job.status = "done" if any_success else "failed"
+        if not any_success:
+            job.error_message = "全チャプターのダウンロードに失敗しました"
+        db.session.commit()
+        logger.info("チャプタージョブ完了: job_id=%d status=%s clips=%d", job_id, job.status, len(clips))
+
+
+@app.route("/api/videos/chapters/start", methods=["POST"])
+def start_chapter_job():
+    data = request.get_json(force=True) or {}
+    yt_url = (data.get("url") or "").strip()
+
+    if not yt_url:
+        return jsonify({"ok": False, "error": "URLを入力してください"}), 400
+    if "youtube.com/watch" not in yt_url and "youtu.be/" not in yt_url and "youtube.com/shorts/" not in yt_url:
+        return jsonify({"ok": False, "error": "YouTube動画のURLを入力してください"}), 400
+
+    try:
+        import yt_dlp
+    except ImportError:
+        return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
+
+    info_opts = {"quiet": True, "no_warnings": True, "ignoreerrors": True, **_YT_DLP_JS_OPTS}
+    if os.path.exists(_YOUTUBE_COOKIE_FILE):
+        info_opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
+    try:
+        with yt_dlp.YoutubeDL(info_opts) as ydl:
+            full = ydl.extract_info(yt_url, download=False)
+        if not full:
+            return jsonify({"ok": False, "error": "動画情報を取得できませんでした"}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"動画情報取得エラー: {str(exc)[:120]}"}), 500
+
+    vid_id = full.get("id", "")
+    if not vid_id:
+        return jsonify({"ok": False, "error": "動画IDを取得できませんでした"}), 400
+
+    chapters = full.get("chapters") or []
+    if not chapters:
+        return jsonify({"ok": True, "has_chapters": False})
+
+    title = (full.get("title") or "YouTube動画")[:500]
+    job = ChapterJob(
+        source_url=yt_url,
+        video_id=vid_id,
+        video_title=title,
+        thumbnail_url=full.get("thumbnail") or None,
+        account_id=_explicit_account_id(data),
+        status="processing",
+    )
+    db.session.add(job)
+    db.session.flush()
+
+    for idx, ch in enumerate(chapters):
+        ch_start = ch.get("start_time")
+        ch_end = ch.get("end_time")
+        if ch_start is None:
+            continue
+        db.session.add(ChapterClip(
+            job_id=job.id,
+            chapter_index=idx,
+            title=(ch.get("title") or f"チャプター{idx + 1}")[:500],
+            start_time=float(ch_start),
+            end_time=float(ch_end) if ch_end is not None else None,
+            duration=(float(ch_end) - float(ch_start)) if ch_end is not None else None,
+        ))
+    db.session.commit()
+
+    threading.Thread(target=_run_chapter_job, args=(app, job.id), daemon=True).start()
+
+    return jsonify({"ok": True, "has_chapters": True, "job_id": job.id})
+
+
 @app.route("/collect-videos", methods=["POST"])
 def collect_videos():
     from video_collector import collect_youtube_videos as collect_yt_dlp_videos
