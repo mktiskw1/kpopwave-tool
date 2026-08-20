@@ -196,6 +196,18 @@ def _migrate_db():
                 conn.commit()
                 logger.info("DB migration: comments.%s added", col)
 
+    # chapter_jobs テーブル: 既存ファイルからのチャプター分割用カラム
+    existing_chapter_jobs = {c["name"] for c in inspector.get_columns("chapter_jobs")}
+    chapter_job_cols = [
+        ("source_local_path", "VARCHAR(500)"),
+    ]
+    with db.engine.connect() as conn:
+        for col, typedef in chapter_job_cols:
+            if col not in existing_chapter_jobs:
+                conn.execute(text(f"ALTER TABLE chapter_jobs ADD COLUMN {col} {typedef}"))
+                conn.commit()
+                logger.info("DB migration: chapter_jobs.%s added", col)
+
     # hooks テーブル: デフォルトフックの初回投入
     if Hook.query.count() == 0:
         default_hooks = {
@@ -539,11 +551,21 @@ def pending():
         ).all()
     } if articles else {}
 
+    video_paths = [a.video_file_path for a in articles if a.video_file_path]
+    active_chapter_jobs = {
+        j.source_local_path: j.id
+        for j in ChapterJob.query.filter(
+            ChapterJob.source_local_path.in_(video_paths),
+            ChapterJob.status == "processing",
+        ).all()
+    } if video_paths else {}
+
     all_groups = Group.query.order_by(Group.name.asc()).all()
 
     return render_template("pending.html", articles=articles, images_map=images_map,
                            active_tab=tab, counts=counts, now_utc=datetime.utcnow(),
-                           active_trim_jobs=active_trim_jobs, all_groups=all_groups)
+                           active_trim_jobs=active_trim_jobs, active_chapter_jobs=active_chapter_jobs,
+                           all_groups=all_groups)
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
@@ -2495,7 +2517,8 @@ def _probe_duration(path: str) -> float | None:
 
 
 def _run_chapter_job(app, job_id):
-    """動画全体を一度だけダウンロードし(Cookie認証は使わない)、ffmpegでローカルにチャプターごと切り出す。
+    """動画全体を用意し(既存ファイル指定があればそれを使い、なければ一度だけダウンロードする。
+    ダウンロード時はCookie認証を使わない)、ffmpegでローカルにチャプターごと切り出す。
     個別チャプターごとのネットワークアクセスは発生しないため、Cookie認証・JSチャレンジ解決が不要になる。"""
     with app.app_context():
         job = db.session.get(ChapterJob, job_id)
@@ -2503,23 +2526,39 @@ def _run_chapter_job(app, job_id):
             return
 
         clips = ChapterClip.query.filter_by(job_id=job_id).order_by(ChapterClip.chapter_index).all()
-        static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
-        os.makedirs(static_dir, exist_ok=True)
+        videos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
+        os.makedirs(videos_dir, exist_ok=True)
 
-        try:
-            full_path, ext = _download_youtube_range(
-                job.source_url, job.video_id, None, None, "", use_cookie=False
-            )
-        except Exception as exc:
-            error_msg = _classify_ytdlp_error(exc)
-            job.status = "failed"
-            job.error_message = f"元動画のダウンロードに失敗しました: {error_msg}"
-            for clip in clips:
-                clip.status = "failed"
-                clip.error_message = error_msg
-            db.session.commit()
-            logger.warning("チャプタージョブ失敗(フルダウンロード): job_id=%d error=%s", job_id, error_msg)
-            return
+        use_local_source = bool(job.source_local_path)
+        if use_local_source:
+            static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+            full_path = os.path.join(static_dir, job.source_local_path)
+            if not os.path.exists(full_path):
+                error_msg = f"元動画ファイルが見つかりません({job.source_local_path})"
+                job.status = "failed"
+                job.error_message = error_msg
+                for clip in clips:
+                    clip.status = "failed"
+                    clip.error_message = error_msg
+                db.session.commit()
+                logger.warning("チャプタージョブ失敗(既存ファイル不在): job_id=%d path=%s", job_id, job.source_local_path)
+                return
+            ext = os.path.splitext(full_path)[1].lstrip(".") or "mp4"
+        else:
+            try:
+                full_path, ext = _download_youtube_range(
+                    job.source_url, job.video_id, None, None, "", use_cookie=False
+                )
+            except Exception as exc:
+                error_msg = _classify_ytdlp_error(exc)
+                job.status = "failed"
+                job.error_message = f"元動画のダウンロードに失敗しました: {error_msg}"
+                for clip in clips:
+                    clip.status = "failed"
+                    clip.error_message = error_msg
+                db.session.commit()
+                logger.warning("チャプタージョブ失敗(フルダウンロード): job_id=%d error=%s", job_id, error_msg)
+                return
 
         any_success = False
         for clip in clips:
@@ -2529,7 +2568,7 @@ def _run_chapter_job(app, job_id):
             start_label = int(clip.start_time)
             end_label = int(clip.end_time) if clip.end_time is not None else ""
             dest_filename = f"{job.video_id}_{start_label}-{end_label}.{ext}"
-            dest_path = os.path.join(static_dir, dest_filename)
+            dest_path = os.path.join(videos_dir, dest_filename)
 
             try:
                 _ffmpeg_trim_clip(full_path, dest_path, clip.start_time, clip.end_time)
@@ -2546,16 +2585,53 @@ def _run_chapter_job(app, job_id):
 
             db.session.commit()
 
-        try:
-            os.remove(full_path)
-        except OSError:
-            pass
+        # ダウンロードした一時ファイルのみ削除する(既存ファイル指定時は元のArticleのファイルなので残す)
+        if not use_local_source:
+            try:
+                os.remove(full_path)
+            except OSError:
+                pass
 
         job.status = "done" if any_success else "failed"
         if not any_success:
             job.error_message = "全チャプターの生成に失敗しました"
         db.session.commit()
         logger.info("チャプタージョブ完了: job_id=%d status=%s clips=%d", job_id, job.status, len(clips))
+
+
+def _create_chapter_job(yt_url: str, vid_id: str, chapters: list, video_title: str,
+                         thumbnail_url: str | None, account_id, source_local_path: str | None = None) -> "ChapterJob":
+    """ChapterJob・ChapterClip群を作成しコミットした上でバックグラウンドジョブを起動し、作成したjobを返す。
+    呼び出し側はchaptersが空でないことを事前に確認しておくこと。"""
+    job = ChapterJob(
+        source_url=yt_url,
+        video_id=vid_id,
+        video_title=video_title,
+        thumbnail_url=thumbnail_url,
+        account_id=account_id,
+        status="processing",
+        source_local_path=source_local_path,
+    )
+    db.session.add(job)
+    db.session.flush()
+
+    for idx, ch in enumerate(chapters):
+        ch_start = ch.get("start_time")
+        ch_end = ch.get("end_time")
+        if ch_start is None:
+            continue
+        db.session.add(ChapterClip(
+            job_id=job.id,
+            chapter_index=idx,
+            title=(ch.get("title") or f"チャプター{idx + 1}")[:500],
+            start_time=float(ch_start),
+            end_time=float(ch_end) if ch_end is not None else None,
+            duration=(float(ch_end) - float(ch_start)) if ch_end is not None else None,
+        ))
+    db.session.commit()
+
+    threading.Thread(target=_run_chapter_job, args=(app, job.id), daemon=True).start()
+    return job
 
 
 @app.route("/api/videos/chapters/start", methods=["POST"])
@@ -2592,33 +2668,63 @@ def start_chapter_job():
         return jsonify({"ok": True, "has_chapters": False})
 
     title = (full.get("title") or "YouTube動画")[:500]
-    job = ChapterJob(
-        source_url=yt_url,
-        video_id=vid_id,
-        video_title=title,
-        thumbnail_url=full.get("thumbnail") or None,
-        account_id=_explicit_account_id(data),
-        status="processing",
-    )
-    db.session.add(job)
-    db.session.flush()
+    job = _create_chapter_job(yt_url, vid_id, chapters, title, full.get("thumbnail") or None,
+                               _explicit_account_id(data))
 
-    for idx, ch in enumerate(chapters):
-        ch_start = ch.get("start_time")
-        ch_end = ch.get("end_time")
-        if ch_start is None:
-            continue
-        db.session.add(ChapterClip(
-            job_id=job.id,
-            chapter_index=idx,
-            title=(ch.get("title") or f"チャプター{idx + 1}")[:500],
-            start_time=float(ch_start),
-            end_time=float(ch_end) if ch_end is not None else None,
-            duration=(float(ch_end) - float(ch_start)) if ch_end is not None else None,
-        ))
-    db.session.commit()
+    return jsonify({"ok": True, "has_chapters": True, "job_id": job.id})
 
-    threading.Thread(target=_run_chapter_job, args=(app, job.id), daemon=True).start()
+
+@app.route("/api/videos/chapters/start-from-article", methods=["POST"])
+def start_chapter_job_from_article():
+    data = request.get_json(force=True) or {}
+    try:
+        article_id = int(data.get("article_id"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "article_idが不正です"}), 400
+
+    article = db.session.get(Article, article_id)
+    if not article:
+        return jsonify({"ok": False, "error": "記事が見つかりません"}), 404
+    if (article.content_type or "article") != "video" or not article.video_file_path:
+        return jsonify({"ok": False, "error": "この記事には動画ファイルがありません"}), 400
+    if "#t=" in (article.url or ""):
+        return jsonify({"ok": False, "error": "この動画は範囲指定でダウンロードされた部分クリップのため、チャプター分割には使用できません"}), 400
+
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    local_path = os.path.join(static_dir, article.video_file_path)
+    if not os.path.exists(local_path):
+        return jsonify({"ok": False, "error": f"動画ファイルが見つかりません({article.video_file_path})。ファイルが削除されているか移動されている可能性があります。"}), 400
+    if _probe_duration(local_path) is None:
+        return jsonify({"ok": False, "error": "動画ファイルが壊れているか、読み込めません。"}), 400
+
+    yt_url = article.url
+
+    try:
+        import yt_dlp
+    except ImportError:
+        return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
+
+    info_opts = {"quiet": True, "no_warnings": True}
+    try:
+        with yt_dlp.YoutubeDL(info_opts) as ydl:
+            full = ydl.extract_info(yt_url, download=False)
+        if not full:
+            return jsonify({"ok": False, "error": "動画情報を取得できませんでした"}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_classify_ytdlp_error(exc)}"}), 500
+
+    vid_id = full.get("id", "")
+    if not vid_id:
+        return jsonify({"ok": False, "error": "動画IDを取得できませんでした"}), 400
+
+    chapters = full.get("chapters") or []
+    if not chapters:
+        return jsonify({"ok": True, "has_chapters": False})
+
+    title = article.title or (full.get("title") or "YouTube動画")[:500]
+    job = _create_chapter_job(yt_url, vid_id, chapters, title,
+                               article.thumbnail_url or full.get("thumbnail") or None,
+                               article.account_id, source_local_path=article.video_file_path)
 
     return jsonify({"ok": True, "has_chapters": True, "job_id": job.id})
 

@@ -248,6 +248,9 @@ class ChapterJob(db.Model):
     video_title = db.Column(db.String(500), nullable=True)
     thumbnail_url = db.Column(db.String(500), nullable=True)
     account_id = db.Column(db.Integer, nullable=True)
+    # 既存のダウンロード済みファイルから開始した場合、static/配下の相対パス(Article.video_file_pathと同形式)。
+    # 設定されている場合、_run_chapter_jobは再ダウンロードせずこのファイルを使う(処理後も削除しない)。
+    source_local_path = db.Column(db.String(500), nullable=True)
     status = db.Column(db.String(20), nullable=False, default="processing")  # processing / done / failed
     error_message = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
