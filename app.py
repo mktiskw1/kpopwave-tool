@@ -1956,8 +1956,34 @@ def collect_youtube():
     return redirect(url_for("index"))
 
 
-def _run_trim_job(app, job_id):
+def _ffmpeg_trim_clip(source_path: str, dest_path: str, start: float, end: float | None, timeout: int = 600) -> None:
+    """ffmpegで source_path の [start, end) 区間を dest_path に切り出す。end が None なら start 以降を最後まで。
+    失敗時は例外(メッセージにffmpegのstderr末尾500文字を含む)を送出する。"""
     import subprocess as _sp
+
+    ffmpeg_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin", "ffmpeg.exe")
+
+    # -ss を -i より前に置くキーフレームシークで高速化する。
+    # この場合 -to は使えない（シーク後の相対時刻ではなく元の絶対時刻のままになるため）ので、
+    # 代わりに相対時間指定の -t (end - start) を使う。
+    cmd = [ffmpeg_exe, "-y", "-ss", str(start), "-i", source_path]
+    if end is not None:
+        cmd += ["-t", str(end - start)]
+    cmd += [
+        "-c:v", "libx264", "-crf", "23", "-preset", "veryfast",
+        "-c:a", "aac", "-b:a", "128k",
+        "-avoid_negative_ts", "make_zero",
+        "-movflags", "+faststart",
+        dest_path,
+    ]
+
+    result = _sp.run(cmd, capture_output=True, timeout=timeout)
+    if result.returncode != 0:
+        err = result.stderr.decode("utf-8", errors="replace")[-500:]
+        raise RuntimeError(err)
+
+
+def _run_trim_job(app, job_id):
     import shutil as _shutil
     import time as _time
 
@@ -1970,7 +1996,6 @@ def _run_trim_job(app, job_id):
             static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
             video_path = os.path.join(static_dir, article.video_file_path)
 
-            ffmpeg_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin", "ffmpeg.exe")
             videos_dir = os.path.join(static_dir, "videos")
 
             # 元ファイルのベース名（拡張子なし）
@@ -1992,23 +2017,10 @@ def _run_trim_job(app, job_id):
             clip_filename = f"{base_name}_clip_{clip_num}.mp4"
             clip_path = os.path.join(videos_dir, clip_filename)
 
-            # -ss を -i より前に置くキーフレームシークで高速化する。
-            # この場合 -to は使えない（シーク後の相対時刻ではなく元の絶対時刻のままになるため）ので、
-            # 代わりに相対時間指定の -t (end - start) を使う。
-            cmd = [ffmpeg_exe, "-y", "-ss", str(job.start), "-i", video_path]
-            if job.end is not None:
-                cmd += ["-t", str(job.end - job.start)]
-            cmd += [
-                "-c:v", "libx264", "-crf", "23", "-preset", "veryfast",
-                "-c:a", "aac", "-b:a", "128k",
-                "-avoid_negative_ts", "make_zero",
-                "-movflags", "+faststart",
-                clip_path,
-            ]
-
-            result = _sp.run(cmd, capture_output=True, timeout=600)
-            if result.returncode != 0:
-                err = result.stderr.decode("utf-8", errors="replace")[-500:]
+            try:
+                _ffmpeg_trim_clip(video_path, clip_path, job.start, job.end)
+            except Exception as exc:
+                err = str(exc)[:500]
                 job.status = "failed"
                 job.error_message = err
                 db.session.commit()
@@ -2168,7 +2180,7 @@ def requeue_article(article_id):
             with yt_dlp.YoutubeDL(dl_opts) as ydl:
                 ydl.download([yt_url])
         except Exception as exc:
-            return jsonify({"ok": False, "error": f"ダウンロードエラー: {_classify_ytdlp_error(exc, False)}"}), 500
+            return jsonify({"ok": False, "error": f"ダウンロードエラー: {_classify_ytdlp_error(exc)}"}), 500
 
         from video_collector import _find_downloaded_file
         found = _find_downloaded_file(tmp_dir, vid_id)
@@ -2289,21 +2301,14 @@ def _parse_time_input(s: str | None) -> float | None:
     return seconds
 
 
-def _classify_ytdlp_error(exc: Exception, cookie_used: bool) -> str:
+def _classify_ytdlp_error(exc: Exception) -> str:
     """yt-dlp/ffmpegの例外を、原因が推測しやすい日本語メッセージに分類する。
     どのパターンにも一致しない場合は元のエラーメッセージの要点(先頭数行)を返す。"""
     text = str(exc)
     lower = text.lower()
 
     if "403" in text or "forbidden" in lower:
-        if cookie_used:
-            return ("YouTube側の認証エラーです(403 Forbidden)。Cookieの有効期限が切れている可能性があります。"
-                     "Cookieを再エクスポートしてお試しください。")
-        return ("YouTube側の認証エラーです(403 Forbidden)。Cookie未設定のため拒否された可能性があります。"
-                 f"{_YOUTUBE_COOKIE_FILE} にCookieを配置すると解決する場合があります。")
-
-    if "cookie" in lower and any(k in lower for k in ("no such file", "not found", "cannot read", "permission denied")):
-        return f"Cookieファイルが見つからないか読み込めません({_YOUTUBE_COOKIE_FILE} を確認してください)。"
+        return "YouTube側の認証エラーです(403)。この動画は現在ダウンロードできない可能性があります。"
 
     if any(k in lower for k in ("incomplete youtube id", "is not a valid url", "unsupported url", "looks truncated", "invalid url")):
         return "URLが正しくない可能性があります。動画IDが省略・欠落していないか確認してください。"
@@ -2317,10 +2322,11 @@ class _YouTubeDownloadNotFoundError(Exception):
     """ダウンロード自体は成功したが、ローカルに出力ファイルが見つからない場合に送出する。"""
 
 
-def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, end_time: float | None, suffix: str) -> tuple[str, str]:
+def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, end_time: float | None, suffix: str, use_cookie: bool = True) -> tuple[str, str]:
     """指定範囲(start_time が None なら動画全体)をダウンロードし、(ローカルの一時ファイルパス, 拡張子) を返す。
     ダウンロード自体の失敗は例外をそのまま送出する。ダウンロードは成功したがファイルが見つからない場合は
-    _YouTubeDownloadNotFoundError を送出する。"""
+    _YouTubeDownloadNotFoundError を送出する。use_cookie=False の場合、Cookie認証・js_runtimes・
+    remote_componentsを一切使わない素のダウンロードを行う(範囲指定なしの通常ダウンロードで十分な場合用)。"""
     import tempfile
     import yt_dlp
     from yt_dlp.utils import download_range_func
@@ -2338,10 +2344,11 @@ def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, 
         "outtmpl": outtmpl,
         "quiet": True,
         "no_warnings": True,
-        **_YT_DLP_JS_OPTS,
     }
-    if os.path.exists(_YOUTUBE_COOKIE_FILE):
-        dl_opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
+    if use_cookie:
+        dl_opts.update(_YT_DLP_JS_OPTS)
+        if os.path.exists(_YOUTUBE_COOKIE_FILE):
+            dl_opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
     if start_time is not None:
         dl_opts["download_ranges"] = download_range_func(
             [], [(start_time, end_time if end_time is not None else float("inf"))]
@@ -2398,7 +2405,7 @@ def add_video_manual():
         if not full:
             return jsonify({"ok": False, "error": "動画情報を取得できませんでした"}), 400
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_classify_ytdlp_error(exc, cookie_used)}"}), 500
+        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_classify_ytdlp_error(exc)}"}), 500
 
     vid_id = full.get("id", "")
     if not vid_id:
@@ -2423,7 +2430,7 @@ def add_video_manual():
     except _YouTubeDownloadNotFoundError:
         return jsonify({"ok": False, "error": "ダウンロードファイルが見つかりません"}), 500
     except Exception as exc:
-        error_msg = _classify_ytdlp_error(exc, os.path.exists(_YOUTUBE_COOKIE_FILE))
+        error_msg = _classify_ytdlp_error(exc)
         return jsonify({"ok": False, "error": f"ダウンロードエラー: {error_msg}"}), 500
 
     local_path, ext = found
@@ -2488,9 +2495,8 @@ def _probe_duration(path: str) -> float | None:
 
 
 def _run_chapter_job(app, job_id):
-    import shutil as _shutil
-    import time as _time
-
+    """動画全体を一度だけダウンロードし(Cookie認証は使わない)、ffmpegでローカルにチャプターごと切り出す。
+    個別チャプターごとのネットワークアクセスは発生しないため、Cookie認証・JSチャレンジ解決が不要になる。"""
     with app.app_context():
         job = db.session.get(ChapterJob, job_id)
         if not job:
@@ -2499,28 +2505,34 @@ def _run_chapter_job(app, job_id):
         clips = ChapterClip.query.filter_by(job_id=job_id).order_by(ChapterClip.chapter_index).all()
         static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
         os.makedirs(static_dir, exist_ok=True)
-        any_success = False
 
+        try:
+            full_path, ext = _download_youtube_range(
+                job.source_url, job.video_id, None, None, "", use_cookie=False
+            )
+        except Exception as exc:
+            error_msg = _classify_ytdlp_error(exc)
+            job.status = "failed"
+            job.error_message = f"元動画のダウンロードに失敗しました: {error_msg}"
+            for clip in clips:
+                clip.status = "failed"
+                clip.error_message = error_msg
+            db.session.commit()
+            logger.warning("チャプタージョブ失敗(フルダウンロード): job_id=%d error=%s", job_id, error_msg)
+            return
+
+        any_success = False
         for clip in clips:
-            clip.status = "downloading"
+            clip.status = "processing"
             db.session.commit()
 
             start_label = int(clip.start_time)
             end_label = int(clip.end_time) if clip.end_time is not None else ""
-            suffix = f"_{start_label}-{end_label}"
+            dest_filename = f"{job.video_id}_{start_label}-{end_label}.{ext}"
+            dest_path = os.path.join(static_dir, dest_filename)
 
             try:
-                local_path, ext = _download_youtube_range(
-                    job.source_url, job.video_id, clip.start_time, clip.end_time, suffix
-                )
-                dest_filename = f"{job.video_id}{suffix}.{ext}"
-                dest_path = os.path.join(static_dir, dest_filename)
-                _shutil.copy2(local_path, dest_path)
-                try:
-                    os.remove(local_path)
-                except Exception:
-                    pass
-
+                _ffmpeg_trim_clip(full_path, dest_path, clip.start_time, clip.end_time)
                 clip.video_file_path = f"videos/{dest_filename}"
                 clip.duration = _probe_duration(dest_path)
                 clip.guessed_group_id = _guess_group_id(clip.title)
@@ -2528,16 +2540,20 @@ def _run_chapter_job(app, job_id):
                 any_success = True
             except Exception as exc:
                 clip.status = "failed"
-                clip.error_message = _classify_ytdlp_error(exc, os.path.exists(_YOUTUBE_COOKIE_FILE))
-                logger.warning("チャプタークリップ取得失敗: job_id=%d chapter_index=%d error=%s",
+                clip.error_message = str(exc)[:500]
+                logger.warning("チャプタークリップ生成失敗: job_id=%d chapter_index=%d error=%s",
                                 job_id, clip.chapter_index, clip.error_message)
 
             db.session.commit()
-            _time.sleep(1.5)
+
+        try:
+            os.remove(full_path)
+        except OSError:
+            pass
 
         job.status = "done" if any_success else "failed"
         if not any_success:
-            job.error_message = "全チャプターのダウンロードに失敗しました"
+            job.error_message = "全チャプターの生成に失敗しました"
         db.session.commit()
         logger.info("チャプタージョブ完了: job_id=%d status=%s clips=%d", job_id, job.status, len(clips))
 
@@ -2557,17 +2573,15 @@ def start_chapter_job():
     except ImportError:
         return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
 
-    cookie_used = os.path.exists(_YOUTUBE_COOKIE_FILE)
-    info_opts = {"quiet": True, "no_warnings": True, **_YT_DLP_JS_OPTS}
-    if cookie_used:
-        info_opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
+    # チャプター検出・後続のフルダウンロードはCookie認証を使わない(通常アクセスで十分)
+    info_opts = {"quiet": True, "no_warnings": True}
     try:
         with yt_dlp.YoutubeDL(info_opts) as ydl:
             full = ydl.extract_info(yt_url, download=False)
         if not full:
             return jsonify({"ok": False, "error": "動画情報を取得できませんでした"}), 400
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_classify_ytdlp_error(exc, cookie_used)}"}), 500
+        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_classify_ytdlp_error(exc)}"}), 500
 
     vid_id = full.get("id", "")
     if not vid_id:

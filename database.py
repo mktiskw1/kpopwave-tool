@@ -263,7 +263,7 @@ class ChapterClip(db.Model):
     title = db.Column(db.String(500), nullable=False)
     start_time = db.Column(db.Float, nullable=False)
     end_time = db.Column(db.Float, nullable=True)
-    status = db.Column(db.String(20), nullable=False, default="pending")  # pending / downloading / done / failed
+    status = db.Column(db.String(20), nullable=False, default="pending")  # pending / processing / done / failed
     video_file_path = db.Column(db.String(500), nullable=True)
     duration = db.Column(db.Float, nullable=True)
     guessed_group_id = db.Column(db.Integer, db.ForeignKey("groups.id"), nullable=True)
