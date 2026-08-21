@@ -14,6 +14,7 @@ import os
 import platform
 import subprocess
 import sys
+import threading
 import time
 
 from watchdog.events import FileSystemEventHandler
@@ -21,17 +22,31 @@ from watchdog.observers.polling import PollingObserver
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WATCH_EXTENSIONS = {".py", ".html"}
-IGNORE_DIRS = {"__pycache__", "instance", ".git", "venv", ".venv"}
+IGNORE_DIRS = {"__pycache__", "instance", ".git", "venv", ".venv", "static"}
 DEBOUNCE = 2.0       # 秒：同一トリガーを無視する時間
 POLL_INTERVAL = 1.0  # 秒：PollingObserver のポーリング間隔
 IS_WINDOWS = platform.system() == "Windows"
 
 
 class _FlaskProcess:
+    """app.py の起動・停止を管理する。
+
+    start()/stop()/check_alive() は、ファイル変更検知スレッド(watchdogのディスパッチャー)と
+    メインスレッド(main() の check_alive ポーリングループ)の両方から self._proc に非同期に
+    アクセスする。ロックなしだと、taskkill で古いプロセスを止めている最中に check_alive() が
+    「プロセスが予期せず停止した」と誤検知して独自に再起動を割り込ませ、app.py が二重起動する
+    競合状態が発生するため、_lock で全操作を排他化する。
+    """
+
     def __init__(self):
         self._proc = None
+        self._lock = threading.Lock()
 
     def start(self):
+        with self._lock:
+            self._start_locked()
+
+    def _start_locked(self):
         self._stop_existing()
         time.sleep(0.5)  # ポート解放を待つ
         print("[watcher] 起動: app.py", flush=True)
@@ -63,14 +78,16 @@ class _FlaskProcess:
             self._proc.wait()
 
     def stop(self):
-        self._stop_existing()
+        with self._lock:
+            self._stop_existing()
         print("[watcher] 終了しました", flush=True)
 
     def check_alive(self):
         """プロセスが予期せず死んでいたら再起動する。"""
-        if self._proc and self._proc.poll() is not None:
-            print("[watcher] プロセスが停止しました。再起動します...", flush=True)
-            self.start()
+        with self._lock:
+            if self._proc and self._proc.poll() is not None:
+                print("[watcher] プロセスが停止しました。再起動します...", flush=True)
+                self._start_locked()
 
 
 class _ChangeHandler(FileSystemEventHandler):
@@ -116,13 +133,28 @@ class _ChangeHandler(FileSystemEventHandler):
         self._trigger(event.dest_path)
 
 
+def _schedule_watches(observer: PollingObserver, handler: FileSystemEventHandler) -> None:
+    """BASE_DIR 直下を非再帰で、IGNORE_DIRS 以外のサブディレクトリのみ再帰で監視登録する。
+
+    IGNORE_DIRS は on_modified/on_created 内のフィルタにしか使われず、PollingObserver.schedule()
+    に BASE_DIR を丸ごと recursive=True で渡すと venv/（数千ファイル）や static/（動画、数十GB）
+    まで毎秒スキャン対象に含まれてしまう（IGNORE_DIRS では除外されない）。個別にスケジュール登録
+    することでスキャン範囲そのものを絞り込む。
+    """
+    observer.schedule(handler, path=BASE_DIR, recursive=False)
+    with os.scandir(BASE_DIR) as entries:
+        for entry in entries:
+            if entry.is_dir() and entry.name not in IGNORE_DIRS:
+                observer.schedule(handler, path=entry.path, recursive=True)
+
+
 def main():
     flask = _FlaskProcess()
     flask.start()
 
     handler = _ChangeHandler(flask)
     observer = PollingObserver(timeout=POLL_INTERVAL)
-    observer.schedule(handler, path=BASE_DIR, recursive=True)
+    _schedule_watches(observer, handler)
     observer.start()
 
     print(f"[watcher] 監視開始: {BASE_DIR}", flush=True)
