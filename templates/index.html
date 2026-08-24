@@ -86,6 +86,7 @@
         <i class="bi bi-search me-1"></i>検索
       </button>
     </div>
+    <div id="mb-history-chips" class="mt-2 d-flex flex-wrap gap-1"></div>
     <div id="mb-search-result" class="mt-3"></div>
   </div>
 </div>
@@ -283,6 +284,76 @@ function escHtml(s) {
 
 var _mbVideos = [];
 
+// ── グループ名検索履歴(localStorage) ──────────────────────────────────────
+var MB_HISTORY_KEY = 'mb_group_history';
+var MB_HISTORY_MAX = 20;
+
+function loadMbHistory() {
+  try {
+    var raw = localStorage.getItem(MB_HISTORY_KEY);
+    var list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveMbHistory(list) {
+  try {
+    localStorage.setItem(MB_HISTORY_KEY, JSON.stringify(list));
+  } catch (e) {
+    // localStorage無効・容量超過時は履歴保存を諦める(検索機能自体は継続動作させる)
+  }
+}
+
+function addMbHistory(name) {
+  name = name.trim();
+  if (!name) return;
+  var list = loadMbHistory().filter(function(n) { return n !== name; });
+  list.unshift(name);
+  if (list.length > MB_HISTORY_MAX) list = list.slice(0, MB_HISTORY_MAX);
+  saveMbHistory(list);
+  renderMbHistory();
+}
+
+function removeMbHistory(name) {
+  saveMbHistory(loadMbHistory().filter(function(n) { return n !== name; }));
+  renderMbHistory();
+}
+
+function selectMbHistory(name) {
+  document.getElementById('mb-group-input').value = name;
+}
+
+function renderMbHistory() {
+  var container = document.getElementById('mb-history-chips');
+  var list = loadMbHistory();
+  container.innerHTML = '';
+  list.forEach(function(name) {
+    var chip = document.createElement('span');
+    chip.className = 'badge bg-secondary-subtle text-secondary-emphasis d-inline-flex align-items-center';
+    chip.style.cssText = 'font-weight:500;font-size:.8rem;padding:.35em .5em;gap:.3em';
+
+    var label = document.createElement('span');
+    label.textContent = name;
+    label.style.cursor = 'pointer';
+    label.title = 'クリックで入力欄に反映';
+    label.onclick = function() { selectMbHistory(name); };
+    chip.appendChild(label);
+
+    var del = document.createElement('span');
+    del.textContent = '×';
+    del.style.cssText = 'cursor:pointer;opacity:.6;padding:0 .15em';
+    del.title = '履歴から削除';
+    del.onclick = function(e) { e.stopPropagation(); removeMbHistory(name); };
+    chip.appendChild(del);
+
+    container.appendChild(chip);
+  });
+}
+
+renderMbHistory();
+
 function searchMusicBank() {
   var btn = document.getElementById('mb-search-btn');
   var result = document.getElementById('mb-search-result');
@@ -292,6 +363,7 @@ function searchMusicBank() {
     document.getElementById('mb-group-input').focus();
     return;
   }
+  addMbHistory(targetGroup);
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>検索中...';
   result.innerHTML = '';
