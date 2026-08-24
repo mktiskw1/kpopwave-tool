@@ -355,9 +355,13 @@ def index():
         for s in ("pending", "queued", "posted", "rejected", "failed")
     }
     recent = _scope(Article.query).order_by(Article.created_at.desc()).limit(15).all()
-    from youtube_collector import MUSIC_BANK_TARGET_GROUP
+    from youtube_collector import PROGRAM_CHANNELS, DEFAULT_PROGRAM_KEY, DEFAULT_TARGET_GROUP
+    program_options = [{"key": k, "name": v["name"]} for k, v in PROGRAM_CHANNELS.items()]
+    group_names = [g.name for g in Group.query.order_by(Group.name.asc()).all()]
     return render_template("index.html", stats=stats, recent=recent,
-                            MUSIC_BANK_TARGET_GROUP=MUSIC_BANK_TARGET_GROUP)
+                            program_options=program_options, group_names=group_names,
+                            DEFAULT_PROGRAM_KEY=DEFAULT_PROGRAM_KEY,
+                            DEFAULT_TARGET_GROUP=DEFAULT_TARGET_GROUP)
 
 
 # ── 承認待ち記事 ───────────────────────────────────────────────────────────
@@ -2389,14 +2393,15 @@ def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, 
 
 @app.route("/api/videos/music-bank/search", methods=["POST"])
 def search_music_bank_videos():
-    from youtube_collector import search_program_videos, MUSIC_BANK_CHANNEL, MUSIC_BANK_TARGET_GROUP
+    from youtube_collector import search_program_videos, DEFAULT_PROGRAM_KEY, DEFAULT_TARGET_GROUP
 
     data = request.get_json(silent=True) or {}
-    target_group = (data.get("target_group") or MUSIC_BANK_TARGET_GROUP).strip()
+    program_key = (data.get("program") or DEFAULT_PROGRAM_KEY).strip()
+    target_group = (data.get("target_group") or DEFAULT_TARGET_GROUP).strip()
     if not target_group:
         return jsonify({"ok": False, "error": "グループ名を入力してください"}), 400
 
-    result = search_program_videos(app, MUSIC_BANK_CHANNEL, target_group)
+    result = search_program_videos(app, program_key, target_group)
     if not result["ok"]:
         return jsonify({"ok": False, "error": result["error"]}), 400
     return jsonify({"ok": True, "videos": result["videos"]})

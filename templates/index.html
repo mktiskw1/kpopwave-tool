@@ -65,13 +65,27 @@
   </div>
 </div>
 
-<!-- Music Bank番組検索 -->
+<!-- 音楽番組検索 -->
 <div class="card mb-4">
-  <div class="card-header"><i class="bi bi-search me-2"></i>Music Bankから{{ MUSIC_BANK_TARGET_GROUP }}の出演回を探す</div>
+  <div class="card-header"><i class="bi bi-search me-2"></i>音楽番組から出演回を探す</div>
   <div class="card-body">
-    <button class="btn btn-accent" onclick="searchMusicBank()" id="mb-search-btn">
-      <i class="bi bi-search me-1"></i>検索
-    </button>
+    <div class="d-flex gap-2 flex-wrap align-items-center">
+      <select id="mb-program-select" class="form-select" style="width:auto;font-size:.88rem">
+        {% for p in program_options %}
+        <option value="{{ p.key }}" {% if p.key == DEFAULT_PROGRAM_KEY %}selected{% endif %}>{{ p.name }}</option>
+        {% endfor %}
+      </select>
+      <input type="text" id="mb-group-input" class="form-control" list="mb-group-list"
+             style="width:220px;font-size:.88rem" placeholder="グループ名" value="{{ DEFAULT_TARGET_GROUP }}">
+      <datalist id="mb-group-list">
+        {% for name in group_names %}
+        <option value="{{ name }}">
+        {% endfor %}
+      </datalist>
+      <button class="btn btn-accent px-3 flex-shrink-0" onclick="searchMusicBank()" id="mb-search-btn">
+        <i class="bi bi-search me-1"></i>検索
+      </button>
+    </div>
     <div id="mb-search-result" class="mt-3"></div>
   </div>
 </div>
@@ -267,12 +281,17 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-var MB_TARGET_GROUP = {{ MUSIC_BANK_TARGET_GROUP | tojson }};
 var _mbVideos = [];
 
 function searchMusicBank() {
   var btn = document.getElementById('mb-search-btn');
   var result = document.getElementById('mb-search-result');
+  var program = document.getElementById('mb-program-select').value;
+  var targetGroup = document.getElementById('mb-group-input').value.trim();
+  if (!targetGroup) {
+    document.getElementById('mb-group-input').focus();
+    return;
+  }
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>検索中...';
   result.innerHTML = '';
@@ -280,7 +299,7 @@ function searchMusicBank() {
   fetch('/api/videos/music-bank/search', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ target_group: MB_TARGET_GROUP })
+    body: JSON.stringify({ program: program, target_group: targetGroup })
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {

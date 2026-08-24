@@ -445,14 +445,41 @@ def collect_youtube_videos(app) -> int:
 
 # ── 番組別グループ検索(Music Bank等) ──────────────────────────────────────────
 # 「(グループ名) (番組名)」で番組の公式チャンネル内を検索し、該当グループの出演回だけを
-# 候補として返す。番組を増やす場合は同じ形の辞書を追加すればよい。
+# 候補として返す。番組を増やす場合は同じ形の辞書をPROGRAM_CHANNELSに追加すればよい。
 
-MUSIC_BANK_CHANNEL = {
-    "name": "Music Bank",
-    "channel_url": "https://www.youtube.com/@kbsworldtv",
-    "handle": "kbsworldtv",
+PROGRAM_CHANNELS = {
+    "music_bank": {
+        # @KBSKPOP はインタビュー・フェイスキャム中心でパフォーマンス映像が少ないため、
+        # 完全なステージ映像が多い @kbsworldtv を使う(実検索で比較確認済み)。
+        "name": "Music Bank",
+        "channel_url": "https://www.youtube.com/@kbsworldtv",
+        "handle": "kbsworldtv",
+    },
+    "inkigayo": {
+        "name": "Inkigayo",
+        "channel_url": "https://www.youtube.com/@SBSKpop",
+        "handle": "SBSKpop",
+    },
+    "music_core": {
+        "name": "Show! Music Core",
+        "channel_url": "https://www.youtube.com/@MBCkpop",
+        "handle": "MBCkpop",
+    },
+    "m_countdown": {
+        # @MnetKpop は古いProduce 101関連コンテンツの別チャンネルで最新投稿がないため、
+        # 実際にM COUNTDOWNの最新動画を投稿している @mnet を使う(実検索で確認済み)。
+        "name": "M COUNTDOWN",
+        "channel_url": "https://www.youtube.com/@mnet",
+        "handle": "mnet",
+    },
+    "the_show": {
+        "name": "THE SHOW",
+        "channel_url": "https://www.youtube.com/@thekpop",
+        "handle": "thekpop",
+    },
 }
-MUSIC_BANK_TARGET_GROUP = "aespa"
+DEFAULT_PROGRAM_KEY = "music_bank"
+DEFAULT_TARGET_GROUP = "aespa"
 
 
 def _parse_duration_iso8601(s: str) -> int:
@@ -493,13 +520,17 @@ def _resolve_channel_id(handle: str, api_key: str, app) -> str:
     return channel_id
 
 
-def search_program_videos(app, channel: dict, target_group: str, max_results: int = 8,
+def search_program_videos(app, program_key: str, target_group: str, max_results: int = 8,
                            fetch_count: int = 25) -> dict:
-    """指定チャンネル内で「(グループ名) (番組名)」を検索し、該当グループの動画候補を返す。
-    YouTube検索APIの q パラメータは緩い関連性マッチングのため、クエリに一致しない
-    (別グループの)動画も混在する。fetch_count件を取得したうえで、タイトルに target_group が
-    単語として含まれるものだけに絞り込み、最大 max_results 件を返す。DBには保存しない。
+    """指定番組(program_key)の公式チャンネル内で「(グループ名) (番組名)」を検索し、
+    該当グループの動画候補を返す。YouTube検索APIの q パラメータは緩い関連性マッチングのため、
+    クエリに一致しない(別グループの)動画も混在する。fetch_count件を取得したうえで、タイトルに
+    target_group が単語として含まれるものだけに絞り込み、最大 max_results 件を返す。DBには保存しない。
     戻り値: {"ok", "error", "videos": [{video_id,title,url,thumbnail,published_at,duration}]}"""
+    channel = PROGRAM_CHANNELS.get(program_key)
+    if not channel:
+        return {"ok": False, "error": f"未対応の番組です({program_key})", "videos": []}
+
     with app.app_context():
         api_key = Setting.get("youtube_api_key", "") or os.getenv("YOUTUBE_API_KEY", "")
     if not api_key:
