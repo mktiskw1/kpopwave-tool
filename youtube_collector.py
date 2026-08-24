@@ -481,6 +481,32 @@ PROGRAM_CHANNELS = {
 DEFAULT_PROGRAM_KEY = "music_bank"
 DEFAULT_TARGET_GROUP = "aespa"
 
+# パフォーマンス映像ではない動画(インタビュー・授賞式・裏話コンテンツ等)をタイトルから除外する。
+# 後から見つかった除外すべきパターンはここに追加すればよい。
+PROGRAM_EXCLUDE_KEYWORDS = frozenset([
+    "interview", "(interview)",
+    "winner's ceremony", "winner ceremony",
+    "drama -",
+    "behind", "backstage",
+    "self-cam diary", "self cam diary",
+])
+
+# Shorts判定。video_collector.py の _SHORTS_TITLE_KEYWORDS / _SHORTS_MAX_DURATION と同じ基準を使う。
+_PROGRAM_SHORTS_TITLE_KEYWORDS = frozenset(["shorts", "#shorts"])
+_PROGRAM_SHORTS_MAX_DURATION = 60
+
+
+def _is_program_excluded(title: str) -> bool:
+    t = title.lower()
+    return any(kw in t for kw in PROGRAM_EXCLUDE_KEYWORDS)
+
+
+def _is_program_shorts(title: str, duration: int) -> bool:
+    t = title.lower()
+    if any(kw in t for kw in _PROGRAM_SHORTS_TITLE_KEYWORDS):
+        return True
+    return 0 < duration <= _PROGRAM_SHORTS_MAX_DURATION
+
 
 def _parse_duration_iso8601(s: str) -> int:
     """PT#H#M#S 形式を秒数に変換する。"""
@@ -520,12 +546,33 @@ def _resolve_channel_id(handle: str, api_key: str, app) -> str:
     return channel_id
 
 
+def _search_channel_videos(query: str, channel_id: str, api_key: str, fetch_count: int, order: str) -> list:
+    resp = requests.get(
+        YOUTUBE_SEARCH_URL,
+        params={
+            "part": "snippet",
+            "q": query,
+            "channelId": channel_id,
+            "type": "video",
+            "order": order,
+            "maxResults": fetch_count,
+            "key": api_key,
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json().get("items", [])
+
+
 def search_program_videos(app, program_key: str, target_group: str, max_results: int = 8,
-                           fetch_count: int = 25) -> dict:
+                           fetch_count: int = 30) -> dict:
     """指定番組(program_key)の公式チャンネル内で「(グループ名) (番組名)」を検索し、
-    該当グループの動画候補を返す。YouTube検索APIの q パラメータは緩い関連性マッチングのため、
-    クエリに一致しない(別グループの)動画も混在する。fetch_count件を取得したうえで、タイトルに
-    target_group が単語として含まれるものだけに絞り込み、最大 max_results 件を返す。DBには保存しない。
+    該当グループのパフォーマンス動画候補を返す。YouTube検索APIの q パラメータは緩い関連性
+    マッチングのため、クエリに一致しない(別グループの)動画も混在する。fetch_count件を取得した
+    うえで、(1)タイトルに target_group が単語として含まれる (2)インタビュー等の非パフォーマンス
+    動画でない (3)Shortsでない、の3条件でフィルタし、最大 max_results 件を返す。
+    order=date で0件だった場合は order=relevance でも検索し、休止中グループ等の過去出演回も
+    拾えるようにする。DBには保存しない。
     戻り値: {"ok", "error", "videos": [{video_id,title,url,thumbnail,published_at,duration}]}"""
     channel = PROGRAM_CHANNELS.get(program_key)
     if not channel:
@@ -541,31 +588,27 @@ def search_program_videos(app, program_key: str, target_group: str, max_results:
         return {"ok": False, "error": f"チャンネルが見つかりません(@{channel['handle']})", "videos": []}
 
     query = f"{target_group} {channel['name']}"
+
+    def _filtered(raw_items):
+        out = []
+        for it in raw_items:
+            title = it.get("snippet", {}).get("title", "")
+            if not _matches_target_artist(title, "", target_group):
+                continue
+            if _is_program_excluded(title):
+                continue
+            out.append(it)
+        return out
+
     try:
-        resp = requests.get(
-            YOUTUBE_SEARCH_URL,
-            params={
-                "part": "snippet",
-                "q": query,
-                "channelId": channel_id,
-                "type": "video",
-                "order": "date",
-                "maxResults": fetch_count,
-                "key": api_key,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        items = resp.json().get("items", [])
+        items = _filtered(_search_channel_videos(query, channel_id, api_key, fetch_count, "date"))
+        if not items:
+            # 直近優先(date)で見つからない場合、関連度順(relevance)でも探す
+            # (休止中グループ等、直近fetch_count件に出演回が無いケースの救済)
+            items = _filtered(_search_channel_videos(query, channel_id, api_key, fetch_count, "relevance"))
     except Exception as exc:
         logger.error("番組別検索エラー(%s): %s", query, exc)
         return {"ok": False, "error": f"YouTube検索エラー: {str(exc)[:150]}", "videos": []}
-
-    # タイトルに target_group が単語として含まれるものだけに絞り込む(検索APIの緩いマッチング対策)
-    items = [
-        it for it in items
-        if _matches_target_artist(it.get("snippet", {}).get("title", ""), "", target_group)
-    ][:max_results]
 
     if not items:
         return {"ok": True, "error": None, "videos": []}
@@ -605,14 +648,20 @@ def search_program_videos(app, program_key: str, target_group: str, max_results:
         if url in existing_urls:
             continue
         snippet = it.get("snippet", {})
+        title = snippet.get("title", "")
+        duration = durations.get(vid, 0)
+        if _is_program_shorts(title, duration):
+            continue
         videos.append({
             "video_id": vid,
-            "title": snippet.get("title", ""),
+            "title": title,
             "url": url,
             "thumbnail": _best_thumbnail(snippet.get("thumbnails", {})),
             "published_at": snippet.get("publishedAt", ""),
-            "duration": durations.get(vid, 0),
+            "duration": duration,
         })
+        if len(videos) >= max_results:
+            break
 
     return {"ok": True, "error": None, "videos": videos}
     return new_count
