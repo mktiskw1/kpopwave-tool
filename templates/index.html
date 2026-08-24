@@ -65,6 +65,17 @@
   </div>
 </div>
 
+<!-- Music Bank番組検索 -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-search me-2"></i>Music Bankから{{ MUSIC_BANK_TARGET_GROUP }}の出演回を探す</div>
+  <div class="card-body">
+    <button class="btn btn-accent" onclick="searchMusicBank()" id="mb-search-btn">
+      <i class="bi bi-search me-1"></i>検索
+    </button>
+    <div id="mb-search-result" class="mt-3"></div>
+  </div>
+</div>
+
 <!-- 最近のアクティビティ -->
 <div class="card">
   <div class="card-header d-flex justify-content-between align-items-center">
@@ -254,6 +265,129 @@ function submitAddVideoManual(url, startVal, endVal) {
 
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+var MB_TARGET_GROUP = {{ MUSIC_BANK_TARGET_GROUP | tojson }};
+var _mbVideos = [];
+
+function searchMusicBank() {
+  var btn = document.getElementById('mb-search-btn');
+  var result = document.getElementById('mb-search-result');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>検索中...';
+  result.innerHTML = '';
+
+  fetch('/api/videos/music-bank/search', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ target_group: MB_TARGET_GROUP })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-search me-1"></i>検索';
+    if (!d.ok) {
+      result.innerHTML = '<span style="color:var(--accent)"><i class="bi bi-exclamation-circle-fill me-1"></i>' + escHtml(d.error) + '</span>';
+      return;
+    }
+    renderMusicBankCandidates(d.videos);
+  })
+  .catch(function() {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-search me-1"></i>検索';
+    result.innerHTML = '<span style="color:var(--accent)">通信エラーが発生しました</span>';
+  });
+}
+
+function renderMusicBankCandidates(videos) {
+  _mbVideos = videos;
+  var result = document.getElementById('mb-search-result');
+
+  if (!videos.length) {
+    result.innerHTML = '<div style="color:var(--text-muted);font-size:.85rem">該当する動画が見つかりませんでした。</div>';
+    return;
+  }
+
+  var rows = videos.map(function(v, i) {
+    var mins = Math.floor(v.duration / 60);
+    var secs = v.duration % 60;
+    var durationLabel = v.duration ? (mins + ':' + (secs < 10 ? '0' : '') + secs) : '-';
+    var pubDate = v.published_at ? v.published_at.slice(0, 10) : '';
+    return '<tr>' +
+      '<td><input type="checkbox" class="mb-checkbox" value="' + i + '" checked></td>' +
+      '<td>' + (v.thumbnail ? '<img src="' + escHtml(v.thumbnail) + '" style="width:64px;height:36px;object-fit:cover;border-radius:4px">' : '') + '</td>' +
+      '<td>' + escHtml(v.title) + '</td>' +
+      '<td>' + escHtml(pubDate) + '</td>' +
+      '<td>' + durationLabel + '</td>' +
+      '</tr>';
+  }).join('');
+
+  result.innerHTML =
+    '<div class="d-flex justify-content-between align-items-center mb-2">' +
+      '<span style="font-size:.85rem">' + videos.length + '件見つかりました</span>' +
+      '<div>' +
+        '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleMbAll(true)">全選択</button> ' +
+        '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleMbAll(false)">全解除</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="table-responsive"><table class="table table-hover mb-2" style="font-size:.85rem"><thead><tr>' +
+      '<th style="width:2.5rem"></th><th style="width:5rem">サムネイル</th><th>タイトル</th><th style="width:6rem">公開日</th><th style="width:5rem">長さ</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    '<button class="btn btn-accent" onclick="addSelectedMusicBankVideos()" id="mb-add-btn">' +
+      '<i class="bi bi-download me-1"></i>選択した動画を追加</button>' +
+    '<div id="mb-add-progress" class="mt-2" style="font-size:.83rem"></div>';
+}
+
+function toggleMbAll(checked) {
+  document.querySelectorAll('.mb-checkbox').forEach(function(cb) { cb.checked = checked; });
+}
+
+function addSelectedMusicBankVideos() {
+  var checkedBoxes = Array.prototype.slice.call(document.querySelectorAll('.mb-checkbox:checked'));
+  if (!checkedBoxes.length) { return; }
+
+  var btn = document.getElementById('mb-add-btn');
+  var progress = document.getElementById('mb-add-progress');
+  btn.disabled = true;
+
+  var indices = checkedBoxes.map(function(cb) { return parseInt(cb.value, 10); });
+  var total = indices.length;
+  var done = 0;
+  var okCount = 0;
+  var errors = [];
+
+  function next() {
+    if (!indices.length) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-download me-1"></i>選択した動画を追加';
+      var msg = okCount + '/' + total + '件追加しました。';
+      progress.innerHTML = '<span style="color:var(--accent3)">' + escHtml(msg) + '</span>' +
+        (okCount > 0 ? ' — <a href="/pending">承認待ち画面で確認</a>' : '') +
+        (errors.length ? '<div style="color:var(--accent)">失敗: ' + escHtml(errors.join(' / ')) + '</div>' : '');
+      return;
+    }
+    var idx = indices.shift();
+    var v = _mbVideos[idx];
+    done++;
+    progress.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>' +
+      'ダウンロード中... (' + done + '/' + total + ') ' + escHtml(v.title.slice(0, 40));
+
+    fetch('/api/videos/add-manual', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ url: v.url, account_id: CURRENT_ACCOUNT_ID })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) { okCount++; } else { errors.push(v.title.slice(0, 30) + ': ' + d.error); }
+      next();
+    })
+    .catch(function() {
+      errors.push(v.title.slice(0, 30) + ': 通信エラー');
+      next();
+    });
+  }
+  next();
 }
 </script>
 {% endblock %}

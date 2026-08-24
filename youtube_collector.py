@@ -441,3 +441,147 @@ def collect_youtube_videos(app) -> int:
 
     logger.info("YouTube収集完了 — 新規追加: %d 件", new_count)
     return new_count
+
+
+# ── 番組別グループ検索(Music Bank等) ──────────────────────────────────────────
+# 「(グループ名) (番組名)」で番組の公式チャンネル内を検索し、該当グループの出演回だけを
+# 候補として返す。番組を増やす場合は同じ形の辞書を追加すればよい。
+
+MUSIC_BANK_CHANNEL = {
+    "name": "Music Bank",
+    "channel_url": "https://www.youtube.com/@kbsworldtv",
+    "handle": "kbsworldtv",
+}
+MUSIC_BANK_TARGET_GROUP = "aespa"
+
+
+def _parse_duration_iso8601(s: str) -> int:
+    """PT#H#M#S 形式を秒数に変換する。"""
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", s or "")
+    if not m:
+        return 0
+    h, mi, sec = (int(x or 0) for x in m.groups())
+    return h * 3600 + mi * 60 + sec
+
+
+def _resolve_channel_id(handle: str, api_key: str, app) -> str:
+    """YouTubeチャンネルのhandleからchannelIdを解決する。チャンネルIDは変わらないため
+    Settingにキャッシュし、以後はAPI呼び出しをスキップする。"""
+    cache_key = f"youtube_channel_id_{handle}"
+    with app.app_context():
+        cached = Setting.get(cache_key, "")
+    if cached:
+        return cached
+
+    try:
+        resp = requests.get(
+            YOUTUBE_CHANNELS_URL,
+            params={"part": "id", "forHandle": handle, "key": api_key},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+    except Exception as exc:
+        logger.error("チャンネルID解決エラー(%s): %s", handle, exc)
+        return ""
+
+    if not items:
+        return ""
+    channel_id = items[0]["id"]
+    with app.app_context():
+        Setting.set(cache_key, channel_id)
+    return channel_id
+
+
+def search_program_videos(app, channel: dict, target_group: str, max_results: int = 8,
+                           fetch_count: int = 25) -> dict:
+    """指定チャンネル内で「(グループ名) (番組名)」を検索し、該当グループの動画候補を返す。
+    YouTube検索APIの q パラメータは緩い関連性マッチングのため、クエリに一致しない
+    (別グループの)動画も混在する。fetch_count件を取得したうえで、タイトルに target_group が
+    単語として含まれるものだけに絞り込み、最大 max_results 件を返す。DBには保存しない。
+    戻り値: {"ok", "error", "videos": [{video_id,title,url,thumbnail,published_at,duration}]}"""
+    with app.app_context():
+        api_key = Setting.get("youtube_api_key", "") or os.getenv("YOUTUBE_API_KEY", "")
+    if not api_key:
+        return {"ok": False, "error": "YouTube APIキーが設定されていません", "videos": []}
+
+    channel_id = _resolve_channel_id(channel["handle"], api_key, app)
+    if not channel_id:
+        return {"ok": False, "error": f"チャンネルが見つかりません(@{channel['handle']})", "videos": []}
+
+    query = f"{target_group} {channel['name']}"
+    try:
+        resp = requests.get(
+            YOUTUBE_SEARCH_URL,
+            params={
+                "part": "snippet",
+                "q": query,
+                "channelId": channel_id,
+                "type": "video",
+                "order": "date",
+                "maxResults": fetch_count,
+                "key": api_key,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+    except Exception as exc:
+        logger.error("番組別検索エラー(%s): %s", query, exc)
+        return {"ok": False, "error": f"YouTube検索エラー: {str(exc)[:150]}", "videos": []}
+
+    # タイトルに target_group が単語として含まれるものだけに絞り込む(検索APIの緩いマッチング対策)
+    items = [
+        it for it in items
+        if _matches_target_artist(it.get("snippet", {}).get("title", ""), "", target_group)
+    ][:max_results]
+
+    if not items:
+        return {"ok": True, "error": None, "videos": []}
+
+    video_ids = [it["id"]["videoId"] for it in items if it.get("id", {}).get("videoId")]
+
+    with app.app_context():
+        existing_urls = {
+            a.url for a in Article.query.filter(
+                Article.url.like("https://www.youtube.com/watch?v=%")
+            ).all()
+        }
+
+    durations = {}
+    for i in range(0, len(video_ids), 50):
+        batch = video_ids[i:i + 50]
+        try:
+            vresp = requests.get(
+                YOUTUBE_VIDEOS_URL,
+                params={"part": "contentDetails", "id": ",".join(batch), "key": api_key},
+                timeout=15,
+            )
+            vresp.raise_for_status()
+            for item in vresp.json().get("items", []):
+                durations[item["id"]] = _parse_duration_iso8601(
+                    item.get("contentDetails", {}).get("duration", "")
+                )
+        except Exception as exc:
+            logger.warning("動画長さ取得エラー: %s", exc)
+
+    videos = []
+    for it in items:
+        vid = it.get("id", {}).get("videoId")
+        if not vid:
+            continue
+        url = f"https://www.youtube.com/watch?v={vid}"
+        if url in existing_urls:
+            continue
+        snippet = it.get("snippet", {})
+        videos.append({
+            "video_id": vid,
+            "title": snippet.get("title", ""),
+            "url": url,
+            "thumbnail": _best_thumbnail(snippet.get("thumbnails", {})),
+            "published_at": snippet.get("publishedAt", ""),
+            "duration": durations.get(vid, 0),
+        })
+
+    return {"ok": True, "error": None, "videos": videos}
+    return new_count

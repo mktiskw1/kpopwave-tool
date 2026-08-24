@@ -355,7 +355,9 @@ def index():
         for s in ("pending", "queued", "posted", "rejected", "failed")
     }
     recent = _scope(Article.query).order_by(Article.created_at.desc()).limit(15).all()
-    return render_template("index.html", stats=stats, recent=recent)
+    from youtube_collector import MUSIC_BANK_TARGET_GROUP
+    return render_template("index.html", stats=stats, recent=recent,
+                            MUSIC_BANK_TARGET_GROUP=MUSIC_BANK_TARGET_GROUP)
 
 
 # ── 承認待ち記事 ───────────────────────────────────────────────────────────
@@ -2383,6 +2385,21 @@ def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, 
     if not found:
         raise _YouTubeDownloadNotFoundError("ダウンロードファイルが見つかりません")
     return found
+
+
+@app.route("/api/videos/music-bank/search", methods=["POST"])
+def search_music_bank_videos():
+    from youtube_collector import search_program_videos, MUSIC_BANK_CHANNEL, MUSIC_BANK_TARGET_GROUP
+
+    data = request.get_json(silent=True) or {}
+    target_group = (data.get("target_group") or MUSIC_BANK_TARGET_GROUP).strip()
+    if not target_group:
+        return jsonify({"ok": False, "error": "グループ名を入力してください"}), 400
+
+    result = search_program_videos(app, MUSIC_BANK_CHANNEL, target_group)
+    if not result["ok"]:
+        return jsonify({"ok": False, "error": result["error"]}), 400
+    return jsonify({"ok": True, "videos": result["videos"]})
 
 
 @app.route("/api/videos/add-manual", methods=["POST"])
