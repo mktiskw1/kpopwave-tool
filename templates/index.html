@@ -406,7 +406,7 @@ function renderMusicBankCandidates(videos) {
     var pubDate = v.published_at ? v.published_at.slice(0, 10) : '';
     return '<tr>' +
       '<td><input type="checkbox" class="mb-checkbox" value="' + i + '" checked></td>' +
-      '<td>' + (v.thumbnail ? '<img src="' + escHtml(v.thumbnail) + '" style="width:64px;height:36px;object-fit:cover;border-radius:4px">' : '') + '</td>' +
+      '<td>' + (v.thumbnail ? '<a href="' + escHtml(v.url) + '" target="_blank" rel="noopener" title="YouTubeで開く"><img src="' + escHtml(v.thumbnail) + '" style="width:64px;height:36px;object-fit:cover;border-radius:4px;cursor:pointer"></a>' : '') + '</td>' +
       '<td>' + escHtml(v.title) + '</td>' +
       '<td>' + escHtml(pubDate) + '</td>' +
       '<td>' + durationLabel + '</td>' +
