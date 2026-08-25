@@ -492,6 +492,14 @@ def _build_image_list(thumbnail_url, image_urls_json, max_images=20):
     return imgs
 
 
+def _is_manual_trim_clip(article) -> bool:
+    """手動トリミング機能(_run_trim_job)で作成されたクリップかどうかを判定する。
+    手動トリミングはURLフラグメントに '#clip_<timestamp>' を付与する。チャプター分割
+    (chapter_job_confirm)・範囲指定ダウンロード(add_video_manual)はどちらも '#t=...' 形式
+    でこれとは異なるため、フラグメントの形で区別できる。"""
+    return "#clip_" in (article.url or "")
+
+
 @app.route("/pending")
 def pending():
     tab = request.args.get("tab", "all")
@@ -509,12 +517,15 @@ def pending():
         "rss":    0,
         "youtube": 0,
         "video":  0,
+        "clipped": 0,
         "posted": _scope(Article.query.filter_by(status="posted", content_type="video")).count(),
     }
     for a in all_pending:
         src = a.feed_source or ""
         if (a.content_type or "article") == "video":
             counts["video"] += 1
+            if _is_manual_trim_clip(a):
+                counts["clipped"] += 1
         elif src.startswith("YouTube:"):
             counts["youtube"] += 1
         else:
@@ -527,6 +538,10 @@ def pending():
         images_map = {}
     elif tab == "video":
         articles = [a for a in all_pending if (a.content_type or "article") == "video"]
+        images_map = {}
+    elif tab == "clipped":
+        articles = [a for a in all_pending
+                    if (a.content_type or "article") == "video" and _is_manual_trim_clip(a)]
         images_map = {}
     elif tab == "youtube":
         articles = [a for a in all_pending
