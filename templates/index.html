@@ -411,12 +411,16 @@ function _mbRowHtml(v, i) {
   var secs = v.duration % 60;
   var durationLabel = v.duration ? (mins + ':' + (secs < 10 ? '0' : '') + secs) : '-';
   var pubDate = v.published_at ? v.published_at.slice(0, 10) : '';
-  return '<tr>' +
-    '<td><input type="checkbox" class="mb-checkbox" value="' + i + '" checked></td>' +
+  return '<tr id="mb-row-' + i + '">' +
+    '<td><input type="checkbox" class="mb-checkbox" value="' + i + '"></td>' +
     '<td>' + (v.thumbnail ? '<a href="' + escHtml(v.url) + '" target="_blank" rel="noopener" title="YouTubeで開く"><img src="' + escHtml(v.thumbnail) + '" style="width:64px;height:36px;object-fit:cover;border-radius:4px;cursor:pointer"></a>' : '') + '</td>' +
     '<td>' + escHtml(v.title) + '</td>' +
     '<td>' + escHtml(pubDate) + '</td>' +
     '<td>' + durationLabel + '</td>' +
+    '<td>' +
+      '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="addSingleMusicBankVideo(' + i + ')" id="mb-single-btn-' + i + '">' +
+        'この動画を追加</button>' +
+    '</td>' +
     '</tr>';
 }
 
@@ -440,7 +444,7 @@ function renderMusicBankCandidates(videos) {
       '</div>' +
     '</div>' +
     '<div class="table-responsive"><table class="table table-hover mb-2" style="font-size:.85rem"><thead><tr>' +
-      '<th style="width:2.5rem"></th><th style="width:5rem">サムネイル</th><th>タイトル</th><th style="width:6rem">公開日</th><th style="width:5rem">長さ</th>' +
+      '<th style="width:2.5rem"></th><th style="width:5rem">サムネイル</th><th>タイトル</th><th style="width:6rem">公開日</th><th style="width:5rem">長さ</th><th style="width:8rem">操作</th>' +
     '</tr></thead><tbody id="mb-tbody">' + rows + '</tbody></table></div>' +
     '<div class="d-flex gap-2 flex-wrap">' +
       '<button class="btn btn-accent" onclick="addSelectedMusicBankVideos()" id="mb-add-btn">' +
@@ -504,6 +508,42 @@ function loadMoreMusicBank() {
 
 function toggleMbAll(checked) {
   document.querySelectorAll('.mb-checkbox').forEach(function(cb) { cb.checked = checked; });
+}
+
+function addSingleMusicBankVideo(index) {
+  var btn = document.getElementById('mb-single-btn-' + index);
+  if (!btn || btn.disabled) return;
+  var v = _mbVideos[index];
+  if (!v) return;
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+
+  fetch('/api/videos/add-manual', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ url: v.url, account_id: CURRENT_ACCOUNT_ID })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      btn.className = 'btn btn-sm btn-success';
+      btn.innerHTML = '<i class="bi bi-check-lg me-1"></i>追加済み';
+      btn.disabled = true;
+      btn.title = '';
+    } else {
+      btn.disabled = false;
+      btn.className = 'btn btn-sm btn-outline-danger';
+      btn.innerHTML = '失敗（再試行）';
+      btn.title = d.error || '';
+    }
+  })
+  .catch(function() {
+    btn.disabled = false;
+    btn.className = 'btn btn-sm btn-outline-danger';
+    btn.innerHTML = '失敗（再試行）';
+    btn.title = '通信エラーが発生しました';
+  });
 }
 
 function addSelectedMusicBankVideos() {
