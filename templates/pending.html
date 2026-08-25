@@ -401,15 +401,14 @@
     <button type="button" onclick="closeTagModal()"
             style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:1.3rem;cursor:pointer;color:#888;line-height:1;padding:0">✕</button>
     <h6 class="fw-bold mb-3" style="color:#000">グループ・メンバーを入力（任意）</h6>
-    <div class="mb-2">
+    <div class="mb-2" style="position:relative">
       <label class="form-label" style="font-size:.8rem">グループ名</label>
       <input type="text" id="tag-group-input" class="form-control form-control-sm"
-             list="tag-group-suggestions" placeholder="例: IVE">
-      <datalist id="tag-group-suggestions">
-        {% for g in all_groups %}
-        <option value="{{ g.name }}">
-        {% endfor %}
-      </datalist>
+             placeholder="例: IVE" autocomplete="off"
+             oninput="renderGroupSuggestions()" onfocus="renderGroupSuggestions()">
+      <div id="tag-group-suggestions-list" class="d-none"
+           style="position:absolute;left:0;right:0;z-index:10;background:#fff;border:1px solid #ccc;
+                  border-radius:6px;max-height:180px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.15)"></div>
     </div>
     <div class="mb-3">
       <label class="form-label" style="font-size:.8rem">メンバー名（空欄可）</label>
@@ -568,6 +567,73 @@ function showUndoToast(message, snapshot) {
     if (toast.parentNode) toast.remove();
   }, 6000);
 }
+
+// ── グループ名候補(削除ボタン付きカスタムドロップダウン) ────────────────────
+var ALL_GROUPS = [
+  {% for g in all_groups %}{ id: {{ g.id }}, name: {{ g.name | tojson }} }{% if not loop.last %},{% endif %}{% endfor %}
+];
+
+function escHtmlPending(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function renderGroupSuggestions() {
+  var input = document.getElementById('tag-group-input');
+  var list = document.getElementById('tag-group-suggestions-list');
+  var query = input.value.trim().toLowerCase();
+  var filtered = ALL_GROUPS.filter(function(g) {
+    return !query || g.name.toLowerCase().indexOf(query) !== -1;
+  });
+
+  if (!filtered.length) {
+    list.classList.add('d-none');
+    list.innerHTML = '';
+    return;
+  }
+
+  list.innerHTML = filtered.map(function(g) {
+    return '<div class="d-flex justify-content-between align-items-center" ' +
+      'style="padding:6px 10px;cursor:pointer;font-size:.85rem" ' +
+      'onmouseover="this.style.background=\'#f0f0f0\'" onmouseout="this.style.background=\'\'" ' +
+      'onmousedown="event.preventDefault();selectGroupSuggestion(' + g.id + ')">' +
+        '<span style="color:#000">' + escHtmlPending(g.name) + '</span>' +
+        '<span onmousedown="event.preventDefault();event.stopPropagation();deleteGroupSuggestion(' + g.id + ')" ' +
+          'style="color:#c00;padding:0 6px;cursor:pointer;font-weight:700" title="このグループを削除">×</span>' +
+      '</div>';
+  }).join('');
+  list.classList.remove('d-none');
+}
+
+function selectGroupSuggestion(id) {
+  var g = ALL_GROUPS.find(function(x) { return x.id === id; });
+  if (!g) return;
+  document.getElementById('tag-group-input').value = g.name;
+  document.getElementById('tag-group-suggestions-list').classList.add('d-none');
+}
+
+function deleteGroupSuggestion(id) {
+  var g = ALL_GROUPS.find(function(x) { return x.id === id; });
+  if (!g) return;
+  if (!confirm('グループ「' + g.name + '」を削除しますか？\nこのグループでタグ付けされている投稿がある場合、タグは解除されます。')) return;
+
+  fetch('/api/groups/' + id, { method: 'DELETE' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.ok) { alert(d.error || '削除に失敗しました'); return; }
+      ALL_GROUPS = ALL_GROUPS.filter(function(x) { return x.id !== id; });
+      renderGroupSuggestions();
+    })
+    .catch(function() { alert('通信エラーが発生しました'); });
+}
+
+document.addEventListener('click', function(e) {
+  var list = document.getElementById('tag-group-suggestions-list');
+  var input = document.getElementById('tag-group-input');
+  if (!list || list.classList.contains('d-none')) return;
+  if (e.target !== input && !list.contains(e.target)) {
+    list.classList.add('d-none');
+  }
+});
 
 // ── 承認（Ajax：ページ遷移なし） ───────────────────────────────────────
 let pendingApproveId = null;

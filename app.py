@@ -648,6 +648,32 @@ def _normalize_tag_name(name: str) -> str:
     return unicodedata.normalize("NFKC", (name or "").strip()).lower()
 
 
+@app.route("/api/groups/<int:id>", methods=["DELETE"])
+def delete_group(id):
+    """groupsマスタから削除する。既にこのグループ(またはその所属メンバー)でタグ付けされている
+    記事がある場合、参照が壊れないよう group_id/member_id を NULL に戻してからグループを削除する
+    (ブロックではなくNULL化を選択: 単純な操作で済み、記事自体は失われないため)。"""
+    group = Group.query.get_or_404(id)
+    member_ids = [m.id for m in Member.query.filter_by(group_id=id).all()]
+
+    query = Article.query.filter(Article.group_id == id)
+    if member_ids:
+        query = Article.query.filter(
+            db.or_(Article.group_id == id, Article.member_id.in_(member_ids))
+        )
+    articles_to_clear = query.all()
+    for a in articles_to_clear:
+        if a.group_id == id:
+            a.group_id = None
+        if a.member_id in member_ids:
+            a.member_id = None
+
+    Member.query.filter_by(group_id=id).delete(synchronize_session=False)
+    db.session.delete(group)
+    db.session.commit()
+    return jsonify({"ok": True, "cleared_articles": len(articles_to_clear)})
+
+
 def _resolve_group_and_member(group_name: str, member_name: str) -> tuple:
     """自由入力のグループ名・メンバー名からgroup_id・member_idを解決する。
     マスタに存在しなければ自動作成する。group_nameが空なら (None, None)。
