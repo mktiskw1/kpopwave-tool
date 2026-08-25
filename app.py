@@ -117,6 +117,7 @@ def _migrate_db():
         ("account_id", "INTEGER"),
         ("group_id", "INTEGER"),
         ("member_id", "INTEGER"),
+        ("is_favorite", "INTEGER DEFAULT 0"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -567,11 +568,18 @@ def pending():
     } if video_paths else {}
 
     all_groups = Group.query.order_by(Group.name.asc()).all()
+    group_by_id = {g.id: g for g in all_groups}
+    group_tag_map = {}
+    for a in articles:
+        if a.group_id and a.group_id in group_by_id:
+            group_tag_map[a.id] = group_by_id[a.group_id].name
+        else:
+            group_tag_map[a.id] = _guess_group_tag(a.title, all_groups)
 
     return render_template("pending.html", articles=articles, images_map=images_map,
                            active_tab=tab, counts=counts, now_utc=datetime.utcnow(),
                            active_trim_jobs=active_trim_jobs, active_chapter_jobs=active_chapter_jobs,
-                           all_groups=all_groups)
+                           all_groups=all_groups, group_tag_map=group_tag_map)
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
@@ -584,12 +592,19 @@ def bulk_delete_articles():
     int_ids = [int(i) for i in ids]
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
     articles = Article.query.filter(Article.id.in_(int_ids)).all()
-    for a in articles:
+    targets = [a for a in articles if not a.is_favorite]
+    skipped_favorite_count = len(articles) - len(targets)
+    for a in targets:
         if a.video_file_path:
             _delete_video_files(a.video_file_path, static_dir)
-    Article.query.filter(Article.id.in_(int_ids)).delete(synchronize_session=False)
-    db.session.commit()
-    flash(f"{len(ids)} 件の記事を削除しました", "warning")
+    target_ids = [a.id for a in targets]
+    if target_ids:
+        Article.query.filter(Article.id.in_(target_ids)).delete(synchronize_session=False)
+        db.session.commit()
+    msg = f"{len(target_ids)} 件の記事を削除しました"
+    if skipped_favorite_count:
+        msg += f"（お気に入り登録済み {skipped_favorite_count} 件はスキップしました）"
+    flash(msg, "warning")
     return redirect(url_for("pending", tab=tab))
 
 
@@ -648,6 +663,16 @@ def _resolve_group_and_member(group_name: str, member_name: str) -> tuple:
         db.session.flush()
 
     return group.id, member.id
+
+
+def _guess_group_tag(title: str, groups: list) -> str | None:
+    """タイトルにgroupsマスタのいずれかのグループ名が単語として含まれていれば、そのグループ名を
+    返す(承認待ち一覧のタグ表示用)。音楽番組検索のグループマッチングと同じロジックを再利用する。"""
+    from youtube_collector import _matches_target_artist
+    for g in groups:
+        if _matches_target_artist(title, "", g.name):
+            return g.name
+    return None
 
 
 def _guess_group_id(chapter_title: str) -> int | None:
@@ -748,6 +773,12 @@ def _article_from_snapshot(snapshot):
 def delete_article(id):
     article = Article.query.get_or_404(id)
     is_fetch = request.headers.get("X-Requested-With") == "fetch"
+    if article.is_favorite:
+        error = "お気に入り登録済みのため削除できません。先にお気に入りを解除してください。"
+        if is_fetch:
+            return jsonify({"ok": False, "error": error}), 400
+        flash(error, "warning")
+        return redirect(request.referrer or url_for("pending"))
     snapshot = _article_snapshot(article) if is_fetch else None
     db.session.delete(article)
     db.session.commit()
@@ -755,6 +786,14 @@ def delete_article(id):
         return jsonify({"ok": True, "snapshot": snapshot})
     flash("記事を削除しました", "warning")
     return redirect(request.referrer or url_for("pending"))
+
+
+@app.route("/articles/<int:id>/toggle-favorite", methods=["POST"])
+def toggle_favorite_article(id):
+    article = Article.query.get_or_404(id)
+    article.is_favorite = not article.is_favorite
+    db.session.commit()
+    return jsonify({"ok": True, "is_favorite": article.is_favorite})
 
 
 @app.route("/articles/restore", methods=["POST"])

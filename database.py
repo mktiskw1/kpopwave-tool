@@ -45,6 +45,8 @@ class Article(db.Model):
     # KPOP分析機能: グループ・メンバータグ付け
     group_id = db.Column(db.Integer, db.ForeignKey("groups.id"), nullable=True)
     member_id = db.Column(db.Integer, db.ForeignKey("members.id"), nullable=True)
+    # お気に入り(誤削除防止用のマーク)
+    is_favorite = db.Column(db.Boolean, nullable=False, default=False)
 
     def to_dict(self):
         return {

@@ -88,7 +88,7 @@
 
   <!-- 記事カード -->
   {% for a in articles %}
-  <div class="card mb-3 article-card" id="card-{{ a.id }}"
+  <div class="card mb-3 article-card{% if a.is_favorite %} favorited{% endif %}" id="card-{{ a.id }}"
        data-view-count="{{ a.view_count or 0 }}"
        data-published="{{ a.published_at.strftime('%Y%m%d%H%M%S') if a.published_at else '0' }}"
        data-title="{{ a.title }}">
@@ -96,11 +96,14 @@
 
       <!-- ヘッダー行 -->
       <div class="d-flex justify-content-between align-items-start mb-2">
-        <div class="d-flex align-items-center gap-2 me-2" style="min-width:0">
+        <div class="d-flex align-items-center gap-2 me-2 flex-wrap" style="min-width:0">
           <input type="checkbox" name="ids" value="{{ a.id }}"
                  class="form-check-input article-cb mt-0 flex-shrink-0"
                  onchange="updateSelection()">
           <span class="badge bg-secondary" style="font-size:.72rem">{{ a.feed_source }}</span>
+          {% if group_tag_map and group_tag_map.get(a.id) %}
+          <span class="badge bg-info-subtle text-info-emphasis" style="font-size:.72rem">{{ group_tag_map[a.id] }}</span>
+          {% endif %}
           {% if a.published_at %}
           <span style="font-size:.75rem;color:#666">{{ a.published_at.strftime('%Y/%m/%d') }}</span>
           {% endif %}
@@ -108,6 +111,11 @@
 
         <!-- アクションボタン -->
         <div class="d-flex gap-1 flex-shrink-0">
+          <button type="button" class="btn btn-outline-secondary btn-sm px-2 favorite-btn{% if a.is_favorite %} active{% endif %}"
+                  id="fav-btn-{{ a.id }}" title="{% if a.is_favorite %}お気に入り解除{% else %}お気に入り登録{% endif %}"
+                  onclick="toggleFavorite({{ a.id }})">
+            <i class="bi {% if a.is_favorite %}bi-star-fill{% else %}bi-star{% endif %}"></i>
+          </button>
           {% if active_tab == 'posted' %}
           <button type="button" class="btn btn-primary btn-sm px-2" title="承認待ちに戻して再投稿"
                   onclick="requeueArticle({{ a.id }}, this)">
@@ -466,7 +474,7 @@ function deleteSingle(id) {
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {
-    if (!d.ok) { alert('削除に失敗しました'); return; }
+    if (!d.ok) { alert(d.error || '削除に失敗しました'); return; }
     if (card) card.remove();
     var badge = document.querySelector('h4 .badge-pending');
     if (badge) badge.textContent = parseInt(badge.textContent, 10) - 1;
@@ -481,6 +489,33 @@ function deleteSingle(id) {
   .catch(function() {
     alert('通信エラーが発生しました');
   });
+}
+
+function toggleFavorite(id) {
+  var btn = document.getElementById('fav-btn-' + id);
+  var card = document.getElementById('card-' + id);
+  if (btn) btn.disabled = true;
+
+  fetch('/articles/' + id + '/toggle-favorite', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (btn) btn.disabled = false;
+      if (!d.ok) { alert('お気に入りの更新に失敗しました'); return; }
+      var icon = btn ? btn.querySelector('i') : null;
+      if (d.is_favorite) {
+        if (btn) { btn.classList.add('active'); btn.title = 'お気に入り解除'; }
+        if (icon) { icon.classList.remove('bi-star'); icon.classList.add('bi-star-fill'); }
+        if (card) card.classList.add('favorited');
+      } else {
+        if (btn) { btn.classList.remove('active'); btn.title = 'お気に入り登録'; }
+        if (icon) { icon.classList.remove('bi-star-fill'); icon.classList.add('bi-star'); }
+        if (card) card.classList.remove('favorited');
+      }
+    })
+    .catch(function() {
+      if (btn) btn.disabled = false;
+      alert('通信エラーが発生しました');
+    });
 }
 
 let undoToastTimer = null;
