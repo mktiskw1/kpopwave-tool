@@ -546,46 +546,58 @@ def _resolve_channel_id(handle: str, api_key: str, app) -> str:
     return channel_id
 
 
-def _search_channel_videos(query: str, channel_id: str, api_key: str, fetch_count: int, order: str) -> list:
-    resp = requests.get(
-        YOUTUBE_SEARCH_URL,
-        params={
-            "part": "snippet",
-            "q": query,
-            "channelId": channel_id,
-            "type": "video",
-            "order": order,
-            "maxResults": fetch_count,
-            "key": api_key,
-        },
-        timeout=15,
-    )
+def _search_channel_videos(query: str, channel_id: str, api_key: str, fetch_count: int, order: str,
+                            page_token: str | None = None) -> tuple:
+    """1ページ分の検索結果を取得する。戻り値: (items, next_page_token)。
+    nextPageToken は order を含む検索条件に紐づくため、続きのページを取得する際は
+    同じ order を使い続ける必要がある(呼び出し側で order を保持しておくこと)。"""
+    params = {
+        "part": "snippet",
+        "q": query,
+        "channelId": channel_id,
+        "type": "video",
+        "order": order,
+        "maxResults": fetch_count,
+        "key": api_key,
+    }
+    if page_token:
+        params["pageToken"] = page_token
+    resp = requests.get(YOUTUBE_SEARCH_URL, params=params, timeout=15)
     resp.raise_for_status()
-    return resp.json().get("items", [])
+    data = resp.json()
+    return data.get("items", []), data.get("nextPageToken")
 
 
-def search_program_videos(app, program_key: str, target_group: str, max_results: int = 8,
-                           fetch_count: int = 30) -> dict:
+def search_program_videos(app, program_key: str, target_group: str, max_results: int = 30,
+                           fetch_count: int = 30, page_token: str | None = None,
+                           order: str | None = None) -> dict:
     """指定番組(program_key)の公式チャンネル内で「(グループ名) (番組名)」を検索し、
     該当グループのパフォーマンス動画候補を返す。YouTube検索APIの q パラメータは緩い関連性
-    マッチングのため、クエリに一致しない(別グループの)動画も混在する。fetch_count件を取得した
-    うえで、(1)タイトルに target_group が単語として含まれる (2)インタビュー等の非パフォーマンス
-    動画でない (3)Shortsでない、の3条件でフィルタし、最大 max_results 件を返す。
-    order=date で0件だった場合は order=relevance でも検索し、休止中グループ等の過去出演回も
-    拾えるようにする。DBには保存しない。
-    戻り値: {"ok", "error", "videos": [{video_id,title,url,thumbnail,published_at,duration}]}"""
+    マッチングのため、クエリに一致しない(別グループの)動画も混在する。1ページ(fetch_count件)を
+    取得したうえで、(1)タイトルに target_group が単語として含まれる (2)インタビュー等の
+    非パフォーマンス動画でない (3)Shortsでない、の3条件でフィルタし、最大 max_results 件まで返す。
+
+    order を省略(新規検索)した場合は order=date を試し、0件なら order=relevance でも探す
+    (休止中グループ等、直近fetch_count件に出演回が無いケースの救済)。続きのページを取得する
+    「もっと見る」用途では、初回検索で実際に使われた order とレスポンスの next_page_token を
+    呼び出し側で保持し、order・page_token の両方を指定して呼び出すこと
+    (nextPageToken は同じ order の検索条件に紐づくため)。DBには保存しない。
+    戻り値: {"ok", "error", "videos": [...], "next_page_token", "order"}"""
     channel = PROGRAM_CHANNELS.get(program_key)
     if not channel:
-        return {"ok": False, "error": f"未対応の番組です({program_key})", "videos": []}
+        return {"ok": False, "error": f"未対応の番組です({program_key})", "videos": [],
+                "next_page_token": None, "order": None}
 
     with app.app_context():
         api_key = Setting.get("youtube_api_key", "") or os.getenv("YOUTUBE_API_KEY", "")
     if not api_key:
-        return {"ok": False, "error": "YouTube APIキーが設定されていません", "videos": []}
+        return {"ok": False, "error": "YouTube APIキーが設定されていません", "videos": [],
+                "next_page_token": None, "order": None}
 
     channel_id = _resolve_channel_id(channel["handle"], api_key, app)
     if not channel_id:
-        return {"ok": False, "error": f"チャンネルが見つかりません(@{channel['handle']})", "videos": []}
+        return {"ok": False, "error": f"チャンネルが見つかりません(@{channel['handle']})", "videos": [],
+                "next_page_token": None, "order": None}
 
     query = f"{target_group} {channel['name']}"
 
@@ -601,17 +613,32 @@ def search_program_videos(app, program_key: str, target_group: str, max_results:
         return out
 
     try:
-        items = _filtered(_search_channel_videos(query, channel_id, api_key, fetch_count, "date"))
-        if not items:
-            # 直近優先(date)で見つからない場合、関連度順(relevance)でも探す
-            # (休止中グループ等、直近fetch_count件に出演回が無いケースの救済)
-            items = _filtered(_search_channel_videos(query, channel_id, api_key, fetch_count, "relevance"))
+        if order:
+            # 「もっと見る」: 呼び出し側が保持している order・page_token で1ページ継続取得
+            raw_items, next_token = _search_channel_videos(
+                query, channel_id, api_key, fetch_count, order, page_token
+            )
+            items = _filtered(raw_items)
+            effective_order = order
+        else:
+            # 新規検索: date優先、フィルタ後0件ならrelevanceにフォールバック
+            raw_items, next_token = _search_channel_videos(query, channel_id, api_key, fetch_count, "date")
+            items = _filtered(raw_items)
+            effective_order = "date"
+            if not items:
+                raw_items, next_token = _search_channel_videos(
+                    query, channel_id, api_key, fetch_count, "relevance"
+                )
+                items = _filtered(raw_items)
+                effective_order = "relevance"
     except Exception as exc:
         logger.error("番組別検索エラー(%s): %s", query, exc)
-        return {"ok": False, "error": f"YouTube検索エラー: {str(exc)[:150]}", "videos": []}
+        return {"ok": False, "error": f"YouTube検索エラー: {str(exc)[:150]}", "videos": [],
+                "next_page_token": None, "order": None}
 
     if not items:
-        return {"ok": True, "error": None, "videos": []}
+        return {"ok": True, "error": None, "videos": [],
+                "next_page_token": next_token, "order": effective_order}
 
     video_ids = [it["id"]["videoId"] for it in items if it.get("id", {}).get("videoId")]
 
@@ -663,5 +690,6 @@ def search_program_videos(app, program_key: str, target_group: str, max_results:
         if len(videos) >= max_results:
             break
 
-    return {"ok": True, "error": None, "videos": videos}
+    return {"ok": True, "error": None, "videos": videos,
+            "next_page_token": next_token, "order": effective_order}
     return new_count

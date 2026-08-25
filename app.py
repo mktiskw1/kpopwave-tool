@@ -2398,13 +2398,20 @@ def search_music_bank_videos():
     data = request.get_json(silent=True) or {}
     program_key = (data.get("program") or DEFAULT_PROGRAM_KEY).strip()
     target_group = (data.get("target_group") or DEFAULT_TARGET_GROUP).strip()
+    page_token = (data.get("page_token") or "").strip() or None
+    order = (data.get("order") or "").strip() or None
     if not target_group:
         return jsonify({"ok": False, "error": "グループ名を入力してください"}), 400
 
-    result = search_program_videos(app, program_key, target_group)
+    result = search_program_videos(app, program_key, target_group, page_token=page_token, order=order)
     if not result["ok"]:
         return jsonify({"ok": False, "error": result["error"]}), 400
-    return jsonify({"ok": True, "videos": result["videos"]})
+    return jsonify({
+        "ok": True,
+        "videos": result["videos"],
+        "next_page_token": result["next_page_token"],
+        "order": result["order"],
+    })
 
 
 @app.route("/api/videos/add-manual", methods=["POST"])

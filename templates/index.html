@@ -354,6 +354,11 @@ function renderMbHistory() {
 
 renderMbHistory();
 
+var _mbNextPageToken = null;
+var _mbOrder = null;
+var _mbProgram = null;
+var _mbTargetGroup = null;
+
 function searchMusicBank() {
   var btn = document.getElementById('mb-search-btn');
   var result = document.getElementById('mb-search-result');
@@ -364,6 +369,10 @@ function searchMusicBank() {
     return;
   }
   addMbHistory(targetGroup);
+  _mbProgram = program;
+  _mbTargetGroup = targetGroup;
+  _mbNextPageToken = null;
+  _mbOrder = null;
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>検索中...';
   result.innerHTML = '';
@@ -381,6 +390,8 @@ function searchMusicBank() {
       result.innerHTML = '<span style="color:var(--accent)"><i class="bi bi-exclamation-circle-fill me-1"></i>' + escHtml(d.error) + '</span>';
       return;
     }
+    _mbNextPageToken = d.next_page_token || null;
+    _mbOrder = d.order || null;
     renderMusicBankCandidates(d.videos);
   })
   .catch(function() {
@@ -390,32 +401,34 @@ function searchMusicBank() {
   });
 }
 
+function _mbRowHtml(v, i) {
+  var mins = Math.floor(v.duration / 60);
+  var secs = v.duration % 60;
+  var durationLabel = v.duration ? (mins + ':' + (secs < 10 ? '0' : '') + secs) : '-';
+  var pubDate = v.published_at ? v.published_at.slice(0, 10) : '';
+  return '<tr>' +
+    '<td><input type="checkbox" class="mb-checkbox" value="' + i + '" checked></td>' +
+    '<td>' + (v.thumbnail ? '<a href="' + escHtml(v.url) + '" target="_blank" rel="noopener" title="YouTubeで開く"><img src="' + escHtml(v.thumbnail) + '" style="width:64px;height:36px;object-fit:cover;border-radius:4px;cursor:pointer"></a>' : '') + '</td>' +
+    '<td>' + escHtml(v.title) + '</td>' +
+    '<td>' + escHtml(pubDate) + '</td>' +
+    '<td>' + durationLabel + '</td>' +
+    '</tr>';
+}
+
 function renderMusicBankCandidates(videos) {
   _mbVideos = videos;
   var result = document.getElementById('mb-search-result');
 
-  if (!videos.length) {
+  if (!videos.length && !_mbNextPageToken) {
     result.innerHTML = '<div style="color:var(--text-muted);font-size:.85rem">該当する動画が見つかりませんでした。</div>';
     return;
   }
 
-  var rows = videos.map(function(v, i) {
-    var mins = Math.floor(v.duration / 60);
-    var secs = v.duration % 60;
-    var durationLabel = v.duration ? (mins + ':' + (secs < 10 ? '0' : '') + secs) : '-';
-    var pubDate = v.published_at ? v.published_at.slice(0, 10) : '';
-    return '<tr>' +
-      '<td><input type="checkbox" class="mb-checkbox" value="' + i + '" checked></td>' +
-      '<td>' + (v.thumbnail ? '<a href="' + escHtml(v.url) + '" target="_blank" rel="noopener" title="YouTubeで開く"><img src="' + escHtml(v.thumbnail) + '" style="width:64px;height:36px;object-fit:cover;border-radius:4px;cursor:pointer"></a>' : '') + '</td>' +
-      '<td>' + escHtml(v.title) + '</td>' +
-      '<td>' + escHtml(pubDate) + '</td>' +
-      '<td>' + durationLabel + '</td>' +
-      '</tr>';
-  }).join('');
+  var rows = videos.map(_mbRowHtml).join('');
 
   result.innerHTML =
     '<div class="d-flex justify-content-between align-items-center mb-2">' +
-      '<span style="font-size:.85rem">' + videos.length + '件見つかりました</span>' +
+      '<span id="mb-count-label" style="font-size:.85rem">' + videos.length + '件見つかりました</span>' +
       '<div>' +
         '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleMbAll(true)">全選択</button> ' +
         '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleMbAll(false)">全解除</button>' +
@@ -423,10 +436,65 @@ function renderMusicBankCandidates(videos) {
     '</div>' +
     '<div class="table-responsive"><table class="table table-hover mb-2" style="font-size:.85rem"><thead><tr>' +
       '<th style="width:2.5rem"></th><th style="width:5rem">サムネイル</th><th>タイトル</th><th style="width:6rem">公開日</th><th style="width:5rem">長さ</th>' +
-    '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
-    '<button class="btn btn-accent" onclick="addSelectedMusicBankVideos()" id="mb-add-btn">' +
-      '<i class="bi bi-download me-1"></i>選択した動画を追加</button>' +
+    '</tr></thead><tbody id="mb-tbody">' + rows + '</tbody></table></div>' +
+    '<div class="d-flex gap-2 flex-wrap">' +
+      '<button class="btn btn-accent" onclick="addSelectedMusicBankVideos()" id="mb-add-btn">' +
+        '<i class="bi bi-download me-1"></i>選択した動画を追加</button>' +
+      '<button class="btn btn-outline-secondary" onclick="loadMoreMusicBank()" id="mb-load-more-btn"' +
+        (_mbNextPageToken ? '' : ' style="display:none"') + '>' +
+        '<i class="bi bi-arrow-down-circle me-1"></i>もっと見る（さらに過去を探す）</button>' +
+    '</div>' +
     '<div id="mb-add-progress" class="mt-2" style="font-size:.83rem"></div>';
+}
+
+function appendMusicBankCandidates(videos) {
+  var existingIds = {};
+  _mbVideos.forEach(function(v) { existingIds[v.video_id] = true; });
+  var newVideos = videos.filter(function(v) { return !existingIds[v.video_id]; });
+
+  var startIndex = _mbVideos.length;
+  var rowsHtml = newVideos.map(function(v, i) { return _mbRowHtml(v, startIndex + i); }).join('');
+  document.getElementById('mb-tbody').insertAdjacentHTML('beforeend', rowsHtml);
+
+  _mbVideos = _mbVideos.concat(newVideos);
+
+  var countLabel = document.getElementById('mb-count-label');
+  if (countLabel) countLabel.textContent = _mbVideos.length + '件見つかりました';
+
+  return newVideos.length;
+}
+
+function loadMoreMusicBank() {
+  if (!_mbNextPageToken) return;
+  var btn = document.getElementById('mb-load-more-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>読み込み中...';
+
+  fetch('/api/videos/music-bank/search', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      program: _mbProgram, target_group: _mbTargetGroup,
+      page_token: _mbNextPageToken, order: _mbOrder
+    })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-arrow-down-circle me-1"></i>もっと見る（さらに過去を探す）';
+    if (!d.ok) {
+      btn.style.display = 'none';
+      return;
+    }
+    appendMusicBankCandidates(d.videos);
+    _mbNextPageToken = d.next_page_token || null;
+    _mbOrder = d.order || _mbOrder;
+    if (!_mbNextPageToken) btn.style.display = 'none';
+  })
+  .catch(function() {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-arrow-down-circle me-1"></i>もっと見る（さらに過去を探す）';
+  });
 }
 
 function toggleMbAll(checked) {
