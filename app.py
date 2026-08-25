@@ -2399,7 +2399,7 @@ def search_music_bank_videos():
     program_key = (data.get("program") or DEFAULT_PROGRAM_KEY).strip()
     target_group = (data.get("target_group") or DEFAULT_TARGET_GROUP).strip()
     page_token = (data.get("page_token") or "").strip() or None
-    order = (data.get("order") or "").strip() or None
+    order = (data.get("order") or "date").strip()
     if not target_group:
         return jsonify({"ok": False, "error": "グループ名を入力してください"}), 400
 

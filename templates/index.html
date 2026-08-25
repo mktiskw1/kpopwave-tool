@@ -82,6 +82,10 @@
         <option value="{{ name }}">
         {% endfor %}
       </datalist>
+      <select id="mb-order-select" class="form-select" style="width:auto;font-size:.88rem">
+        <option value="date" selected>新しい順</option>
+        <option value="viewCount">再生数順</option>
+      </select>
       <button class="btn btn-accent px-3 flex-shrink-0" onclick="searchMusicBank()" id="mb-search-btn">
         <i class="bi bi-search me-1"></i>検索
       </button>
@@ -364,6 +368,7 @@ function searchMusicBank() {
   var result = document.getElementById('mb-search-result');
   var program = document.getElementById('mb-program-select').value;
   var targetGroup = document.getElementById('mb-group-input').value.trim();
+  var selectedOrder = document.getElementById('mb-order-select').value;
   if (!targetGroup) {
     document.getElementById('mb-group-input').focus();
     return;
@@ -380,7 +385,7 @@ function searchMusicBank() {
   fetch('/api/videos/music-bank/search', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ program: program, target_group: targetGroup })
+    body: JSON.stringify({ program: program, target_group: targetGroup, order: selectedOrder })
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {

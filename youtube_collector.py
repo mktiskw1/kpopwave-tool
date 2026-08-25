@@ -570,18 +570,21 @@ def _search_channel_videos(query: str, channel_id: str, api_key: str, fetch_coun
 
 def search_program_videos(app, program_key: str, target_group: str, max_results: int = 30,
                            fetch_count: int = 30, page_token: str | None = None,
-                           order: str | None = None) -> dict:
+                           order: str = "date") -> dict:
     """指定番組(program_key)の公式チャンネル内で「(グループ名) (番組名)」を検索し、
     該当グループのパフォーマンス動画候補を返す。YouTube検索APIの q パラメータは緩い関連性
     マッチングのため、クエリに一致しない(別グループの)動画も混在する。1ページ(fetch_count件)を
     取得したうえで、(1)タイトルに target_group が単語として含まれる (2)インタビュー等の
     非パフォーマンス動画でない (3)Shortsでない、の3条件でフィルタし、最大 max_results 件まで返す。
 
-    order を省略(新規検索)した場合は order=date を試し、0件なら order=relevance でも探す
-    (休止中グループ等、直近fetch_count件に出演回が無いケースの救済)。続きのページを取得する
-    「もっと見る」用途では、初回検索で実際に使われた order とレスポンスの next_page_token を
-    呼び出し側で保持し、order・page_token の両方を指定して呼び出すこと
-    (nextPageToken は同じ order の検索条件に紐づくため)。DBには保存しない。
+    order は "date"(新しい順) または "viewCount"(再生数順) をUI側から指定する想定。
+    page_token を省略(新規検索)した場合、指定した order でまず検索し、フィルタ後0件なら
+    order="relevance" でも探す(休止中グループ等、直近fetch_count件に出演回が無いケースの救済。
+    既に order="relevance" 指定時は二重に試さない)。続きのページを取得する「もっと見る」用途
+    (page_token を指定する場合)では、初回検索で実際に使われた order(レスポンスの "order")を
+    そのまま渡すこと。フォールバックは行わず、指定した order・page_token のその1ページのみを
+    取得する(nextPageToken は同じ order の検索条件に紐づくため、pageToken取得中に order を
+    変えると正しく継続できない)。DBには保存しない。
     戻り値: {"ok", "error", "videos": [...], "next_page_token", "order"}"""
     channel = PROGRAM_CHANNELS.get(program_key)
     if not channel:
@@ -613,19 +616,21 @@ def search_program_videos(app, program_key: str, target_group: str, max_results:
         return out
 
     try:
-        if order:
+        if page_token:
             # 「もっと見る」: 呼び出し側が保持している order・page_token で1ページ継続取得
+            # (フォールバックはしない。orderを勝手に変えるとページ位置の整合性が崩れるため)
             raw_items, next_token = _search_channel_videos(
                 query, channel_id, api_key, fetch_count, order, page_token
             )
             items = _filtered(raw_items)
             effective_order = order
         else:
-            # 新規検索: date優先、フィルタ後0件ならrelevanceにフォールバック
-            raw_items, next_token = _search_channel_videos(query, channel_id, api_key, fetch_count, "date")
+            # 新規検索: 指定されたorder(UIで選んだ並び順)でまず検索し、
+            # フィルタ後0件ならrelevanceにフォールバック(既にrelevance指定時は行わない)
+            raw_items, next_token = _search_channel_videos(query, channel_id, api_key, fetch_count, order)
             items = _filtered(raw_items)
-            effective_order = "date"
-            if not items:
+            effective_order = order
+            if not items and order != "relevance":
                 raw_items, next_token = _search_channel_videos(
                     query, channel_id, api_key, fetch_count, "relevance"
                 )
