@@ -406,6 +406,15 @@ function searchMusicBank() {
   });
 }
 
+function formatViewCount(n) {
+  n = n || 0;
+  if (n >= 10000) {
+    var man = (n / 10000).toFixed(1).replace(/\.0$/, '');
+    return man + '万回';
+  }
+  return n.toLocaleString() + '回';
+}
+
 function _mbRowHtml(v, i) {
   var mins = Math.floor(v.duration / 60);
   var secs = v.duration % 60;
@@ -417,6 +426,7 @@ function _mbRowHtml(v, i) {
     '<td>' + escHtml(v.title) + '</td>' +
     '<td>' + escHtml(pubDate) + '</td>' +
     '<td>' + durationLabel + '</td>' +
+    '<td>' + formatViewCount(v.view_count) + '</td>' +
     '<td>' +
       '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="addSingleMusicBankVideo(' + i + ')" id="mb-single-btn-' + i + '">' +
         'この動画を追加</button>' +
@@ -444,7 +454,7 @@ function renderMusicBankCandidates(videos) {
       '</div>' +
     '</div>' +
     '<div class="table-responsive"><table class="table table-hover mb-2" style="font-size:.85rem"><thead><tr>' +
-      '<th style="width:2.5rem"></th><th style="width:5rem">サムネイル</th><th>タイトル</th><th style="width:6rem">公開日</th><th style="width:5rem">長さ</th><th style="width:8rem">操作</th>' +
+      '<th style="width:2.5rem"></th><th style="width:5rem">サムネイル</th><th>タイトル</th><th style="width:6rem">公開日</th><th style="width:5rem">長さ</th><th style="width:5.5rem">再生回数</th><th style="width:8rem">操作</th>' +
     '</tr></thead><tbody id="mb-tbody">' + rows + '</tbody></table></div>' +
     '<div class="d-flex gap-2 flex-wrap">' +
       '<button class="btn btn-accent" onclick="addSelectedMusicBankVideos()" id="mb-add-btn">' +

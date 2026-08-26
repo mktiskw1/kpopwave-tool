@@ -655,12 +655,13 @@ def search_program_videos(app, program_key: str, target_group: str, max_results:
         }
 
     durations = {}
+    view_counts = {}
     for i in range(0, len(video_ids), 50):
         batch = video_ids[i:i + 50]
         try:
             vresp = requests.get(
                 YOUTUBE_VIDEOS_URL,
-                params={"part": "contentDetails", "id": ",".join(batch), "key": api_key},
+                params={"part": "contentDetails,statistics", "id": ",".join(batch), "key": api_key},
                 timeout=15,
             )
             vresp.raise_for_status()
@@ -668,8 +669,12 @@ def search_program_videos(app, program_key: str, target_group: str, max_results:
                 durations[item["id"]] = _parse_duration_iso8601(
                     item.get("contentDetails", {}).get("duration", "")
                 )
+                try:
+                    view_counts[item["id"]] = int(item.get("statistics", {}).get("viewCount", 0))
+                except (ValueError, TypeError):
+                    view_counts[item["id"]] = 0
         except Exception as exc:
-            logger.warning("動画長さ取得エラー: %s", exc)
+            logger.warning("動画長さ・再生数取得エラー: %s", exc)
 
     videos = []
     for it in items:
@@ -691,10 +696,10 @@ def search_program_videos(app, program_key: str, target_group: str, max_results:
             "thumbnail": _best_thumbnail(snippet.get("thumbnails", {})),
             "published_at": snippet.get("publishedAt", ""),
             "duration": duration,
+            "view_count": view_counts.get(vid, 0),
         })
         if len(videos) >= max_results:
             break
 
     return {"ok": True, "error": None, "videos": videos,
             "next_page_token": next_token, "order": effective_order}
-    return new_count
