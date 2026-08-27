@@ -54,6 +54,79 @@ def _compute_day_index(posted_at: datetime, now: datetime = None) -> int:
     return (now - posted_at).days
 
 
+_EARLY_OFFSETS_MIN = [15, 30, 60]
+
+
+def track_early_engagement(app, account_id: int = 1) -> dict:
+    """account_id の、投稿から60分以内の投稿を対象に、15分・30分・60分経過時点での
+    インサイトを記録する(初速追跡)。post_stats に day_index=0, minute_offset=15/30/60 で
+    1行ずつ追加する。各offsetは経過時間を超えた時点で1回だけ取得し(既に記録済みならスキップ)、
+    60分を超えた投稿は対象から外れ、以後は日次のtrack_post_statsに引き継がれる。
+    ジョブの実行間隔ぶんの遅延を許容するため、投稿から65分以内までを対象にする。"""
+    _, token = _get_credentials(app, account_id)
+    if not token:
+        return {"error": "Threadsアクセストークン未設定", "updated": 0, "errors": 0}
+
+    now = datetime.utcnow()
+    cutoff = now - timedelta(minutes=65)
+
+    with app.app_context():
+        candidates = (
+            Article.query
+            .filter(
+                Article.account_id == account_id,
+                Article.status == "posted",
+                Article.posted_at.isnot(None),
+                Article.posted_at >= cutoff,
+                Article.threads_post_id.isnot(None),
+                Article.threads_post_id != "",
+            )
+            .with_entities(Article.id, Article.threads_post_id, Article.posted_at)
+            .all()
+        )
+
+    updated = errors = 0
+    for article_id, post_id, posted_at in candidates:
+        if post_id.startswith("test_"):
+            continue
+        elapsed_min = (now - posted_at).total_seconds() / 60
+
+        with app.app_context():
+            recorded_offsets = {
+                row[0] for row in
+                db.session.query(PostStat.minute_offset)
+                .filter(PostStat.article_id == article_id, PostStat.minute_offset.isnot(None))
+                .all()
+            }
+
+        for offset in _EARLY_OFFSETS_MIN:
+            if elapsed_min < offset or offset in recorded_offsets:
+                continue
+            insights = _fetch_media_insights(post_id, token)
+            if not insights:
+                errors += 1
+                continue
+            with app.app_context():
+                db.session.add(PostStat(
+                    article_id=article_id,
+                    day_index=0,
+                    minute_offset=offset,
+                    likes=insights.get("likes", 0),
+                    views=insights.get("views", 0),
+                    replies=insights.get("replies", 0),
+                    reposts=insights.get("reposts", 0),
+                    quotes=insights.get("quotes", 0),
+                    is_final=False,
+                ))
+                db.session.commit()
+            updated += 1
+            time.sleep(0.3)
+
+    result = {"updated": updated, "errors": errors}
+    logger.info("初速追跡完了: %s", result)
+    return result
+
+
 def track_post_stats(app, account_id: int = 1) -> dict:
     """account_id の posted 記事のうち、7日確定値がまだ出ていないものを対象に
     Threads Media Insights を取得し post_stats に1行追加する。

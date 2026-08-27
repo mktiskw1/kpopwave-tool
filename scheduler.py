@@ -489,6 +489,13 @@ def _post_stats_job(app):
     logger.info("投稿別7日間パフォーマンス定期取得: %s", result)
 
 
+def _early_engagement_job(app):
+    """KPOPアカウント（account_id=1）の投稿直後(60分以内)の初速インサイトを取得する。"""
+    from analytics_tracker import track_early_engagement
+    result = track_early_engagement(app, account_id=1)
+    logger.info("初速インサイト定期取得: %s", result)
+
+
 def _daily_snapshot_job(app):
     """KPOPアカウント（account_id=1）のフォロワー数・閲覧数を日次スナップショットする。"""
     from analytics_tracker import snapshot_daily_stats
@@ -523,6 +530,14 @@ def setup_scheduler(app):
         IntervalTrigger(minutes=30),
         args=[app],
         id="collect_comments",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        _early_engagement_job,
+        IntervalTrigger(minutes=5),
+        args=[app],
+        id="early_engagement",
         replace_existing=True,
     )
 
@@ -562,7 +577,7 @@ def setup_scheduler(app):
 
     scheduler.start()
     logger.info(
-        "Scheduler started (post backup 5min, comments/rollover 30min, engagement 2:00 JST, "
-        "video cleanup 3:00 JST, post stats 2:30 JST, daily snapshot 3:30 JST)"
+        "Scheduler started (post backup 5min, comments/rollover 30min, early engagement 5min, "
+        "engagement 2:00 JST, video cleanup 3:00 JST, post stats 2:30 JST, daily snapshot 3:30 JST)"
     )
     return scheduler

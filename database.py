@@ -218,6 +218,8 @@ class PostStat(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     article_id = db.Column(db.Integer, db.ForeignKey("articles.id"), nullable=False, index=True)
     day_index = db.Column(db.Integer, nullable=False)
+    # 投稿直後(60分以内)の初速記録のみ設定する経過分数(15/30/60)。日次記録はNULLのまま。
+    minute_offset = db.Column(db.Integer, nullable=True)
     likes = db.Column(db.Integer, default=0)
     views = db.Column(db.Integer, default=0)
     replies = db.Column(db.Integer, default=0)

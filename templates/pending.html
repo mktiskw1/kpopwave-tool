@@ -166,6 +166,21 @@
           <span class="ms-2" style="color:var(--text-muted)">📅 YouTube投稿日: <strong>{{ a.published_at.strftime('%Y/%m/%d') }}</strong></span>
           {% endif %}
         </div>
+        {% if active_tab == 'posted' and early_engagement_map and early_engagement_map.get(a.id) %}
+        {% set early = early_engagement_map[a.id] %}
+        <div class="mb-2" style="font-size:.72rem">
+          <span style="color:var(--text-muted)">⚡ 初速:</span>
+          {% for offset in [15, 30, 60] %}
+            {% if offset in early %}
+            {% set likes = early[offset] %}
+            <span class="badge {% if likes == 0 %}bg-danger{% else %}bg-secondary{% endif %} ms-1"
+                  {% if likes == 0 %}title="いいねが0のまま推移しています。著作権ブロックの可能性があります"{% endif %}>
+              {{ offset }}分後: いいね{{ likes }}件
+            </span>
+            {% endif %}
+          {% endfor %}
+        </div>
+        {% endif %}
         <video id="vid-{{ a.id }}" controls ontimeupdate="updateVidTime({{ a.id }}, this)"
                style="max-width:100%;max-height:220px;display:block;border-radius:10px;background:#000">
           <source id="vid-src-{{ a.id }}" src="{{ url_for('static', filename=a.video_file_path) }}" type="video/mp4">

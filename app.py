@@ -209,6 +209,18 @@ def _migrate_db():
                 conn.commit()
                 logger.info("DB migration: chapter_jobs.%s added", col)
 
+    # post_stats テーブル: 投稿直後(60分以内)の初速記録用カラム
+    existing_post_stats = {c["name"] for c in inspector.get_columns("post_stats")}
+    post_stat_cols = [
+        ("minute_offset", "INTEGER"),
+    ]
+    with db.engine.connect() as conn:
+        for col, typedef in post_stat_cols:
+            if col not in existing_post_stats:
+                conn.execute(text(f"ALTER TABLE post_stats ADD COLUMN {col} {typedef}"))
+                conn.commit()
+                logger.info("DB migration: post_stats.%s added", col)
+
     # hooks テーブル: デフォルトフックの初回投入
     if Hook.query.count() == 0:
         default_hooks = {
@@ -531,11 +543,24 @@ def pending():
         else:
             counts["rss"] += 1
 
+    early_engagement_map = {}
     if tab == "posted":
         articles = (_scope(Article.query.filter_by(status="posted", content_type="video"))
                     .order_by(Article.created_at.desc())
                     .all())
         images_map = {}
+        if articles:
+            early_stats = (
+                PostStat.query
+                .filter(
+                    PostStat.article_id.in_([a.id for a in articles]),
+                    PostStat.minute_offset.isnot(None),
+                )
+                .order_by(PostStat.minute_offset.asc())
+                .all()
+            )
+            for stat in early_stats:
+                early_engagement_map.setdefault(stat.article_id, {})[stat.minute_offset] = stat.likes
     elif tab == "video":
         articles = [a for a in all_pending if (a.content_type or "article") == "video"]
         images_map = {}
@@ -594,7 +619,8 @@ def pending():
     return render_template("pending.html", articles=articles, images_map=images_map,
                            active_tab=tab, counts=counts, now_utc=datetime.utcnow(),
                            active_trim_jobs=active_trim_jobs, active_chapter_jobs=active_chapter_jobs,
-                           all_groups=all_groups, group_tag_map=group_tag_map)
+                           all_groups=all_groups, group_tag_map=group_tag_map,
+                           early_engagement_map=early_engagement_map)
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
