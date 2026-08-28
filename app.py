@@ -2188,6 +2188,24 @@ def _run_trim_job(app, job_id):
             db.session.commit()
 
 
+TRIM_JOB_STALE_MINUTES = 15
+
+
+def _is_trim_job_stale(job) -> bool:
+    """processingのまま長時間放置されているかを判定する。開発中のコード編集によるapp.py
+    自動再起動(run.pyのwatcherがtaskkillでプロセスツリーを強制終了する)で、実行中の
+    _run_trim_jobスレッドが道連れで終了させられると、DBのstatusが更新されないまま
+    'processing'に固まってしまうことがある。ffmpeg自体には_ffmpeg_trim_clip側で
+    timeout(デフォルト600秒)があるが、プロセスごと強制終了された場合はそれも実行されない
+    ため、別途ここで検知する。"""
+    if job.status != "processing":
+        return False
+    reference = job.updated_at or job.created_at
+    if not reference:
+        return False
+    return datetime.utcnow() - reference > timedelta(minutes=TRIM_JOB_STALE_MINUTES)
+
+
 @app.route("/api/videos/<int:article_id>/trim", methods=["POST"])
 def trim_video(article_id):
     data = request.get_json(force=True, silent=True) or {}
@@ -2224,7 +2242,16 @@ def trim_video(article_id):
         source_article_id=article_id, status="processing"
     ).first()
     if existing_job:
-        return jsonify({"ok": False, "error": "この動画は既にトリミング処理中です", "job_id": existing_job.id}), 409
+        if _is_trim_job_stale(existing_job):
+            existing_job.status = "failed"
+            existing_job.error_message = (
+                f"処理が{TRIM_JOB_STALE_MINUTES}分以上完了しなかったためタイムアウトしました。"
+                "バックグラウンド処理が中断された可能性があります。"
+            )
+            db.session.commit()
+            logger.warning("動画トリミングタイムアウト(新規リクエスト時に検知): job_id=%d", existing_job.id)
+        else:
+            return jsonify({"ok": False, "error": "この動画は既にトリミング処理中です", "job_id": existing_job.id}), 409
 
     job = VideoTrimJob(source_article_id=article_id, start=start, end=end, status="processing")
     db.session.add(job)
@@ -2238,6 +2265,14 @@ def trim_video(article_id):
 @app.route("/api/videos/trim-jobs/<int:job_id>")
 def trim_job_status(job_id):
     job = VideoTrimJob.query.get_or_404(job_id)
+    if _is_trim_job_stale(job):
+        job.status = "failed"
+        job.error_message = (
+            f"処理が{TRIM_JOB_STALE_MINUTES}分以上完了しなかったためタイムアウトしました。"
+            "バックグラウンド処理が中断された可能性があります。もう一度お試しください。"
+        )
+        db.session.commit()
+        logger.warning("動画トリミングタイムアウト(ポーリング時に検知): job_id=%d", job_id)
     return jsonify({
         "status": job.status,
         "error": job.error_message,
