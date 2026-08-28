@@ -1241,7 +1241,7 @@ def reorder_queue():
 def settings():
     if request.method == "POST":
         for key in ("threads_user_id", "threads_access_token", "anthropic_api_key",
-                    "post_times", "collect_interval_hours",
+                    "collect_interval_hours",
                     "youtube_api_key", "youtube_collect_interval_hours",
                     "youtube_min_view_count", "youtube_max_view_count",
                     "meta_app_id", "meta_app_secret", "app_base_url"):
@@ -1300,7 +1300,6 @@ def settings():
         "threads_access_token": Setting.get("threads_access_token"),
         "threads_token_expires_in_days": threads_token_expires_in_days,
         "anthropic_api_key": Setting.get("anthropic_api_key"),
-        "post_times": Setting.get("post_times", "09:00,15:00,21:00"),
         "collect_interval_hours": Setting.get("collect_interval_hours", "2"),
         "youtube_api_key": Setting.get("youtube_api_key"),
         "youtube_collect_interval_hours": Setting.get("youtube_collect_interval_hours", "6"),

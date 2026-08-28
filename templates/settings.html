@@ -260,11 +260,11 @@
       <div class="card-header"><i class="bi bi-clock-fill me-2"></i>投稿スケジュール</div>
       <div class="card-body">
         <div class="mb-3">
-          <label class="form-label" style="font-size:.85rem">自動投稿時刻（JST・カンマ区切り）</label>
-          <input type="text" class="form-control" name="post_times"
-                 value="{{ settings.post_times }}" placeholder="09:00,15:00,21:00">
-          <div class="form-text" style="font-size:.75rem">
-            例: 09:00,12:00,18:00,21:00 — 設定した時刻にキューの先頭から1件投稿します
+          <div class="alert alert-info py-2 px-3 mb-0" style="font-size:.82rem">
+            <i class="bi bi-info-circle-fill me-1"></i>
+            自動投稿時刻はアカウントごとに
+            <a href="{{ url_for('schedule') }}">週間投稿スケジュール</a>
+            画面で設定してください（実際に投稿に使われるのはこちらの設定です）。
           </div>
         </div>
         <div class="mb-0">
