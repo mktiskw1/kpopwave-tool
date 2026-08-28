@@ -2517,6 +2517,31 @@ def search_music_bank_videos():
     })
 
 
+@app.route("/api/videos/fancam/search", methods=["POST"])
+def search_fancam_videos_endpoint():
+    from youtube_collector import search_fancam_videos, DEFAULT_TARGET_GROUP
+
+    data = request.get_json(silent=True) or {}
+    target_group = (data.get("target_group") or DEFAULT_TARGET_GROUP).strip()
+    page_token = (data.get("page_token") or "").strip() or None
+    order = (data.get("order") or "date").strip()
+    query_suffix = (data.get("query_suffix") or "").strip() or None
+    if not target_group:
+        return jsonify({"ok": False, "error": "グループ名を入力してください"}), 400
+
+    result = search_fancam_videos(app, target_group, page_token=page_token, order=order,
+                                   query_suffix=query_suffix)
+    if not result["ok"]:
+        return jsonify({"ok": False, "error": result["error"]}), 400
+    return jsonify({
+        "ok": True,
+        "videos": result["videos"],
+        "next_page_token": result["next_page_token"],
+        "order": result["order"],
+        "query_suffix": result["query_suffix"],
+    })
+
+
 @app.route("/api/videos/add-manual", methods=["POST"])
 def add_video_manual():
     import shutil

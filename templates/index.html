@@ -95,6 +95,34 @@
   </div>
 </div>
 
+<!-- fancam検索 -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-camera-reels me-2"></i>fancamを探す</div>
+  <div class="card-body">
+    <div class="d-flex gap-2 flex-wrap align-items-center">
+      <input type="text" id="fc-group-input" class="form-control" list="fc-group-list"
+             style="width:220px;font-size:.88rem" placeholder="例: aespa">
+      <datalist id="fc-group-list">
+        {% for name in group_names %}
+        <option value="{{ name }}">
+        {% endfor %}
+      </datalist>
+      <select id="fc-order-select" class="form-select" style="width:auto;font-size:.88rem">
+        <option value="date" selected>新しい順</option>
+        <option value="viewCount">再生数順</option>
+      </select>
+      <button class="btn btn-accent px-3 flex-shrink-0" onclick="searchFancam()" id="fc-search-btn">
+        <i class="bi bi-search me-1"></i>検索
+      </button>
+    </div>
+    <div class="form-text mt-1" style="font-size:.75rem">
+      特定チャンネルに絞らずYouTube全体から検索します。公式放送局チャンネル（Music Bank検索の対象チャンネル）は除外されます。
+    </div>
+    <div id="fc-history-chips" class="mt-2 d-flex flex-wrap gap-1"></div>
+    <div id="fc-search-result" class="mt-3"></div>
+  </div>
+</div>
+
 <!-- 最近のアクティビティ -->
 <div class="card">
   <div class="card-header d-flex justify-content-between align-items-center">
@@ -286,15 +314,13 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-var _mbVideos = [];
+// ── グループ名検索履歴(localStorage、音楽番組検索・fancam検索で共有) ─────────
+var GROUP_HISTORY_KEY = 'mb_group_history';
+var GROUP_HISTORY_MAX = 20;
 
-// ── グループ名検索履歴(localStorage) ──────────────────────────────────────
-var MB_HISTORY_KEY = 'mb_group_history';
-var MB_HISTORY_MAX = 20;
-
-function loadMbHistory() {
+function loadGroupHistory() {
   try {
-    var raw = localStorage.getItem(MB_HISTORY_KEY);
+    var raw = localStorage.getItem(GROUP_HISTORY_KEY);
     var list = raw ? JSON.parse(raw) : [];
     return Array.isArray(list) ? list : [];
   } catch (e) {
@@ -302,36 +328,33 @@ function loadMbHistory() {
   }
 }
 
-function saveMbHistory(list) {
+function saveGroupHistory(list) {
   try {
-    localStorage.setItem(MB_HISTORY_KEY, JSON.stringify(list));
+    localStorage.setItem(GROUP_HISTORY_KEY, JSON.stringify(list));
   } catch (e) {
     // localStorage無効・容量超過時は履歴保存を諦める(検索機能自体は継続動作させる)
   }
 }
 
-function addMbHistory(name) {
+function addGroupHistory(name) {
   name = name.trim();
   if (!name) return;
-  var list = loadMbHistory().filter(function(n) { return n !== name; });
+  var list = loadGroupHistory().filter(function(n) { return n !== name; });
   list.unshift(name);
-  if (list.length > MB_HISTORY_MAX) list = list.slice(0, MB_HISTORY_MAX);
-  saveMbHistory(list);
-  renderMbHistory();
+  if (list.length > GROUP_HISTORY_MAX) list = list.slice(0, GROUP_HISTORY_MAX);
+  saveGroupHistory(list);
+  renderAllGroupHistory();
 }
 
-function removeMbHistory(name) {
-  saveMbHistory(loadMbHistory().filter(function(n) { return n !== name; }));
-  renderMbHistory();
+function removeGroupHistory(name) {
+  saveGroupHistory(loadGroupHistory().filter(function(n) { return n !== name; }));
+  renderAllGroupHistory();
 }
 
-function selectMbHistory(name) {
-  document.getElementById('mb-group-input').value = name;
-}
-
-function renderMbHistory() {
-  var container = document.getElementById('mb-history-chips');
-  var list = loadMbHistory();
+function renderGroupHistoryInto(containerId, inputId) {
+  var container = document.getElementById(containerId);
+  if (!container) return;
+  var list = loadGroupHistory();
   container.innerHTML = '';
   list.forEach(function(name) {
     var chip = document.createElement('span');
@@ -342,69 +365,26 @@ function renderMbHistory() {
     label.textContent = name;
     label.style.cursor = 'pointer';
     label.title = 'クリックで入力欄に反映';
-    label.onclick = function() { selectMbHistory(name); };
+    label.onclick = function() { document.getElementById(inputId).value = name; };
     chip.appendChild(label);
 
     var del = document.createElement('span');
     del.textContent = '×';
     del.style.cssText = 'cursor:pointer;opacity:.6;padding:0 .15em';
     del.title = '履歴から削除';
-    del.onclick = function(e) { e.stopPropagation(); removeMbHistory(name); };
+    del.onclick = function(e) { e.stopPropagation(); removeGroupHistory(name); };
     chip.appendChild(del);
 
     container.appendChild(chip);
   });
 }
 
-renderMbHistory();
-
-var _mbNextPageToken = null;
-var _mbOrder = null;
-var _mbProgram = null;
-var _mbTargetGroup = null;
-
-function searchMusicBank() {
-  var btn = document.getElementById('mb-search-btn');
-  var result = document.getElementById('mb-search-result');
-  var program = document.getElementById('mb-program-select').value;
-  var targetGroup = document.getElementById('mb-group-input').value.trim();
-  var selectedOrder = document.getElementById('mb-order-select').value;
-  if (!targetGroup) {
-    document.getElementById('mb-group-input').focus();
-    return;
-  }
-  addMbHistory(targetGroup);
-  _mbProgram = program;
-  _mbTargetGroup = targetGroup;
-  _mbNextPageToken = null;
-  _mbOrder = null;
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>検索中...';
-  result.innerHTML = '';
-
-  fetch('/api/videos/music-bank/search', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ program: program, target_group: targetGroup, order: selectedOrder })
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(d) {
-    btn.disabled = false;
-    btn.innerHTML = '<i class="bi bi-search me-1"></i>検索';
-    if (!d.ok) {
-      result.innerHTML = '<span style="color:var(--accent)"><i class="bi bi-exclamation-circle-fill me-1"></i>' + escHtml(d.error) + '</span>';
-      return;
-    }
-    _mbNextPageToken = d.next_page_token || null;
-    _mbOrder = d.order || null;
-    renderMusicBankCandidates(d.videos);
-  })
-  .catch(function() {
-    btn.disabled = false;
-    btn.innerHTML = '<i class="bi bi-search me-1"></i>検索';
-    result.innerHTML = '<span style="color:var(--accent)">通信エラーが発生しました</span>';
-  });
+function renderAllGroupHistory() {
+  renderGroupHistoryInto('mb-history-chips', 'mb-group-input');
+  renderGroupHistoryInto('fc-history-chips', 'fc-group-input');
 }
+
+renderAllGroupHistory();
 
 function formatViewCount(n) {
   n = n || 0;
@@ -415,87 +395,95 @@ function formatViewCount(n) {
   return n.toLocaleString() + '回';
 }
 
-function _mbRowHtml(v, i) {
+// ── 動画候補一覧UI(音楽番組検索・fancam検索で共通のロジック) ──────────────────
+// state: { prefix, endpoint, videos, nextPageToken, order, buildLoadMoreBody() }
+var MB_STATE = { prefix: 'mb', endpoint: '/api/videos/music-bank/search', videos: [], nextPageToken: null, order: null, buildLoadMoreBody: null };
+var FC_STATE = { prefix: 'fc', endpoint: '/api/videos/fancam/search', videos: [], nextPageToken: null, order: null, querySuffix: null, buildLoadMoreBody: null };
+var STATE_BY_PREFIX = { mb: MB_STATE, fc: FC_STATE };
+
+function _rowHtml(state, v, i) {
   var mins = Math.floor(v.duration / 60);
   var secs = v.duration % 60;
   var durationLabel = v.duration ? (mins + ':' + (secs < 10 ? '0' : '') + secs) : '-';
   var pubDate = v.published_at ? v.published_at.slice(0, 10) : '';
-  return '<tr id="mb-row-' + i + '">' +
-    '<td><input type="checkbox" class="mb-checkbox" value="' + i + '"></td>' +
+  return '<tr id="' + state.prefix + '-row-' + i + '">' +
+    '<td><input type="checkbox" class="' + state.prefix + '-checkbox" value="' + i + '"></td>' +
     '<td>' + (v.thumbnail ? '<a href="' + escHtml(v.url) + '" target="_blank" rel="noopener" title="YouTubeで開く"><img src="' + escHtml(v.thumbnail) + '" style="width:64px;height:36px;object-fit:cover;border-radius:4px;cursor:pointer"></a>' : '') + '</td>' +
     '<td>' + escHtml(v.title) + '</td>' +
     '<td>' + escHtml(pubDate) + '</td>' +
     '<td>' + durationLabel + '</td>' +
     '<td>' + formatViewCount(v.view_count) + '</td>' +
     '<td>' +
-      '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="addSingleMusicBankVideo(' + i + ')" id="mb-single-btn-' + i + '">' +
+      '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="addSingleVideo(\'' + state.prefix + '\', ' + i + ')" id="' + state.prefix + '-single-btn-' + i + '">' +
         'この動画を追加</button>' +
     '</td>' +
     '</tr>';
 }
 
-function renderMusicBankCandidates(videos) {
-  _mbVideos = videos;
-  var result = document.getElementById('mb-search-result');
+function renderCandidates(state, videos) {
+  state.videos = videos;
+  var result = document.getElementById(state.prefix + '-search-result');
 
-  if (!videos.length && !_mbNextPageToken) {
+  if (!videos.length && !state.nextPageToken) {
     result.innerHTML = '<div style="color:var(--text-muted);font-size:.85rem">該当する動画が見つかりませんでした。</div>';
     return;
   }
 
-  var rows = videos.map(_mbRowHtml).join('');
+  var rows = videos.map(function(v, i) { return _rowHtml(state, v, i); }).join('');
 
   result.innerHTML =
     '<div class="d-flex justify-content-between align-items-center mb-2">' +
-      '<span id="mb-count-label" style="font-size:.85rem">' + videos.length + '件見つかりました</span>' +
+      '<span id="' + state.prefix + '-count-label" style="font-size:.85rem">' + videos.length + '件見つかりました</span>' +
       '<div>' +
-        '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleMbAll(true)">全選択</button> ' +
-        '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleMbAll(false)">全解除</button>' +
+        '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAllChecks(\'' + state.prefix + '\', true)">全選択</button> ' +
+        '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAllChecks(\'' + state.prefix + '\', false)">全解除</button>' +
       '</div>' +
     '</div>' +
     '<div class="table-responsive"><table class="table table-hover mb-2" style="font-size:.85rem"><thead><tr>' +
       '<th style="width:2.5rem"></th><th style="width:5rem">サムネイル</th><th>タイトル</th><th style="width:6rem">公開日</th><th style="width:5rem">長さ</th><th style="width:5.5rem">再生回数</th><th style="width:8rem">操作</th>' +
-    '</tr></thead><tbody id="mb-tbody">' + rows + '</tbody></table></div>' +
+    '</tr></thead><tbody id="' + state.prefix + '-tbody">' + rows + '</tbody></table></div>' +
     '<div class="d-flex gap-2 flex-wrap">' +
-      '<button class="btn btn-accent" onclick="addSelectedMusicBankVideos()" id="mb-add-btn">' +
+      '<button class="btn btn-accent" onclick="addSelectedVideos(\'' + state.prefix + '\')" id="' + state.prefix + '-add-btn">' +
         '<i class="bi bi-download me-1"></i>選択した動画を追加</button>' +
-      '<button class="btn btn-outline-secondary" onclick="loadMoreMusicBank()" id="mb-load-more-btn"' +
-        (_mbNextPageToken ? '' : ' style="display:none"') + '>' +
+      '<button class="btn btn-outline-secondary" onclick="loadMoreVideos(\'' + state.prefix + '\')" id="' + state.prefix + '-load-more-btn"' +
+        (state.nextPageToken ? '' : ' style="display:none"') + '>' +
         '<i class="bi bi-arrow-down-circle me-1"></i>もっと見る（さらに過去を探す）</button>' +
     '</div>' +
-    '<div id="mb-add-progress" class="mt-2" style="font-size:.83rem"></div>';
+    '<div id="' + state.prefix + '-add-progress" class="mt-2" style="font-size:.83rem"></div>';
 }
 
-function appendMusicBankCandidates(videos) {
+function appendCandidates(state, videos) {
   var existingIds = {};
-  _mbVideos.forEach(function(v) { existingIds[v.video_id] = true; });
+  state.videos.forEach(function(v) { existingIds[v.video_id] = true; });
   var newVideos = videos.filter(function(v) { return !existingIds[v.video_id]; });
 
-  var startIndex = _mbVideos.length;
-  var rowsHtml = newVideos.map(function(v, i) { return _mbRowHtml(v, startIndex + i); }).join('');
-  document.getElementById('mb-tbody').insertAdjacentHTML('beforeend', rowsHtml);
+  var startIndex = state.videos.length;
+  var rowsHtml = newVideos.map(function(v, i) { return _rowHtml(state, v, startIndex + i); }).join('');
+  document.getElementById(state.prefix + '-tbody').insertAdjacentHTML('beforeend', rowsHtml);
 
-  _mbVideos = _mbVideos.concat(newVideos);
+  state.videos = state.videos.concat(newVideos);
 
-  var countLabel = document.getElementById('mb-count-label');
-  if (countLabel) countLabel.textContent = _mbVideos.length + '件見つかりました';
+  var countLabel = document.getElementById(state.prefix + '-count-label');
+  if (countLabel) countLabel.textContent = state.videos.length + '件見つかりました';
 
   return newVideos.length;
 }
 
-function loadMoreMusicBank() {
-  if (!_mbNextPageToken) return;
-  var btn = document.getElementById('mb-load-more-btn');
+function toggleAllChecks(prefix, checked) {
+  document.querySelectorAll('.' + prefix + '-checkbox').forEach(function(cb) { cb.checked = checked; });
+}
+
+function loadMoreVideos(prefix) {
+  var state = STATE_BY_PREFIX[prefix];
+  if (!state.nextPageToken) return;
+  var btn = document.getElementById(prefix + '-load-more-btn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>読み込み中...';
 
-  fetch('/api/videos/music-bank/search', {
+  fetch(state.endpoint, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      program: _mbProgram, target_group: _mbTargetGroup,
-      page_token: _mbNextPageToken, order: _mbOrder
-    })
+    body: JSON.stringify(state.buildLoadMoreBody())
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {
@@ -505,10 +493,11 @@ function loadMoreMusicBank() {
       btn.style.display = 'none';
       return;
     }
-    appendMusicBankCandidates(d.videos);
-    _mbNextPageToken = d.next_page_token || null;
-    _mbOrder = d.order || _mbOrder;
-    if (!_mbNextPageToken) btn.style.display = 'none';
+    appendCandidates(state, d.videos);
+    state.nextPageToken = d.next_page_token || null;
+    state.order = d.order || state.order;
+    if ('query_suffix' in d) state.querySuffix = d.query_suffix || null;
+    if (!state.nextPageToken) btn.style.display = 'none';
   })
   .catch(function() {
     btn.disabled = false;
@@ -516,14 +505,11 @@ function loadMoreMusicBank() {
   });
 }
 
-function toggleMbAll(checked) {
-  document.querySelectorAll('.mb-checkbox').forEach(function(cb) { cb.checked = checked; });
-}
-
-function addSingleMusicBankVideo(index) {
-  var btn = document.getElementById('mb-single-btn-' + index);
+function addSingleVideo(prefix, index) {
+  var state = STATE_BY_PREFIX[prefix];
+  var btn = document.getElementById(prefix + '-single-btn-' + index);
   if (!btn || btn.disabled) return;
-  var v = _mbVideos[index];
+  var v = state.videos[index];
   if (!v) return;
 
   btn.disabled = true;
@@ -556,12 +542,13 @@ function addSingleMusicBankVideo(index) {
   });
 }
 
-function addSelectedMusicBankVideos() {
-  var checkedBoxes = Array.prototype.slice.call(document.querySelectorAll('.mb-checkbox:checked'));
+function addSelectedVideos(prefix) {
+  var state = STATE_BY_PREFIX[prefix];
+  var checkedBoxes = Array.prototype.slice.call(document.querySelectorAll('.' + prefix + '-checkbox:checked'));
   if (!checkedBoxes.length) { return; }
 
-  var btn = document.getElementById('mb-add-btn');
-  var progress = document.getElementById('mb-add-progress');
+  var btn = document.getElementById(prefix + '-add-btn');
+  var progress = document.getElementById(prefix + '-add-progress');
   btn.disabled = true;
 
   var indices = checkedBoxes.map(function(cb) { return parseInt(cb.value, 10); });
@@ -581,7 +568,7 @@ function addSelectedMusicBankVideos() {
       return;
     }
     var idx = indices.shift();
-    var v = _mbVideos[idx];
+    var v = state.videos[idx];
     done++;
     progress.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>' +
       'ダウンロード中... (' + done + '/' + total + ') ' + escHtml(v.title.slice(0, 40));
@@ -602,6 +589,102 @@ function addSelectedMusicBankVideos() {
     });
   }
   next();
+}
+
+// ── 音楽番組検索 ────────────────────────────────────────────────────────────
+function searchMusicBank() {
+  var btn = document.getElementById('mb-search-btn');
+  var result = document.getElementById('mb-search-result');
+  var program = document.getElementById('mb-program-select').value;
+  var targetGroup = document.getElementById('mb-group-input').value.trim();
+  var selectedOrder = document.getElementById('mb-order-select').value;
+  if (!targetGroup) {
+    document.getElementById('mb-group-input').focus();
+    return;
+  }
+  addGroupHistory(targetGroup);
+  MB_STATE.videos = [];
+  MB_STATE.nextPageToken = null;
+  MB_STATE.order = null;
+  MB_STATE.buildLoadMoreBody = function() {
+    return { program: program, target_group: targetGroup, page_token: MB_STATE.nextPageToken, order: MB_STATE.order };
+  };
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>検索中...';
+  result.innerHTML = '';
+
+  fetch('/api/videos/music-bank/search', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ program: program, target_group: targetGroup, order: selectedOrder })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-search me-1"></i>検索';
+    if (!d.ok) {
+      result.innerHTML = '<span style="color:var(--accent)"><i class="bi bi-exclamation-circle-fill me-1"></i>' + escHtml(d.error) + '</span>';
+      return;
+    }
+    MB_STATE.nextPageToken = d.next_page_token || null;
+    MB_STATE.order = d.order || null;
+    renderCandidates(MB_STATE, d.videos);
+  })
+  .catch(function() {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-search me-1"></i>検索';
+    result.innerHTML = '<span style="color:var(--accent)">通信エラーが発生しました</span>';
+  });
+}
+
+// ── fancam検索 ──────────────────────────────────────────────────────────────
+function searchFancam() {
+  var btn = document.getElementById('fc-search-btn');
+  var result = document.getElementById('fc-search-result');
+  var targetGroup = document.getElementById('fc-group-input').value.trim();
+  var selectedOrder = document.getElementById('fc-order-select').value;
+  if (!targetGroup) {
+    document.getElementById('fc-group-input').focus();
+    return;
+  }
+  addGroupHistory(targetGroup);
+  FC_STATE.videos = [];
+  FC_STATE.nextPageToken = null;
+  FC_STATE.order = null;
+  FC_STATE.querySuffix = null;
+  FC_STATE.buildLoadMoreBody = function() {
+    return {
+      target_group: targetGroup, order: FC_STATE.order,
+      page_token: FC_STATE.nextPageToken, query_suffix: FC_STATE.querySuffix
+    };
+  };
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>検索中...';
+  result.innerHTML = '';
+
+  fetch('/api/videos/fancam/search', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ target_group: targetGroup, order: selectedOrder })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-search me-1"></i>検索';
+    if (!d.ok) {
+      result.innerHTML = '<span style="color:var(--accent)"><i class="bi bi-exclamation-circle-fill me-1"></i>' + escHtml(d.error) + '</span>';
+      return;
+    }
+    FC_STATE.nextPageToken = d.next_page_token || null;
+    FC_STATE.order = d.order || null;
+    FC_STATE.querySuffix = d.query_suffix || null;
+    renderCandidates(FC_STATE, d.videos);
+  })
+  .catch(function() {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-search me-1"></i>検索';
+    result.innerHTML = '<span style="color:var(--accent)">通信エラーが発生しました</span>';
+  });
 }
 </script>
 {% endblock %}

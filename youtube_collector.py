@@ -546,26 +546,102 @@ def _resolve_channel_id(handle: str, api_key: str, app) -> str:
     return channel_id
 
 
-def _search_channel_videos(query: str, channel_id: str, api_key: str, fetch_count: int, order: str,
-                            page_token: str | None = None) -> tuple:
-    """1ページ分の検索結果を取得する。戻り値: (items, next_page_token)。
-    nextPageToken は order を含む検索条件に紐づくため、続きのページを取得する際は
-    同じ order を使い続ける必要がある(呼び出し側で order を保持しておくこと)。"""
+def _search_videos(query: str, api_key: str, fetch_count: int, order: str,
+                    page_token: str | None = None, channel_id: str | None = None) -> tuple:
+    """1ページ分の検索結果を取得する。channel_id を指定すればそのチャンネル内、省略すれば
+    YouTube全体を対象にする。戻り値: (items, next_page_token)。
+    nextPageToken は order(・channel_id)を含む検索条件に紐づくため、続きのページを取得する際は
+    同じ条件を使い続ける必要がある(呼び出し側で保持しておくこと)。"""
     params = {
         "part": "snippet",
         "q": query,
-        "channelId": channel_id,
         "type": "video",
         "order": order,
         "maxResults": fetch_count,
         "key": api_key,
     }
+    if channel_id:
+        params["channelId"] = channel_id
     if page_token:
         params["pageToken"] = page_token
     resp = requests.get(YOUTUBE_SEARCH_URL, params=params, timeout=15)
     resp.raise_for_status()
     data = resp.json()
     return data.get("items", []), data.get("nextPageToken")
+
+
+def _existing_article_urls(app) -> set:
+    with app.app_context():
+        return {
+            a.url for a in Article.query.filter(
+                Article.url.like("https://www.youtube.com/watch?v=%")
+            ).all()
+        }
+
+
+def _official_channel_ids(app, api_key: str) -> set:
+    """PROGRAM_CHANNELSに登録済みの公式放送局チャンネルIDの集合を返す(fancam検索での除外用)。
+    _resolve_channel_idの結果はSettingにキャッシュされているため、通常は追加API呼び出しなし。"""
+    ids = set()
+    for channel in PROGRAM_CHANNELS.values():
+        cid = _resolve_channel_id(channel["handle"], api_key, app)
+        if cid:
+            ids.add(cid)
+    return ids
+
+
+def _enrich_and_build_videos(items: list, api_key: str, existing_urls: set, max_results: int) -> list:
+    """検索結果アイテムに動画の長さ・再生数を付与し、DB既存分・Shortsを除外して
+    候補リストを構築する(search_program_videos / search_fancam_videos で共通)。"""
+    video_ids = [it["id"]["videoId"] for it in items if it.get("id", {}).get("videoId")]
+
+    durations = {}
+    view_counts = {}
+    for i in range(0, len(video_ids), 50):
+        batch = video_ids[i:i + 50]
+        try:
+            vresp = requests.get(
+                YOUTUBE_VIDEOS_URL,
+                params={"part": "contentDetails,statistics", "id": ",".join(batch), "key": api_key},
+                timeout=15,
+            )
+            vresp.raise_for_status()
+            for item in vresp.json().get("items", []):
+                durations[item["id"]] = _parse_duration_iso8601(
+                    item.get("contentDetails", {}).get("duration", "")
+                )
+                try:
+                    view_counts[item["id"]] = int(item.get("statistics", {}).get("viewCount", 0))
+                except (ValueError, TypeError):
+                    view_counts[item["id"]] = 0
+        except Exception as exc:
+            logger.warning("動画長さ・再生数取得エラー: %s", exc)
+
+    videos = []
+    for it in items:
+        vid = it.get("id", {}).get("videoId")
+        if not vid:
+            continue
+        url = f"https://www.youtube.com/watch?v={vid}"
+        if url in existing_urls:
+            continue
+        snippet = it.get("snippet", {})
+        title = snippet.get("title", "")
+        duration = durations.get(vid, 0)
+        if _is_program_shorts(title, duration):
+            continue
+        videos.append({
+            "video_id": vid,
+            "title": title,
+            "url": url,
+            "thumbnail": _best_thumbnail(snippet.get("thumbnails", {})),
+            "published_at": snippet.get("publishedAt", ""),
+            "duration": duration,
+            "view_count": view_counts.get(vid, 0),
+        })
+        if len(videos) >= max_results:
+            break
+    return videos
 
 
 def search_program_videos(app, program_key: str, target_group: str, max_results: int = 30,
@@ -619,20 +695,20 @@ def search_program_videos(app, program_key: str, target_group: str, max_results:
         if page_token:
             # 「もっと見る」: 呼び出し側が保持している order・page_token で1ページ継続取得
             # (フォールバックはしない。orderを勝手に変えるとページ位置の整合性が崩れるため)
-            raw_items, next_token = _search_channel_videos(
-                query, channel_id, api_key, fetch_count, order, page_token
+            raw_items, next_token = _search_videos(
+                query, api_key, fetch_count, order, page_token, channel_id=channel_id
             )
             items = _filtered(raw_items)
             effective_order = order
         else:
             # 新規検索: 指定されたorder(UIで選んだ並び順)でまず検索し、
             # フィルタ後0件ならrelevanceにフォールバック(既にrelevance指定時は行わない)
-            raw_items, next_token = _search_channel_videos(query, channel_id, api_key, fetch_count, order)
+            raw_items, next_token = _search_videos(query, api_key, fetch_count, order, channel_id=channel_id)
             items = _filtered(raw_items)
             effective_order = order
             if not items and order != "relevance":
-                raw_items, next_token = _search_channel_videos(
-                    query, channel_id, api_key, fetch_count, "relevance"
+                raw_items, next_token = _search_videos(
+                    query, api_key, fetch_count, "relevance", channel_id=channel_id
                 )
                 items = _filtered(raw_items)
                 effective_order = "relevance"
@@ -645,61 +721,97 @@ def search_program_videos(app, program_key: str, target_group: str, max_results:
         return {"ok": True, "error": None, "videos": [],
                 "next_page_token": next_token, "order": effective_order}
 
-    video_ids = [it["id"]["videoId"] for it in items if it.get("id", {}).get("videoId")]
-
-    with app.app_context():
-        existing_urls = {
-            a.url for a in Article.query.filter(
-                Article.url.like("https://www.youtube.com/watch?v=%")
-            ).all()
-        }
-
-    durations = {}
-    view_counts = {}
-    for i in range(0, len(video_ids), 50):
-        batch = video_ids[i:i + 50]
-        try:
-            vresp = requests.get(
-                YOUTUBE_VIDEOS_URL,
-                params={"part": "contentDetails,statistics", "id": ",".join(batch), "key": api_key},
-                timeout=15,
-            )
-            vresp.raise_for_status()
-            for item in vresp.json().get("items", []):
-                durations[item["id"]] = _parse_duration_iso8601(
-                    item.get("contentDetails", {}).get("duration", "")
-                )
-                try:
-                    view_counts[item["id"]] = int(item.get("statistics", {}).get("viewCount", 0))
-                except (ValueError, TypeError):
-                    view_counts[item["id"]] = 0
-        except Exception as exc:
-            logger.warning("動画長さ・再生数取得エラー: %s", exc)
-
-    videos = []
-    for it in items:
-        vid = it.get("id", {}).get("videoId")
-        if not vid:
-            continue
-        url = f"https://www.youtube.com/watch?v={vid}"
-        if url in existing_urls:
-            continue
-        snippet = it.get("snippet", {})
-        title = snippet.get("title", "")
-        duration = durations.get(vid, 0)
-        if _is_program_shorts(title, duration):
-            continue
-        videos.append({
-            "video_id": vid,
-            "title": title,
-            "url": url,
-            "thumbnail": _best_thumbnail(snippet.get("thumbnails", {})),
-            "published_at": snippet.get("publishedAt", ""),
-            "duration": duration,
-            "view_count": view_counts.get(vid, 0),
-        })
-        if len(videos) >= max_results:
-            break
+    existing_urls = _existing_article_urls(app)
+    videos = _enrich_and_build_videos(items, api_key, existing_urls, max_results)
 
     return {"ok": True, "error": None, "videos": videos,
             "next_page_token": next_token, "order": effective_order}
+
+
+# ── fancam検索(グループ横断・チャンネル無指定) ─────────────────────────────────
+# 特定チャンネルに絞らずYouTube全体を検索し、PROGRAM_CHANNELSの公式放送局チャンネル
+# (著作権リスクが高い)は結果から除外する。個人ファンによる撮影映像を見つけるのが目的。
+
+FANCAM_QUERY_SUFFIXES = ["fancam", "직캠", "stage mix", "ver", "チッケム"]
+
+
+def search_fancam_videos(app, target_group: str, max_results: int = 30, fetch_count: int = 30,
+                          page_token: str | None = None, order: str = "date",
+                          query_suffix: str | None = None) -> dict:
+    """YouTube全体から target_group のfancam(個人ファン撮影映像)を検索する。特定チャンネルには
+    絞らず、PROGRAM_CHANNELSに登録済みの公式放送局チャンネル(KBS World TV等)からの結果は
+    著作権リスクが高いため除外する。
+
+    query_suffix を省略(新規検索)した場合、FANCAM_QUERY_SUFFIXES を順番に試し、フィルタ後に
+    結果が出た最初のsuffixを採用する(全パターンを毎回試すとクォータ消費が5倍になるため、
+    search_program_videos の date→relevance フォールバックと同じ「最初に成功したものを採用」
+    方式にした。全パターンをマージする実装は行っていない)。全suffixで0件だった場合は、
+    最初のsuffixに対してさらに order="relevance" でも試す。
+    続きのページを取得する「もっと見る」用途では、初回検索で採用された
+    query_suffix・order・page_token を呼び出し側で保持し、そのまま指定して呼び出すこと。
+    戻り値: {"ok", "error", "videos": [...], "next_page_token", "order", "query_suffix"}"""
+    with app.app_context():
+        api_key = Setting.get("youtube_api_key", "") or os.getenv("YOUTUBE_API_KEY", "")
+    if not api_key:
+        return {"ok": False, "error": "YouTube APIキーが設定されていません", "videos": [],
+                "next_page_token": None, "order": None, "query_suffix": None}
+
+    exclude_channel_ids = _official_channel_ids(app, api_key)
+
+    def _filtered(raw_items):
+        out = []
+        for it in raw_items:
+            snippet = it.get("snippet", {})
+            if snippet.get("channelId") in exclude_channel_ids:
+                continue
+            title = snippet.get("title", "")
+            if not _matches_target_artist(title, "", target_group):
+                continue
+            if _is_program_excluded(title):
+                continue
+            out.append(it)
+        return out
+
+    try:
+        if page_token:
+            if not query_suffix:
+                return {"ok": False, "error": "query_suffixが指定されていません", "videos": [],
+                        "next_page_token": None, "order": None, "query_suffix": None}
+            # 「もっと見る」: 呼び出し側が保持しているsuffix・order・page_tokenで1ページ継続取得
+            query = f"{target_group} {query_suffix}"
+            raw_items, next_token = _search_videos(query, api_key, fetch_count, order, page_token)
+            items = _filtered(raw_items)
+            effective_order = order
+            effective_suffix = query_suffix
+        else:
+            suffixes = [query_suffix] if query_suffix else FANCAM_QUERY_SUFFIXES
+            items, next_token = [], None
+            effective_suffix = suffixes[0]
+            for suffix in suffixes:
+                query = f"{target_group} {suffix}"
+                raw_items, next_token = _search_videos(query, api_key, fetch_count, order)
+                items = _filtered(raw_items)
+                effective_suffix = suffix
+                if items:
+                    break
+            effective_order = order
+            if not items and order != "relevance":
+                query = f"{target_group} {suffixes[0]}"
+                raw_items, next_token = _search_videos(query, api_key, fetch_count, "relevance")
+                items = _filtered(raw_items)
+                effective_order = "relevance"
+                effective_suffix = suffixes[0]
+    except Exception as exc:
+        logger.error("fancam検索エラー(%s): %s", target_group, exc)
+        return {"ok": False, "error": f"YouTube検索エラー: {str(exc)[:150]}", "videos": [],
+                "next_page_token": None, "order": None, "query_suffix": None}
+
+    if not items:
+        return {"ok": True, "error": None, "videos": [], "next_page_token": next_token,
+                "order": effective_order, "query_suffix": effective_suffix}
+
+    existing_urls = _existing_article_urls(app)
+    videos = _enrich_and_build_videos(items, api_key, existing_urls, max_results)
+
+    return {"ok": True, "error": None, "videos": videos, "next_page_token": next_token,
+            "order": effective_order, "query_suffix": effective_suffix}
