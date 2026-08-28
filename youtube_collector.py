@@ -734,6 +734,34 @@ def search_program_videos(app, program_key: str, target_group: str, max_results:
 
 FANCAM_QUERY_SUFFIXES = ["fancam", "직캠", "stage mix", "ver", "チッケム"]
 
+# タイトルにこれらのいずれかが含まれる場合はレーベル/事務所公式コンテンツとみなして除外する
+# (fancam検索専用。PROGRAM_EXCLUDE_KEYWORDSとは目的が異なるため別リストにする)。
+FANCAM_EXCLUDE_KEYWORDS = frozenset([
+    "official mv", "official m/v",
+    # "choreography"単独(ver/videoが付かない"(NewJeans Choreography)"等の表記も含む)で除外
+    "choreography",
+    "performance video", "special performance video",
+    "dance practice",
+    "showcase",
+    # 放送局系表記(チャンネルID除外をすり抜けた転載・非公式チャンネル対策の多層防御)。
+    # "@MusicBank"のようにスペース無し・記号付きで書かれることもあるため両表記を含める
+    "music bank", "musicbank", "뮤직뱅크",
+    "k-choreo",
+    "mcountdown", "mpd직캠",
+    "인기가요", "음악중심", "입덕직캠",
+])
+
+
+def _is_fancam_title(title: str) -> bool:
+    """タイトルに「직캠」または「fancam」(大文字小文字区別なし)が含まれるかを判定する。"""
+    t = title.lower()
+    return "직캠" in t or "fancam" in t
+
+
+def _is_fancam_excluded(title: str) -> bool:
+    t = title.lower()
+    return any(kw in t for kw in FANCAM_EXCLUDE_KEYWORDS)
+
 
 def search_fancam_videos(app, target_group: str, max_results: int = 30, fetch_count: int = 30,
                           page_token: str | None = None, order: str = "date",
@@ -768,6 +796,10 @@ def search_fancam_videos(app, target_group: str, max_results: int = 30, fetch_co
             if not _matches_target_artist(title, "", target_group):
                 continue
             if _is_program_excluded(title):
+                continue
+            if not _is_fancam_title(title):
+                continue
+            if _is_fancam_excluded(title):
                 continue
             out.append(it)
         return out
