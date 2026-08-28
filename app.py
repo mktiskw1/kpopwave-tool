@@ -1432,12 +1432,10 @@ def text_post():
         success, msg = post_to_threads(app, article.id, test_mode=test_mode, account_id=account.id)
         return jsonify({"success": success, "message": msg})
 
-    default_account_id = None
-    for acc in accounts:
-        if acc.account_label == "田中（仮）":
-            default_account_id = acc.id
-            break
-    if default_account_id is None and accounts:
+    # サイドバーで選択中のアクティブアカウントをデフォルトにする(キュー投稿実行と同じ解決方法)。
+    # そのアカウントが非アクティブ化されている等で候補に無ければ先頭にフォールバックする。
+    default_account_id = _selected_account_id()
+    if accounts and default_account_id not in {acc.id for acc in accounts}:
         default_account_id = accounts[0].id
 
     return render_template(
