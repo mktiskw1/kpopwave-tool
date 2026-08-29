@@ -1,8 +1,21 @@
 from datetime import datetime
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 
 
 db = SQLAlchemy()
+
+
+@event.listens_for(Engine, "connect")
+def _set_sqlite_pragma(dbapi_connection, connection_record):
+    """SQLite接続ごとにWALモード・busy_timeoutを設定する。
+    複数プロセス(app.py本体+run.pyの監視・再起動)からの同時アクセスで
+    'database is locked'エラーが起きるのを防ぐため。"""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=15000")
+    cursor.close()
 
 
 class Article(db.Model):
