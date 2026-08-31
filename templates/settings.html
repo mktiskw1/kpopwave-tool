@@ -267,13 +267,20 @@
             画面で設定してください（実際に投稿に使われるのはこちらの設定です）。
           </div>
         </div>
-        <div class="mb-0">
+        <div class="mb-3">
           <label class="form-label" style="font-size:.85rem">RSS 収集間隔（時間）</label>
           <input type="number" class="form-control" name="collect_interval_hours"
                  value="{{ settings.collect_interval_hours }}" min="1" max="24" style="max-width:100px">
           <div class="form-text" style="font-size:.75rem">
             定期収集の間隔（時間単位）。変更は次回起動時に反映されます。
           </div>
+        </div>
+        <div class="form-check mb-0">
+          <input type="checkbox" class="form-check-input" name="early_advance_enabled" id="early_advance_enabled"
+                 {% if settings.early_advance_enabled %}checked{% endif %}>
+          <label class="form-check-label" for="early_advance_enabled" style="font-size:.85rem">
+            前倒し投稿（KPOPアカウント、投稿後60分いいね0で次の投稿を前倒し、連鎖は最大2回まで）
+          </label>
         </div>
       </div>
     </div>

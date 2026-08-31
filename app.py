@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from config import Config
 from database import (
-    Article, BuzzPost, ChapterClip, ChapterJob, Comment, DailyStat, Group, Hook, Member,
+    Article, BuzzPost, ChapterClip, ChapterJob, Comment, DailyStat, EarlyAdvanceLog, Group, Hook, Member,
     PostStat, Setting, ThreadsAccount, VideoTrimJob, get_active_account, db,
 )
 
@@ -255,6 +255,7 @@ def _init_default_settings():
         "youtube_min_view_count": "5000000",
         "youtube_max_view_count": "0",
         "test_mode": "false",
+        "early_advance_enabled": "true",
         "threads_user_id": os.getenv("THREADS_USER_ID", ""),
         "threads_access_token": os.getenv("THREADS_ACCESS_TOKEN", ""),
         "anthropic_api_key": os.getenv("ANTHROPIC_API_KEY", ""),
@@ -640,6 +641,8 @@ def bulk_delete_articles():
             _delete_video_files(a.video_file_path, static_dir)
     target_ids = [a.id for a in targets]
     if target_ids:
+        for tid in target_ids:
+            _cleanup_article_related_records(tid)
         Article.query.filter(Article.id.in_(target_ids)).delete(synchronize_session=False)
         db.session.commit()
     msg = f"{len(target_ids)} 件の記事を削除しました"
@@ -836,6 +839,27 @@ def _article_from_snapshot(snapshot):
     return Article(**kwargs)
 
 
+def _cleanup_article_related_records(article_id: int) -> None:
+    """記事削除前に、その記事を参照する子レコードの整合性を保つ。PostStat・VideoTrimJob
+    (source側、そのジョブが「この記事を切り取る」ジョブである場合)は記事と一対で意味を持つ
+    データのため一緒に削除する。VideoTrimJob(result側、このarticle_idが切り取り結果として
+    生成されたクリップの場合)は、元の切り取りジョブの完了履歴自体は残す意味があるため
+    削除はせずresult_article_idをNULL化するに留める。"""
+    PostStat.query.filter_by(article_id=article_id).delete(synchronize_session=False)
+    VideoTrimJob.query.filter_by(source_article_id=article_id).delete(synchronize_session=False)
+    VideoTrimJob.query.filter_by(result_article_id=article_id).update(
+        {"result_article_id": None}, synchronize_session=False
+    )
+    # EarlyAdvanceLogは前倒し投稿の実行履歴そのものに意味があるため、記事が消えても
+    # ログ行自体は残し、参照だけNULL化する。
+    EarlyAdvanceLog.query.filter_by(source_article_id=article_id).update(
+        {"source_article_id": None}, synchronize_session=False
+    )
+    EarlyAdvanceLog.query.filter_by(target_article_id=article_id).update(
+        {"target_article_id": None}, synchronize_session=False
+    )
+
+
 @app.route("/articles/<int:id>/delete", methods=["POST"])
 def delete_article(id):
     article = Article.query.get_or_404(id)
@@ -847,6 +871,7 @@ def delete_article(id):
         flash(error, "warning")
         return redirect(request.referrer or url_for("pending"))
     snapshot = _article_snapshot(article) if is_fetch else None
+    _cleanup_article_related_records(id)
     db.session.delete(article)
     db.session.commit()
     if is_fetch:
@@ -1248,6 +1273,7 @@ def settings():
             Setting.set(key, (request.form.get(key) or "").strip())
 
         Setting.set("test_mode", "true" if request.form.get("test_mode") else "false")
+        Setting.set("early_advance_enabled", "true" if request.form.get("early_advance_enabled") else "false")
 
         feed_names = request.form.getlist("feed_name")
         feed_urls = request.form.getlist("feed_url")
@@ -1306,6 +1332,7 @@ def settings():
         "youtube_min_view_count": Setting.get("youtube_min_view_count", "5000000"),
         "youtube_max_view_count": Setting.get("youtube_max_view_count", "0"),
         "test_mode": Setting.get("test_mode", "true") == "true",
+        "early_advance_enabled": Setting.get("early_advance_enabled", "true") == "true",
         "rss_feeds": json.loads(Setting.get("rss_feeds", "[]") or "[]"),
         "youtube_channels": json.loads(Setting.get("youtube_channels", "[]") or "[]"),
         "meta_app_id": Setting.get("meta_app_id"),
@@ -1710,6 +1737,13 @@ def analytics():
         """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
     ]
 
+    early_advance_logs = (
+        EarlyAdvanceLog.query
+        .order_by(EarlyAdvanceLog.created_at.desc())
+        .limit(20)
+        .all()
+    )
+
     return render_template(
         "analytics.html",
         daily_labels=daily_labels,
@@ -1720,6 +1754,7 @@ def analytics():
         member_rows=member_rows,
         hour_rows=hour_rows,
         weekday_rows=weekday_rows,
+        early_advance_logs=early_advance_logs,
     )
 
 
@@ -2188,22 +2223,22 @@ def _run_trim_job(app, job_id):
             db.session.commit()
 
 
-TRIM_JOB_STALE_MINUTES = 15
+JOB_STALE_MINUTES = 15
 
 
-def _is_trim_job_stale(job) -> bool:
-    """processingのまま長時間放置されているかを判定する。開発中のコード編集によるapp.py
-    自動再起動(run.pyのwatcherがtaskkillでプロセスツリーを強制終了する)で、実行中の
-    _run_trim_jobスレッドが道連れで終了させられると、DBのstatusが更新されないまま
-    'processing'に固まってしまうことがある。ffmpeg自体には_ffmpeg_trim_clip側で
-    timeout(デフォルト600秒)があるが、プロセスごと強制終了された場合はそれも実行されない
-    ため、別途ここで検知する。"""
+def _is_job_stale(job, stale_minutes: int = JOB_STALE_MINUTES) -> bool:
+    """processingのまま長時間放置されているかを判定する(VideoTrimJob/ChapterJob共通)。
+    開発中のコード編集によるapp.py自動再起動(run.pyのwatcherがtaskkillでプロセスツリーを
+    強制終了する)で、実行中のバックグラウンドスレッド(_run_trim_job/_run_chapter_job)が
+    道連れで終了させられると、DBのstatusが更新されないまま'processing'に固まってしまう
+    ことがある。ffmpeg自体にはtimeout(デフォルト600秒)があるが、プロセスごと強制終了
+    された場合はそれも実行されないため、別途ここで検知する。"""
     if job.status != "processing":
         return False
     reference = job.updated_at or job.created_at
     if not reference:
         return False
-    return datetime.utcnow() - reference > timedelta(minutes=TRIM_JOB_STALE_MINUTES)
+    return datetime.utcnow() - reference > timedelta(minutes=stale_minutes)
 
 
 @app.route("/api/videos/<int:article_id>/trim", methods=["POST"])
@@ -2242,10 +2277,10 @@ def trim_video(article_id):
         source_article_id=article_id, status="processing"
     ).first()
     if existing_job:
-        if _is_trim_job_stale(existing_job):
+        if _is_job_stale(existing_job):
             existing_job.status = "failed"
             existing_job.error_message = (
-                f"処理が{TRIM_JOB_STALE_MINUTES}分以上完了しなかったためタイムアウトしました。"
+                f"処理が{JOB_STALE_MINUTES}分以上完了しなかったためタイムアウトしました。"
                 "バックグラウンド処理が中断された可能性があります。"
             )
             db.session.commit()
@@ -2265,10 +2300,10 @@ def trim_video(article_id):
 @app.route("/api/videos/trim-jobs/<int:job_id>")
 def trim_job_status(job_id):
     job = VideoTrimJob.query.get_or_404(job_id)
-    if _is_trim_job_stale(job):
+    if _is_job_stale(job):
         job.status = "failed"
         job.error_message = (
-            f"処理が{TRIM_JOB_STALE_MINUTES}分以上完了しなかったためタイムアウトしました。"
+            f"処理が{JOB_STALE_MINUTES}分以上完了しなかったためタイムアウトしました。"
             "バックグラウンド処理が中断された可能性があります。もう一度お試しください。"
         )
         db.session.commit()
@@ -2921,9 +2956,23 @@ def start_chapter_job_from_article():
     return jsonify({"ok": True, "has_chapters": True, "job_id": job.id})
 
 
+CHAPTER_JOB_STALE_MINUTES = 60  # チャプター分割は複数クリップを順次処理するため長めに設定
+
+
 @app.route("/api/videos/chapters/<int:job_id>/status")
 def chapter_job_status(job_id):
     job = ChapterJob.query.get_or_404(job_id)
+    if _is_job_stale(job, stale_minutes=CHAPTER_JOB_STALE_MINUTES):
+        job.status = "failed"
+        job.error_message = (
+            f"処理が{CHAPTER_JOB_STALE_MINUTES}分以上完了しなかったためタイムアウトしました。"
+            "バックグラウンド処理が中断された可能性があります。もう一度お試しください。"
+        )
+        for c in ChapterClip.query.filter_by(job_id=job_id, status="processing").all():
+            c.status = "failed"
+            c.error_message = "ジョブ全体がタイムアウトしました。"
+        db.session.commit()
+        logger.warning("チャプター分割タイムアウト(ポーリング時に検知): job_id=%d", job_id)
     clips = ChapterClip.query.filter_by(job_id=job_id).all()
     completed = sum(1 for c in clips if c.status in ("done", "failed"))
     failed = sum(1 for c in clips if c.status == "failed")

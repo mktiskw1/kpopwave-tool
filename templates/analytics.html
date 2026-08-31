@@ -147,6 +147,40 @@
   {% endif %}
 </div>
 
+<!-- 前倒し投稿履歴 -->
+<div class="card p-3 mb-4">
+  <h6 class="fw-bold mb-3">前倒し投稿履歴（投稿後60分いいね0検出時の自動前倒し、直近20件）</h6>
+  {% if early_advance_logs %}
+  <div class="table-responsive">
+    <table class="table table-hover mb-0" style="font-size:.85rem">
+      <thead>
+        <tr><th>日時</th><th>結果</th><th>連鎖</th><th>詳細</th></tr>
+      </thead>
+      <tbody>
+        {% for log in early_advance_logs %}
+        <tr>
+          <td class="text-nowrap">{{ log.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+          <td>
+            {% if log.action == 'advanced' %}
+              <span class="badge bg-success">前倒し実行</span>
+            {% elif log.action == 'limit_reached' %}
+              <span class="badge bg-warning text-dark">上限到達・見送り</span>
+            {% else %}
+              <span class="badge bg-secondary">キューなし</span>
+            {% endif %}
+          </td>
+          <td class="text-nowrap">{{ log.chain_position }}/2</td>
+          <td>{{ log.note }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="text-muted mb-0">前倒し投稿の履歴はまだありません。</p>
+  {% endif %}
+</div>
+
 {% endblock %}
 
 {% block scripts %}

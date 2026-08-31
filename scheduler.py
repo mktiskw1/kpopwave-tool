@@ -9,7 +9,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import or_, text
 
-from database import Article, Setting, ThreadsAccount, get_active_account, db
+from database import Article, EarlyAdvanceLog, PostStat, Setting, ThreadsAccount, get_active_account, db
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,15 @@ def next_post_slot(app, account_id: int = None) -> datetime | None:
 
 
 # ── ジョブ関数 ─────────────────────────────────────────────────────────────────
+#
+# _collect_job / _collect_youtube_job は意図的に setup_scheduler() に登録していない
+# (定期実行しない)。過去に自動収集(RSS/YouTube定期収集)で男性グループの動画まで
+# 混ざって収集される精度の問題が起きたため、手動収集に切り替えた
+# (app.pyがrss_collector.collect_articles / youtube_collector.collect_youtube_videosを
+# 直接呼び出しており、この2つのラッパー関数自体は現在どこからも呼ばれていない)。
+# その後実装した「音楽番組から出演回を探す」「fancamを探す」機能が、グループ名を
+# 指定した検索によりこの精度問題を解決する代替手段として機能している。
+# 定期実行を再開する場合の雛形として残してある。
 
 def _collect_job(app):
     from rss_collector import collect_articles
@@ -270,6 +279,140 @@ def _run_post_job_for_account(app, account_id):
         "[_post_job] account_id=%s 投稿結果: id=%d success=%s msg=%s",
         account_id, article_id, success, msg,
     )
+
+
+_EARLY_ADVANCE_OFFSETS = {15, 30, 60}
+_EARLY_ADVANCE_CHAIN_LIMIT = 2
+
+
+def _check_and_advance_on_zero_engagement(app, account_id: int = 1) -> None:
+    """投稿から60分経過していいねが0のままの投稿を検出し、次のキュー記事を前倒し投稿する。
+    連続で0いいねが続く限り最大2回まで連鎖し、いいねが付いた時点・上限到達時点でリセットする。
+    (アプリ再起動をまたいでも安全なよう、連鎖カウンターはSettingテーブルに永続化する)"""
+    with app.app_context():
+        if Setting.get("early_advance_enabled", "true").lower() != "true":
+            return
+
+        _, is_legacy = _resolve_account_context(app, account_id)
+
+        def _scope(query):
+            if is_legacy:
+                return query.filter(or_(Article.account_id == account_id, Article.account_id.is_(None)))
+            return query.filter(Article.account_id == account_id)
+
+        now = datetime.utcnow()
+        candidate_ids = [
+            row[0] for row in
+            _scope(Article.query)
+            .filter(
+                Article.status == "posted",
+                Article.posted_at.isnot(None),
+                Article.posted_at <= now - timedelta(minutes=60),
+                Article.posted_at >= now - timedelta(minutes=70),
+            )
+            .with_entities(Article.id)
+            .all()
+        ]
+        if not candidate_ids:
+            return
+
+        already_evaluated = {
+            row[0] for row in
+            db.session.query(EarlyAdvanceLog.source_article_id)
+            .filter(EarlyAdvanceLog.source_article_id.in_(candidate_ids))
+            .all()
+        }
+
+        zero_engagement_article_id = None
+        for article_id in candidate_ids:
+            if article_id in already_evaluated:
+                continue
+            offset_likes = {
+                row[0]: row[1] for row in
+                db.session.query(PostStat.minute_offset, PostStat.likes)
+                .filter(PostStat.article_id == article_id, PostStat.minute_offset.in_(_EARLY_ADVANCE_OFFSETS))
+                .all()
+            }
+            if set(offset_likes.keys()) != _EARLY_ADVANCE_OFFSETS:
+                continue  # まだ全オフセットの記録が揃っていない
+            if any(v > 0 for v in offset_likes.values()):
+                # いいねが付いた投稿があった → 連鎖をリセットして通常運用に戻す
+                Setting.set("early_advance_chain_count", "0")
+                continue
+            zero_engagement_article_id = article_id
+            break  # 1回のジョブ実行では1件のみ処理する(残りは次回以降のジョブに回す)
+
+    if zero_engagement_article_id is not None:
+        _advance_or_stop_chain(app, account_id, zero_engagement_article_id)
+
+
+def _advance_or_stop_chain(app, account_id: int, source_article_id: int) -> None:
+    with app.app_context():
+        chain_count = int(Setting.get("early_advance_chain_count", "0") or "0")
+        chain_position = chain_count + 1
+
+        if chain_count >= _EARLY_ADVANCE_CHAIN_LIMIT:
+            db.session.add(EarlyAdvanceLog(
+                source_article_id=source_article_id,
+                target_article_id=None,
+                chain_position=chain_position,
+                action="limit_reached",
+                note=f"前倒し投稿の連鎖が上限({_EARLY_ADVANCE_CHAIN_LIMIT}回)に達したため見送り、通常スケジュールに戻します",
+            ))
+            Setting.set("early_advance_chain_count", "0")
+            db.session.commit()
+            logger.warning(
+                "[early_advance] 連鎖上限到達のため前倒しを見送り: source_article_id=%s", source_article_id,
+            )
+            return
+
+        _, is_legacy = _resolve_account_context(app, account_id)
+
+        def _scope(query):
+            if is_legacy:
+                return query.filter(or_(Article.account_id == account_id, Article.account_id.is_(None)))
+            return query.filter(Article.account_id == account_id)
+
+        next_article = (
+            _scope(Article.query.filter_by(status="queued"))
+            .order_by(Article.scheduled_at.asc().nullsfirst(), Article.created_at.asc())
+            .first()
+        )
+
+        if not next_article:
+            db.session.add(EarlyAdvanceLog(
+                source_article_id=source_article_id,
+                target_article_id=None,
+                chain_position=chain_position,
+                action="no_queue",
+                note="投稿から60分経過していいね0でしたが、前倒しできるキュー記事がありませんでした",
+            ))
+            db.session.commit()
+            logger.warning(
+                "[early_advance] 前倒し対象のキューなし: source_article_id=%s", source_article_id,
+            )
+            return
+
+        target_article_id = next_article.id
+        next_article.scheduled_at = None
+        db.session.add(EarlyAdvanceLog(
+            source_article_id=source_article_id,
+            target_article_id=target_article_id,
+            chain_position=chain_position,
+            action="advanced",
+            note=(
+                f"投稿id={source_article_id}が60分経過していいね0だったため、"
+                f"次の投稿(id={target_article_id})を前倒し実行します({chain_position}/{_EARLY_ADVANCE_CHAIN_LIMIT})"
+            ),
+        ))
+        Setting.set("early_advance_chain_count", str(chain_position))
+        db.session.commit()
+        logger.info(
+            "[early_advance] 前倒し実行: target_article_id=%s chain=%d/%d source_article_id=%s",
+            target_article_id, chain_position, _EARLY_ADVANCE_CHAIN_LIMIT, source_article_id,
+        )
+
+    _post_job_for_account(app, account_id)
 
 
 def _rollover_overdue_job(app):
@@ -490,10 +633,12 @@ def _post_stats_job(app):
 
 
 def _early_engagement_job(app):
-    """KPOPアカウント（account_id=1）の投稿直後(60分以内)の初速インサイトを取得する。"""
+    """KPOPアカウント（account_id=1）の投稿直後(60分以内)の初速インサイトを取得し、
+    60分経過していいね0の投稿を検出した場合は次のキュー記事を前倒し投稿する。"""
     from analytics_tracker import track_early_engagement
     result = track_early_engagement(app, account_id=1)
     logger.info("初速インサイト定期取得: %s", result)
+    _check_and_advance_on_zero_engagement(app, account_id=1)
 
 
 def _daily_snapshot_job(app):

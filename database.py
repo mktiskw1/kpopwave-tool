@@ -242,6 +242,20 @@ class PostStat(db.Model):
     fetched_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
+class EarlyAdvanceLog(db.Model):
+    """初速0いいね検出による前倒し投稿の実行履歴(連鎖上限到達・キュー枯渇も記録する)。"""
+    __tablename__ = "early_advance_logs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # article削除時はレコード自体は残し、参照だけNULL化する(_cleanup_article_related_records参照)。
+    source_article_id = db.Column(db.Integer, nullable=True)
+    target_article_id = db.Column(db.Integer, nullable=True)
+    chain_position = db.Column(db.Integer, nullable=False)
+    action = db.Column(db.String(20), nullable=False)  # advanced / limit_reached / no_queue
+    note = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 class DailyStat(db.Model):
     __tablename__ = "daily_stats"
 
