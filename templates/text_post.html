@@ -41,8 +41,53 @@
                 class="btn btn-outline-info" onclick="submitTextPost('queue')">
           <i class="bi bi-collection-fill"></i> キューに追加
         </button>
+        <button type="button" name="action" value="stock" id="btn-stock"
+                class="btn btn-outline-secondary" onclick="submitTextPost('stock')">
+          <i class="bi bi-archive-fill"></i> ストックに保存
+        </button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- ストック一覧 -->
+<div class="card mt-4" style="max-width:640px">
+  <div class="card-header">
+    <i class="bi bi-archive-fill me-2"></i>ストック（現在のアカウントの下書き）
+  </div>
+  <div class="card-body" id="stock-list">
+    {% if stocks %}
+      {% for stock in stocks %}
+      <div class="stock-item border rounded p-2 mb-2" data-stock-id="{{ stock.id }}">
+        <div class="stock-view">
+          <div class="stock-body" style="white-space:pre-wrap;font-size:.9rem">{{ stock.body }}</div>
+          <div class="d-flex justify-content-between align-items-center mt-2">
+            <small class="text-muted">{{ stock.created_at.strftime('%Y-%m-%d %H:%M') }}</small>
+            <div class="d-flex gap-1">
+              <button type="button" class="btn btn-sm btn-outline-info" onclick="queueStock({{ stock.id }})">
+                <i class="bi bi-collection-fill"></i> キューに追加
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" onclick="editStock({{ stock.id }})">
+                <i class="bi bi-pencil"></i> 編集
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteStock({{ stock.id }})">
+                <i class="bi bi-trash"></i> 削除
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="stock-edit d-none">
+          <textarea class="form-control mb-2" rows="5">{{ stock.body }}</textarea>
+          <div class="d-flex justify-content-end gap-1">
+            <button type="button" class="btn btn-sm btn-secondary" onclick="cancelEditStock({{ stock.id }})">キャンセル</button>
+            <button type="button" class="btn btn-sm btn-accent" onclick="saveStock({{ stock.id }})">保存</button>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <p class="text-muted mb-0" id="stock-empty">ストックはまだありません。</p>
+    {% endif %}
   </div>
 </div>
 
@@ -60,6 +105,7 @@ function updateTextPostCount() {
   countEl.className = 'char-count ' + (over ? 'over' : 'ok');
   document.getElementById('btn-post-now').disabled = over || len === 0;
   document.getElementById('btn-queue').disabled = over || len === 0;
+  document.getElementById('btn-stock').disabled = over || len === 0;
 }
 
 function showTextPostAlert(message, success) {
@@ -82,8 +128,10 @@ async function submitTextPost(action) {
 
   const btnPostNow = document.getElementById('btn-post-now');
   const btnQueue = document.getElementById('btn-queue');
+  const btnStock = document.getElementById('btn-stock');
   btnPostNow.disabled = true;
   btnQueue.disabled = true;
+  btnStock.disabled = true;
 
   try {
     const res = await fetch('{{ url_for("text_post") }}', {
@@ -96,11 +144,84 @@ async function submitTextPost(action) {
     if (data.success) {
       form.reset();
       updateTextPostCount();
+      if (action === 'stock') {
+        setTimeout(() => location.reload(), 600);
+      }
     }
   } catch (err) {
     showTextPostAlert('通信エラーが発生しました', false);
   } finally {
     updateTextPostCount();
+  }
+}
+
+function stockItemEl(id) {
+  return document.querySelector(`.stock-item[data-stock-id="${id}"]`);
+}
+
+function editStock(id) {
+  const el = stockItemEl(id);
+  el.querySelector('.stock-view').classList.add('d-none');
+  el.querySelector('.stock-edit').classList.remove('d-none');
+}
+
+function cancelEditStock(id) {
+  const el = stockItemEl(id);
+  el.querySelector('.stock-edit').classList.add('d-none');
+  el.querySelector('.stock-view').classList.remove('d-none');
+}
+
+async function saveStock(id) {
+  const el = stockItemEl(id);
+  const body = el.querySelector('.stock-edit textarea').value.trim();
+  if (!body) {
+    alert('投稿文を入力してください');
+    return;
+  }
+  try {
+    const res = await fetch(`/api/text-stock/${id}`, {
+      method: 'PUT',
+      body: new URLSearchParams({ body }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+    const data = await res.json();
+    if (data.success) {
+      location.reload();
+    } else {
+      alert(data.message || '更新に失敗しました');
+    }
+  } catch (err) {
+    alert('通信エラーが発生しました');
+  }
+}
+
+async function deleteStock(id) {
+  if (!confirm('このストックを削除しますか？')) return;
+  try {
+    const res = await fetch(`/api/text-stock/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) {
+      location.reload();
+    } else {
+      alert(data.message || '削除に失敗しました');
+    }
+  } catch (err) {
+    alert('通信エラーが発生しました');
+  }
+}
+
+async function queueStock(id) {
+  if (!confirm('このストックをキューに追加しますか？')) return;
+  try {
+    const res = await fetch(`/api/text-stock/${id}/queue`, { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+      location.reload();
+    } else {
+      alert(data.message || 'キューへの追加に失敗しました');
+    }
+  } catch (err) {
+    alert('通信エラーが発生しました');
   }
 }
 

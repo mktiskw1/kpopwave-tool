@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from config import Config
 from database import (
     Article, BuzzPost, ChapterClip, ChapterJob, Comment, DailyStat, EarlyAdvanceLog, Group, Hook, Member,
-    PostStat, Setting, ThreadsAccount, VideoTrimJob, get_active_account, db,
+    PostStat, Setting, TextPostStock, ThreadsAccount, VideoTrimJob, get_active_account, db,
 )
 
 load_dotenv()
@@ -1431,8 +1431,15 @@ def text_post():
             return jsonify({"success": False, "message": f"投稿文は{TEXT_POST_MAX_CHARS}文字以内で入力してください"})
         if not account:
             return jsonify({"success": False, "message": "アカウントを選択してください"})
-        if action not in ("post_now", "queue"):
+        if action not in ("post_now", "queue", "stock"):
             return jsonify({"success": False, "message": "不正なリクエストです"})
+
+        if action == "stock":
+            stock = TextPostStock(account_id=account.id, body=body)
+            db.session.add(stock)
+            db.session.commit()
+            logger.info("テキスト投稿ストック保存: id=%d account_id=%d", stock.id, account.id)
+            return jsonify({"success": True, "message": "ストックに保存しました"})
 
         title = body[:30] + ("…" if len(body) > 30 else "")
         article = Article(
@@ -1465,12 +1472,67 @@ def text_post():
     if accounts and default_account_id not in {acc.id for acc in accounts}:
         default_account_id = accounts[0].id
 
+    stocks = (
+        TextPostStock.query
+        .filter_by(account_id=default_account_id)
+        .order_by(TextPostStock.created_at.desc())
+        .all()
+    )
+
     return render_template(
         "text_post.html",
         accounts=accounts,
         default_account_id=default_account_id,
         max_chars=TEXT_POST_MAX_CHARS,
+        stocks=stocks,
     )
+
+
+@app.route("/api/text-stock/<int:id>", methods=["PUT", "DELETE"])
+def text_stock_item(id):
+    stock = TextPostStock.query.get_or_404(id)
+
+    if request.method == "DELETE":
+        db.session.delete(stock)
+        db.session.commit()
+        return jsonify({"success": True, "message": "削除しました"})
+
+    body = (request.form.get("body") or "").strip()
+    if not body:
+        return jsonify({"success": False, "message": "投稿文を入力してください"})
+    if len(body) > TEXT_POST_MAX_CHARS:
+        return jsonify({"success": False, "message": f"投稿文は{TEXT_POST_MAX_CHARS}文字以内で入力してください"})
+
+    stock.body = body
+    db.session.commit()
+    return jsonify({"success": True, "message": "更新しました"})
+
+
+@app.route("/api/text-stock/<int:id>/queue", methods=["POST"])
+def text_stock_to_queue(id):
+    from scheduler import next_post_slot
+
+    stock = TextPostStock.query.get_or_404(id)
+    account = ThreadsAccount.query.get(stock.account_id)
+    if not account:
+        return jsonify({"success": False, "message": "紐づくアカウントが見つかりません"})
+
+    title = stock.body[:30] + ("…" if len(stock.body) > 30 else "")
+    article = Article(
+        feed_source="テキスト投稿",
+        title=title,
+        url=f"text-post:{uuid.uuid4().hex}",
+        summary=stock.body,
+        status="queued",
+        content_type="text",
+        account_id=account.id,
+        scheduled_at=next_post_slot(app, account_id=account.id),
+    )
+    db.session.add(article)
+    db.session.delete(stock)
+    db.session.commit()
+    logger.info("ストックからキューに追加: article_id=%d account_id=%d", article.id, account.id)
+    return jsonify({"success": True, "message": "キューに追加しました"})
 
 
 # ── Threads OAuth 認証 ────────────────────────────────────────────────────

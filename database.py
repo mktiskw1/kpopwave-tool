@@ -101,6 +101,18 @@ class ThreadsAccount(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
+class TextPostStock(db.Model):
+    """テキスト投稿の一時保管(下書き)。キューには一切影響せず、
+    「キューに追加」操作時にArticleへ変換され本レコードは削除される。"""
+    __tablename__ = "text_post_stocks"
+
+    id = db.Column(db.Integer, primary_key=True)
+    account_id = db.Column(db.Integer, db.ForeignKey("threads_accounts.id"), nullable=False, index=True)
+    body = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Hook(db.Model):
     __tablename__ = "hooks"
 
