@@ -93,7 +93,8 @@
         <i class="bi bi-search me-1"></i>検索
       </button>
     </div>
-    <div id="mb-history-chips" class="mt-2 d-flex flex-wrap gap-1"></div>
+    <div id="mb-channel-history-chips" class="mt-2 d-flex flex-wrap gap-1 align-items-center"></div>
+    <div id="mb-history-chips" class="mt-2 d-flex flex-wrap gap-1 align-items-center"></div>
     <div id="mb-search-result" class="mt-3"></div>
   </div>
 </div>
@@ -381,13 +382,13 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ── グループ名検索履歴(localStorage、音楽番組検索・fancam検索で共有) ─────────
-var GROUP_HISTORY_KEY = 'mb_group_history';
-var GROUP_HISTORY_MAX = 20;
+// ── 検索履歴チップ(localStorage) 汎用ヘルパー ──────────────────────────────────
+// 保存キー・最大件数・反映先入力欄をパラメータ化。グループ名履歴とチャンネル履歴で共用。
+var SEARCH_HISTORY_MAX = 20;
 
-function loadGroupHistory() {
+function loadSearchHistory(storageKey) {
   try {
-    var raw = localStorage.getItem(GROUP_HISTORY_KEY);
+    var raw = localStorage.getItem(storageKey);
     var list = raw ? JSON.parse(raw) : [];
     return Array.isArray(list) ? list : [];
   } catch (e) {
@@ -395,63 +396,97 @@ function loadGroupHistory() {
   }
 }
 
-function saveGroupHistory(list) {
+function saveSearchHistory(storageKey, list) {
   try {
-    localStorage.setItem(GROUP_HISTORY_KEY, JSON.stringify(list));
+    localStorage.setItem(storageKey, JSON.stringify(list));
   } catch (e) {
     // localStorage無効・容量超過時は履歴保存を諦める(検索機能自体は継続動作させる)
   }
 }
 
-function addGroupHistory(name) {
-  name = name.trim();
-  if (!name) return;
-  var list = loadGroupHistory().filter(function(n) { return n !== name; });
-  list.unshift(name);
-  if (list.length > GROUP_HISTORY_MAX) list = list.slice(0, GROUP_HISTORY_MAX);
-  saveGroupHistory(list);
-  renderAllGroupHistory();
+function addSearchHistory(storageKey, value) {
+  value = (value || '').trim();
+  if (!value) return;
+  var list = loadSearchHistory(storageKey).filter(function(v) { return v !== value; });
+  list.unshift(value);
+  if (list.length > SEARCH_HISTORY_MAX) list = list.slice(0, SEARCH_HISTORY_MAX);
+  saveSearchHistory(storageKey, list);
 }
 
-function removeGroupHistory(name) {
-  saveGroupHistory(loadGroupHistory().filter(function(n) { return n !== name; }));
-  renderAllGroupHistory();
+function removeSearchHistory(storageKey, value) {
+  saveSearchHistory(storageKey, loadSearchHistory(storageKey).filter(function(v) { return v !== value; }));
 }
 
-function renderGroupHistoryInto(containerId, inputId) {
+// storageKey の履歴を containerId にチップ描画。チップのクリックで inputId に反映、× で個別削除。
+function renderHistoryChipsInto(storageKey, containerId, inputId, labelText, onAfterChange) {
   var container = document.getElementById(containerId);
   if (!container) return;
-  var list = loadGroupHistory();
+  var list = loadSearchHistory(storageKey);
   container.innerHTML = '';
-  list.forEach(function(name) {
+  if (!list.length) return;
+
+  if (labelText) {
+    var lbl = document.createElement('span');
+    lbl.textContent = labelText;
+    lbl.style.cssText = 'font-size:.75rem;color:var(--text-muted);margin-right:.15em';
+    container.appendChild(lbl);
+  }
+
+  list.forEach(function(value) {
     var chip = document.createElement('span');
     chip.className = 'badge bg-secondary-subtle text-secondary-emphasis d-inline-flex align-items-center';
     chip.style.cssText = 'font-weight:500;font-size:.8rem;padding:.35em .5em;gap:.3em';
 
     var label = document.createElement('span');
-    label.textContent = name;
+    label.textContent = value;
     label.style.cursor = 'pointer';
     label.title = 'クリックで入力欄に反映';
-    label.onclick = function() { document.getElementById(inputId).value = name; };
+    label.onclick = function() { document.getElementById(inputId).value = value; };
     chip.appendChild(label);
 
     var del = document.createElement('span');
     del.textContent = '×';
     del.style.cssText = 'cursor:pointer;opacity:.6;padding:0 .15em';
     del.title = '履歴から削除';
-    del.onclick = function(e) { e.stopPropagation(); removeGroupHistory(name); };
+    del.onclick = function(e) {
+      e.stopPropagation();
+      removeSearchHistory(storageKey, value);
+      if (onAfterChange) onAfterChange();
+    };
     chip.appendChild(del);
 
     container.appendChild(chip);
   });
 }
 
+// ── グループ名検索履歴(音楽番組検索・fancam検索で共有) ─────────
+var GROUP_HISTORY_KEY = 'mb_group_history';
+
+function addGroupHistory(name) {
+  addSearchHistory(GROUP_HISTORY_KEY, name);
+  renderAllGroupHistory();
+}
+
 function renderAllGroupHistory() {
-  renderGroupHistoryInto('mb-history-chips', 'mb-group-input');
-  renderGroupHistoryInto('fc-history-chips', 'fc-group-input');
+  renderHistoryChipsInto(GROUP_HISTORY_KEY, 'mb-history-chips', 'mb-group-input', null, renderAllGroupHistory);
+  renderHistoryChipsInto(GROUP_HISTORY_KEY, 'fc-history-chips', 'fc-group-input', null, renderAllGroupHistory);
+}
+
+// ── 自由入力チャンネル検索履歴(音楽番組検索のチャンネル欄) ─────────
+var CHANNEL_HISTORY_KEY = 'mb_channel_history';
+
+function addChannelHistory(value) {
+  addSearchHistory(CHANNEL_HISTORY_KEY, value);
+  renderAllChannelHistory();
+}
+
+function renderAllChannelHistory() {
+  renderHistoryChipsInto(CHANNEL_HISTORY_KEY, 'mb-channel-history-chips', 'mb-channel-input',
+                         'チャンネル履歴', renderAllChannelHistory);
 }
 
 renderAllGroupHistory();
+renderAllChannelHistory();
 
 function formatViewCount(n) {
   n = n || 0;
@@ -671,6 +706,7 @@ function searchMusicBank() {
     return;
   }
   addGroupHistory(targetGroup);
+  if (channelInput) addChannelHistory(channelInput);
   MB_STATE.videos = [];
   MB_STATE.nextPageToken = null;
   MB_STATE.order = null;
