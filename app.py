@@ -86,7 +86,6 @@ def create_app() -> Flask:
         db.create_all()
         _init_default_settings()
         _migrate_db()
-        _recover_orphaned_jobs()
 
     # 動画保存用ディレクトリを起動時に作成
     videos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
@@ -245,6 +244,18 @@ def _migrate_db():
                     len(default_hooks[1]), len(default_hooks[2]))
 
 
+def _fail_chapter_job(job, reason: str) -> None:
+    """ChapterJobとその非終端(pending/processing)クリップをfailedに遷移させる。
+    db.session.commitは呼び出し側で行う。"""
+    job.status = "failed"
+    job.error_message = reason
+    for clip in ChapterClip.query.filter_by(job_id=job.id).filter(
+        ChapterClip.status.in_(["pending", "processing"])
+    ).all():
+        clip.status = "failed"
+        clip.error_message = reason
+
+
 def _recover_orphaned_jobs():
     """アプリ起動時に、processingのまま残っているバックグラウンドジョブをfailedへ復旧する。
 
@@ -266,16 +277,7 @@ def _recover_orphaned_jobs():
 
     stale_chapter = ChapterJob.query.filter_by(status="processing").all()
     for job in stale_chapter:
-        job.status = "failed"
-        job.error_message = reason
-    if stale_chapter:
-        job_ids = [j.id for j in stale_chapter]
-        for clip in ChapterClip.query.filter(
-            ChapterClip.job_id.in_(job_ids),
-            ChapterClip.status.in_(["pending", "processing"]),
-        ).all():
-            clip.status = "failed"
-            clip.error_message = reason
+        _fail_chapter_job(job, reason)
 
     if stale_trim or stale_chapter:
         db.session.commit()
@@ -2328,6 +2330,10 @@ def _run_trim_job(app, job_id):
 
 JOB_STALE_MINUTES = 15
 CHAPTER_JOB_STALE_MINUTES = 60  # チャプター分割は複数クリップを順次処理するため長めに設定
+_CHAPTER_TIMEOUT_MESSAGE = (
+    f"処理が{CHAPTER_JOB_STALE_MINUTES}分以上完了しなかったためタイムアウトしました。"
+    "バックグラウンド処理が中断された可能性があります。もう一度お試しください。"
+)
 
 
 def _is_job_stale(job, stale_minutes: int = JOB_STALE_MINUTES) -> bool:
@@ -2988,16 +2994,7 @@ def _sweep_stale_chapter_jobs() -> int:
         if _is_job_stale(j, stale_minutes=CHAPTER_JOB_STALE_MINUTES)
     ]
     for job in stale_jobs:
-        job.status = "failed"
-        job.error_message = (
-            f"処理が{CHAPTER_JOB_STALE_MINUTES}分以上完了しなかったためタイムアウトしました。"
-            "バックグラウンド処理が中断された可能性があります。"
-        )
-        for c in ChapterClip.query.filter_by(job_id=job.id).filter(
-            ChapterClip.status.in_(["pending", "processing"])
-        ).all():
-            c.status = "failed"
-            c.error_message = "ジョブ全体がタイムアウトしました。"
+        _fail_chapter_job(job, _CHAPTER_TIMEOUT_MESSAGE)
     if stale_jobs:
         db.session.commit()
         logger.warning("チャプター分割タイムアウト(新規リクエスト時に検知): job_ids=%s",
@@ -3149,14 +3146,7 @@ def start_chapter_job_from_article():
 def chapter_job_status(job_id):
     job = ChapterJob.query.get_or_404(job_id)
     if _is_job_stale(job, stale_minutes=CHAPTER_JOB_STALE_MINUTES):
-        job.status = "failed"
-        job.error_message = (
-            f"処理が{CHAPTER_JOB_STALE_MINUTES}分以上完了しなかったためタイムアウトしました。"
-            "バックグラウンド処理が中断された可能性があります。もう一度お試しください。"
-        )
-        for c in ChapterClip.query.filter_by(job_id=job_id, status="processing").all():
-            c.status = "failed"
-            c.error_message = "ジョブ全体がタイムアウトしました。"
+        _fail_chapter_job(job, _CHAPTER_TIMEOUT_MESSAGE)
         db.session.commit()
         logger.warning("チャプター分割タイムアウト(ポーリング時に検知): job_id=%d", job_id)
     clips = ChapterClip.query.filter_by(job_id=job_id).all()
@@ -3626,5 +3616,10 @@ if __name__ == "__main__":
     logger.info(
         "====== ContentWave 起動 (二重投稿防止v2: post_to_threads内アトミックロック) ======"
     )
+    # 起動時の孤児ジョブ復旧は本番起動時のみ行う(create_app内だと、ヘルパースクリプトが
+    # `from app import app` した際に、稼働中の本番プロセスが実行中の正当なジョブまで
+    # failed化してしまうため)。
+    with app.app_context():
+        _recover_orphaned_jobs()
     setup_scheduler(app)
     app.run(debug=False, use_reloader=False, host="0.0.0.0", port=5000, threaded=True)
