@@ -3194,30 +3194,46 @@ def chapter_job_confirm(job_id):
 
     added = 0
     paths_to_delete = []
-    for clip in clips:
-        if clip.id in selected_ids and clip.status == "done" and clip.video_file_path:
-            start_label = int(clip.start_time)
-            end_label = int(clip.end_time) if clip.end_time is not None else ""
-            article = Article(
-                feed_source=f"YouTube動画: {job.video_title or job.video_id}",
-                title=clip.title[:500],
-                url=f"{job.source_url}#t={start_label}-{end_label}",
-                thumbnail_url=job.thumbnail_url,
-                status="pending",
-                content_type="video",
-                video_file_path=clip.video_file_path,
-                group_id=clip.guessed_group_id,
-                account_id=job.account_id,
-            )
-            db.session.add(article)
-            added += 1
-        elif clip.video_file_path:
-            paths_to_delete.append(os.path.join(static_dir, clip.video_file_path))
+    try:
+        for clip in clips:
+            if clip.id in selected_ids and clip.status == "done" and clip.video_file_path:
+                start_label = int(clip.start_time)
+                end_label = int(clip.end_time) if clip.end_time is not None else ""
+                article = Article(
+                    feed_source=f"YouTube動画: {job.video_title or job.video_id}",
+                    title=clip.title[:500],
+                    # 末尾にランダムな8桁を付けて常に一意にする(同じ動画・同じ範囲を
+                    # 再分割・再確認しても Article.url の UNIQUE 制約に衝突しない。
+                    # clip.id は削除後に再利用されるため一意性の保証にならない)。
+                    # '#t=' マーカーは維持するので start_chapter_job_from_article 側の
+                    # 「部分クリップは再分割不可」判定は従来通り効く。
+                    url=f"{job.source_url}#t={start_label}-{end_label}-{uuid.uuid4().hex[:8]}",
+                    thumbnail_url=job.thumbnail_url,
+                    status="pending",
+                    content_type="video",
+                    video_file_path=clip.video_file_path,
+                    group_id=clip.guessed_group_id,
+                    account_id=job.account_id,
+                )
+                db.session.add(article)
+                added += 1
+            elif clip.video_file_path:
+                paths_to_delete.append(os.path.join(static_dir, clip.video_file_path))
 
-    ChapterClip.query.filter_by(job_id=job_id).delete(synchronize_session=False)
-    db.session.delete(job)
-    db.session.commit()
+        db.session.flush()  # INSERT をここで確定させ、衝突は下の except で捕捉する
+        ChapterClip.query.filter_by(job_id=job_id).delete(synchronize_session=False)
+        db.session.delete(job)
+        db.session.commit()
+    except IntegrityError:
+        # 万一 URL が衝突した場合でも 500 にせず、ジョブ・クリップ・中間ファイルは
+        # 一切消さずに残して再試行できるようにする。
+        db.session.rollback()
+        logger.warning("チャプター確認でURL衝突: job_id=%d", job_id)
+        flash("このクリップは既に承認待ちに追加済みのようです。追加済みのものを確認してください。", "warning")
+        return redirect(url_for("chapter_job_view", job_id=job_id))
 
+    # コミット成功後にのみ、選択されなかったクリップの中間ファイルを削除する
+    # (コミット前に消すと、コミット失敗時にファイルだけ失われる)
     for full_path in paths_to_delete:
         if os.path.exists(full_path):
             try:

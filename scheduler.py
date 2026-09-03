@@ -9,7 +9,10 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import or_, text
 
-from database import Article, EarlyAdvanceLog, PostStat, Setting, ThreadsAccount, get_active_account, db
+from database import (
+    Article, ChapterClip, ChapterJob, EarlyAdvanceLog, PostStat, Setting,
+    ThreadsAccount, get_active_account, db,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -625,6 +628,69 @@ def _video_cleanup_job(app):
         logger.info("動画クリーンアップ: %d件対象 %dファイル削除 %dレコード削除", len(targets), deleted_files, len(targets))
 
 
+_ORPHAN_VIDEO_MIN_AGE_DAYS = 3
+
+
+def _orphan_video_cleanup_job(app):
+    """static/videos/ 内で、DB上のどのファイルパス列からも参照されておらず、かつ
+    最終更新から一定日数(_ORPHAN_VIDEO_MIN_AGE_DAYS)経過したファイルを削除する。
+
+    _video_cleanup_job は「postedのArticleに紐づくファイル」しか対象にしないため、
+    rejected/pending削除・失敗したチャプター分割の中間ファイル・トリムの _original.mp4・
+    確認されずに残ったチャプター元動画などが回収されず蓄積し続ける。それを回収する。
+    誤削除防止のため「最終更新から3日以上経過」を必須ガードにする(ダウンロード中・
+    ffmpeg処理中のファイルを巻き込まないため)。
+    """
+    import os
+
+    videos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
+    if not os.path.isdir(videos_dir):
+        return
+
+    with app.app_context():
+        referenced = set()
+        for path in (
+            [r[0] for r in db.session.query(Article.video_file_path)
+             .filter(Article.video_file_path.isnot(None)).all()]
+            + [r[0] for r in db.session.query(ChapterJob.source_local_path)
+               .filter(ChapterJob.source_local_path.isnot(None)).all()]
+            + [r[0] for r in db.session.query(ChapterClip.video_file_path)
+               .filter(ChapterClip.video_file_path.isnot(None)).all()]
+        ):
+            # DBは "videos/xxx.mp4" 形式で保持しているためベース名で正規化して突き合わせる
+            referenced.add(os.path.basename(path))
+
+    cutoff = datetime.utcnow().timestamp() - _ORPHAN_VIDEO_MIN_AGE_DAYS * 86400
+    deleted_count = 0
+    deleted_bytes = 0
+    for fname in os.listdir(videos_dir):
+        full_path = os.path.join(videos_dir, fname)
+        if not os.path.isfile(full_path):
+            continue
+        # 動画ファイルのみを対象にする(.gitkeep 等の管理ファイルは触らない。
+        # 既存の _video_cleanup_job / _delete_video_files も .mp4 のみを扱う)
+        if not fname.lower().endswith(".mp4"):
+            continue
+        if fname in referenced:
+            continue
+        try:
+            stat = os.stat(full_path)
+            if stat.st_mtime >= cutoff:
+                continue  # 3日以内に更新されている → 処理中の可能性があるので触らない
+            size = stat.st_size
+            os.remove(full_path)
+            deleted_count += 1
+            deleted_bytes += size
+        except OSError as exc:
+            logger.warning("孤立動画ファイル削除失敗: %s (%s)", fname, exc)
+
+    remaining = sum(1 for f in os.listdir(videos_dir) if f.lower().endswith(".mp4"))
+    logger.info(
+        "孤立動画ファイル回収: %d件削除 (%.1f MB) / 参照中 %d件 / 残存mp4 %d件",
+        deleted_count, deleted_bytes / 1024 / 1024, len(referenced), remaining,
+    )
+
+
 def _post_stats_job(app):
     """KPOPアカウント（account_id=1）の投稿別7日間パフォーマンスを日次取得する。"""
     from analytics_tracker import track_post_stats
@@ -703,6 +769,14 @@ def setup_scheduler(app):
     )
 
     scheduler.add_job(
+        _orphan_video_cleanup_job,
+        CronTrigger(hour=4, minute=30, timezone="Asia/Tokyo"),
+        args=[app],
+        id="orphan_video_cleanup",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
         _post_stats_job,
         CronTrigger(hour=2, minute=30, timezone="Asia/Tokyo"),
         args=[app],
@@ -723,6 +797,7 @@ def setup_scheduler(app):
     scheduler.start()
     logger.info(
         "Scheduler started (post backup 5min, comments/rollover 30min, early engagement 5min, "
-        "engagement 2:00 JST, video cleanup 3:00 JST, post stats 2:30 JST, daily snapshot 3:30 JST)"
+        "engagement 2:00 JST, video cleanup 3:00 JST, orphan video cleanup 4:30 JST, "
+        "post stats 2:30 JST, daily snapshot 3:30 JST)"
     )
     return scheduler
