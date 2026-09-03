@@ -517,6 +517,73 @@ def _parse_duration_iso8601(s: str) -> int:
     return h * 3600 + mi * 60 + sec
 
 
+_CHANNEL_ID_RE = re.compile(r"^UC[\w-]{22}$")
+
+
+def _normalize_channel_input(raw: str) -> tuple[str, str]:
+    """ユーザーが自由入力したチャンネル指定(ハンドル / @ハンドル / チャンネルURL)を
+    ("id", channelId) または ("handle", handle) に正規化する。
+    - youtube.com/channel/UC... → ("id", "UC...")
+    - @handle / youtube.com/@handle / youtube.com/c/x / youtube.com/user/x / 素の文字列
+      → ("handle", "handle")  (先頭の @ は除去)
+    判定できない場合は ("handle", "") を返す。"""
+    s = (raw or "").strip()
+    if not s:
+        return ("handle", "")
+
+    # URL形式なら末尾のパス要素を取り出す
+    if "youtube.com/" in s or "youtu.be/" in s:
+        s = s.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+        m = re.search(r"youtube\.com/channel/([\w-]+)", s)
+        if m:
+            cid = m.group(1)
+            return ("id", cid) if _CHANNEL_ID_RE.match(cid) else ("handle", "")
+        m = re.search(r"youtube\.com/(?:@|c/|user/)([^/]+)", s)
+        if m:
+            return ("handle", m.group(1).lstrip("@"))
+        # それ以外のYouTube URLは末尾要素をハンドル候補として使う
+        s = s.rsplit("/", 1)[-1]
+
+    if _CHANNEL_ID_RE.match(s):
+        return ("id", s)
+    return ("handle", s.lstrip("@"))
+
+
+def _verify_channel_id(channel_id: str, api_key: str, app) -> bool:
+    """channels.list?id= でチャンネルIDが実在するか確認する。結果はSettingにキャッシュ。"""
+    cache_key = f"youtube_channel_verified_{channel_id}"
+    with app.app_context():
+        if Setting.get(cache_key, ""):
+            return True
+    try:
+        resp = requests.get(
+            YOUTUBE_CHANNELS_URL,
+            params={"part": "id", "id": channel_id, "key": api_key},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        exists = bool(resp.json().get("items", []))
+    except Exception as exc:
+        logger.error("チャンネルID確認エラー(%s): %s", channel_id, exc)
+        return False
+    if exists:
+        with app.app_context():
+            Setting.set(cache_key, "1")
+    return exists
+
+
+def _resolve_free_channel_id(raw: str, api_key: str, app) -> str:
+    """自由入力されたチャンネル指定からchannelIdを解決する。
+    チャンネルID形式なら実在確認したうえでそのまま、ハンドルなら既存の_resolve_channel_id
+    (channels.list?forHandle + Settingキャッシュ)で解決する。失敗時は空文字。"""
+    kind, value = _normalize_channel_input(raw)
+    if not value:
+        return ""
+    if kind == "id":
+        return value if _verify_channel_id(value, api_key, app) else ""
+    return _resolve_channel_id(value, api_key, app)
+
+
 def _resolve_channel_id(handle: str, api_key: str, app) -> str:
     """YouTubeチャンネルのhandleからchannelIdを解決する。チャンネルIDは変わらないため
     Settingにキャッシュし、以後はAPI呼び出しをスキップする。"""
@@ -646,7 +713,7 @@ def _enrich_and_build_videos(items: list, api_key: str, existing_urls: set, max_
 
 def search_program_videos(app, program_key: str, target_group: str, max_results: int = 30,
                            fetch_count: int = 30, page_token: str | None = None,
-                           order: str = "date") -> dict:
+                           order: str = "date", channel_input: str | None = None) -> dict:
     """指定番組(program_key)の公式チャンネル内で「(グループ名) (番組名)」を検索し、
     該当グループのパフォーマンス動画候補を返す。YouTube検索APIの q パラメータは緩い関連性
     マッチングのため、クエリに一致しない(別グループの)動画も混在する。1ページ(fetch_count件)を
@@ -661,11 +728,10 @@ def search_program_videos(app, program_key: str, target_group: str, max_results:
     そのまま渡すこと。フォールバックは行わず、指定した order・page_token のその1ページのみを
     取得する(nextPageToken は同じ order の検索条件に紐づくため、pageToken取得中に order を
     変えると正しく継続できない)。DBには保存しない。
+    channel_input には @ハンドル / チャンネルURL / チャンネルID を渡せる。指定された場合は
+    プリセット(program_key)より優先し、そのチャンネル内を "(グループ名)" だけで検索する。
     戻り値: {"ok", "error", "videos": [...], "next_page_token", "order"}"""
-    channel = PROGRAM_CHANNELS.get(program_key)
-    if not channel:
-        return {"ok": False, "error": f"未対応の番組です({program_key})", "videos": [],
-                "next_page_token": None, "order": None}
+    channel_input = (channel_input or "").strip()
 
     with app.app_context():
         api_key = Setting.get("youtube_api_key", "") or os.getenv("YOUTUBE_API_KEY", "")
@@ -673,12 +739,24 @@ def search_program_videos(app, program_key: str, target_group: str, max_results:
         return {"ok": False, "error": "YouTube APIキーが設定されていません", "videos": [],
                 "next_page_token": None, "order": None}
 
-    channel_id = _resolve_channel_id(channel["handle"], api_key, app)
-    if not channel_id:
-        return {"ok": False, "error": f"チャンネルが見つかりません(@{channel['handle']})", "videos": [],
-                "next_page_token": None, "order": None}
-
-    query = f"{target_group} {channel['name']}"
+    if channel_input:
+        channel_id = _resolve_free_channel_id(channel_input, api_key, app)
+        if not channel_id:
+            return {"ok": False,
+                    "error": f"チャンネルが見つかりません: {channel_input}"
+                             "（@ハンドル または チャンネルURL を確認してください）",
+                    "videos": [], "next_page_token": None, "order": None}
+        query = target_group
+    else:
+        channel = PROGRAM_CHANNELS.get(program_key)
+        if not channel:
+            return {"ok": False, "error": f"未対応の番組です({program_key})", "videos": [],
+                    "next_page_token": None, "order": None}
+        channel_id = _resolve_channel_id(channel["handle"], api_key, app)
+        if not channel_id:
+            return {"ok": False, "error": f"チャンネルが見つかりません(@{channel['handle']})", "videos": [],
+                    "next_page_token": None, "order": None}
+        query = f"{target_group} {channel['name']}"
 
     def _filtered(raw_items):
         out = []

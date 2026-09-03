@@ -2677,10 +2677,13 @@ def search_music_bank_videos():
     target_group = (data.get("target_group") or DEFAULT_TARGET_GROUP).strip()
     page_token = (data.get("page_token") or "").strip() or None
     order = (data.get("order") or "date").strip()
+    # 自由入力のチャンネル(@ハンドル / URL / チャンネルID)。指定時はプリセットより優先する。
+    channel_input = (data.get("channel") or "").strip()
     if not target_group:
         return jsonify({"ok": False, "error": "グループ名を入力してください"}), 400
 
-    result = search_program_videos(app, program_key, target_group, page_token=page_token, order=order)
+    result = search_program_videos(app, program_key, target_group, page_token=page_token,
+                                   order=order, channel_input=channel_input)
     if not result["ok"]:
         return jsonify({"ok": False, "error": result["error"]}), 400
     return jsonify({

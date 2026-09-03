@@ -75,6 +75,9 @@
         <option value="{{ p.key }}" {% if p.key == DEFAULT_PROGRAM_KEY %}selected{% endif %}>{{ p.name }}</option>
         {% endfor %}
       </select>
+      <input type="text" id="mb-channel-input" class="form-control"
+             style="width:210px;font-size:.88rem" placeholder="または @ハンドル / チャンネルURL"
+             title="入力するとプリセット番組より優先してこのチャンネル内を検索します">
       <input type="text" id="mb-group-input" class="form-control" list="mb-group-list"
              style="width:220px;font-size:.88rem" placeholder="例: aespa">
       <datalist id="mb-group-list">
@@ -660,6 +663,7 @@ function searchMusicBank() {
   var btn = document.getElementById('mb-search-btn');
   var result = document.getElementById('mb-search-result');
   var program = document.getElementById('mb-program-select').value;
+  var channelInput = document.getElementById('mb-channel-input').value.trim();
   var targetGroup = document.getElementById('mb-group-input').value.trim();
   var selectedOrder = document.getElementById('mb-order-select').value;
   if (!targetGroup) {
@@ -671,7 +675,7 @@ function searchMusicBank() {
   MB_STATE.nextPageToken = null;
   MB_STATE.order = null;
   MB_STATE.buildLoadMoreBody = function() {
-    return { program: program, target_group: targetGroup, page_token: MB_STATE.nextPageToken, order: MB_STATE.order };
+    return { program: program, channel: channelInput, target_group: targetGroup, page_token: MB_STATE.nextPageToken, order: MB_STATE.order };
   };
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>検索中...';
@@ -680,7 +684,7 @@ function searchMusicBank() {
   fetch('/api/videos/music-bank/search', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ program: program, target_group: targetGroup, order: selectedOrder })
+    body: JSON.stringify({ program: program, channel: channelInput, target_group: targetGroup, order: selectedOrder })
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {
