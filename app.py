@@ -86,6 +86,7 @@ def create_app() -> Flask:
         db.create_all()
         _init_default_settings()
         _migrate_db()
+        _recover_orphaned_jobs()
 
     # 動画保存用ディレクトリを起動時に作成
     videos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
@@ -242,6 +243,46 @@ def _migrate_db():
         db.session.commit()
         logger.info("DB migration: hooks にデフォルトフックを投入 (account_id=1: %d件, account_id=2: %d件)",
                     len(default_hooks[1]), len(default_hooks[2]))
+
+
+def _recover_orphaned_jobs():
+    """アプリ起動時に、processingのまま残っているバックグラウンドジョブをfailedへ復旧する。
+
+    このアプリはrun.py(ファイル監視watcher)が app.py を単一サブプロセスとして起動し、
+    コード編集のたび taskkill /F /T でプロセスツリーごと強制終了して再起動する。
+    バックグラウンドスレッド(_run_trim_job / _run_chapter_job)はその完了を待たずに
+    道連れで殺されるため、DB上のstatusが 'processing' のまま永久に固まる。
+
+    起動直後の時点では、これらのジョブを実行していたスレッドは(前プロセスと一緒に)
+    確実に消滅しているため、残っている 'processing' は全て孤児と断定してよい。
+    ffmpeg側のtimeout(600秒)はプロセス強制終了時には実行されないため、ここで検知する。
+    """
+    reason = "アプリ再起動によりバックグラウンド処理が中断されたため自動的に失敗扱いにしました。"
+
+    stale_trim = VideoTrimJob.query.filter_by(status="processing").all()
+    for job in stale_trim:
+        job.status = "failed"
+        job.error_message = reason
+
+    stale_chapter = ChapterJob.query.filter_by(status="processing").all()
+    for job in stale_chapter:
+        job.status = "failed"
+        job.error_message = reason
+    if stale_chapter:
+        job_ids = [j.id for j in stale_chapter]
+        for clip in ChapterClip.query.filter(
+            ChapterClip.job_id.in_(job_ids),
+            ChapterClip.status.in_(["pending", "processing"]),
+        ).all():
+            clip.status = "failed"
+            clip.error_message = reason
+
+    if stale_trim or stale_chapter:
+        db.session.commit()
+        logger.warning(
+            "起動時ジョブ復旧: VideoTrimJob %d件 / ChapterJob %d件 を failed に遷移",
+            len(stale_trim), len(stale_chapter),
+        )
 
 
 def _init_default_settings():
@@ -2286,6 +2327,7 @@ def _run_trim_job(app, job_id):
 
 
 JOB_STALE_MINUTES = 15
+CHAPTER_JOB_STALE_MINUTES = 60  # チャプター分割は複数クリップを順次処理するため長めに設定
 
 
 def _is_job_stale(job, stale_minutes: int = JOB_STALE_MINUTES) -> bool:
@@ -2849,6 +2891,11 @@ def _run_chapter_job(app, job_id):
                 logger.warning("チャプタージョブ失敗(フルダウンロード): job_id=%d error=%s", job_id, error_msg)
                 return
 
+        # ダウンロード完了時点でハートビートを打つ(大きな動画のDLで時間を食っても
+        # クリップ処理開始前にstale判定されないようにする)
+        job.updated_at = datetime.utcnow()
+        db.session.commit()
+
         any_success = False
         for clip in clips:
             clip.status = "processing"
@@ -2872,6 +2919,12 @@ def _run_chapter_job(app, job_id):
                 logger.warning("チャプタークリップ生成失敗: job_id=%d chapter_index=%d error=%s",
                                 job_id, clip.chapter_index, clip.error_message)
 
+            # 進捗ハートビート: クリップを1つ処理し終えるたびに job.updated_at を更新する。
+            # これがないと _is_job_stale が「作成からの総経過時間」を見てしまい、
+            # 正当に時間のかかる大きな動画(多数チャプター)が処理中に誤ってタイムアウト
+            # 判定される。updated_at が動いていれば「最後に進捗した時刻からの経過」で
+            # 判定できる。
+            job.updated_at = datetime.utcnow()
             db.session.commit()
 
         # ダウンロードした一時ファイルのみ削除する(既存ファイル指定時は元のArticleのファイルなので残す)
@@ -2923,6 +2976,75 @@ def _create_chapter_job(yt_url: str, vid_id: str, chapters: list, video_title: s
     return job
 
 
+def _sweep_stale_chapter_jobs() -> int:
+    """processingのまま長時間放置されたChapterJobをfailedへ遷移させる。
+    起動時の_recover_orphaned_jobsに漏れた(=アプリを再起動せず長時間動かし続けている間に
+    バックグラウンド処理だけが停止した)ケースの保険。start系エンドポイントから呼ぶ。"""
+    stale_jobs = [
+        j for j in ChapterJob.query.filter_by(status="processing").all()
+        if _is_job_stale(j, stale_minutes=CHAPTER_JOB_STALE_MINUTES)
+    ]
+    for job in stale_jobs:
+        job.status = "failed"
+        job.error_message = (
+            f"処理が{CHAPTER_JOB_STALE_MINUTES}分以上完了しなかったためタイムアウトしました。"
+            "バックグラウンド処理が中断された可能性があります。"
+        )
+        for c in ChapterClip.query.filter_by(job_id=job.id).filter(
+            ChapterClip.status.in_(["pending", "processing"])
+        ).all():
+            c.status = "failed"
+            c.error_message = "ジョブ全体がタイムアウトしました。"
+    if stale_jobs:
+        db.session.commit()
+        logger.warning("チャプター分割タイムアウト(新規リクエスト時に検知): job_ids=%s",
+                       [j.id for j in stale_jobs])
+    return len(stale_jobs)
+
+
+def _is_supported_youtube_url(yt_url: str) -> bool:
+    return ("youtube.com/watch" in yt_url or "youtu.be/" in yt_url
+            or "youtube.com/shorts/" in yt_url)
+
+
+@app.route("/api/videos/chapters/detect", methods=["POST"])
+def detect_chapters():
+    """URLの動画にチャプターがあるかだけを調べて返す。ジョブは作成しない。
+
+    チャプターが見つかった場合、フロント側で「チャプターごとに分割」/「動画全体を
+    そのままダウンロード」をユーザーに選ばせる。分割が選ばれたときだけ
+    /api/videos/chapters/start が呼ばれる。"""
+    data = request.get_json(force=True) or {}
+    yt_url = (data.get("url") or "").strip()
+
+    if not yt_url:
+        return jsonify({"ok": False, "error": "URLを入力してください"}), 400
+    if not _is_supported_youtube_url(yt_url):
+        return jsonify({"ok": False, "error": "YouTube動画のURLを入力してください"}), 400
+
+    try:
+        import yt_dlp
+    except ImportError:
+        return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
+
+    info_opts = {"quiet": True, "no_warnings": True}
+    try:
+        with yt_dlp.YoutubeDL(info_opts) as ydl:
+            full = ydl.extract_info(yt_url, download=False)
+        if not full:
+            return jsonify({"ok": False, "error": "動画情報を取得できませんでした"}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_classify_ytdlp_error(exc)}"}), 500
+
+    chapters = full.get("chapters") or []
+    return jsonify({
+        "ok": True,
+        "has_chapters": bool(chapters),
+        "chapter_count": len(chapters),
+        "video_title": (full.get("title") or "")[:500],
+    })
+
+
 @app.route("/api/videos/chapters/start", methods=["POST"])
 def start_chapter_job():
     data = request.get_json(force=True) or {}
@@ -2930,7 +3052,7 @@ def start_chapter_job():
 
     if not yt_url:
         return jsonify({"ok": False, "error": "URLを入力してください"}), 400
-    if "youtube.com/watch" not in yt_url and "youtu.be/" not in yt_url and "youtube.com/shorts/" not in yt_url:
+    if not _is_supported_youtube_url(yt_url):
         return jsonify({"ok": False, "error": "YouTube動画のURLを入力してください"}), 400
 
     try:
@@ -2956,6 +3078,7 @@ def start_chapter_job():
     if not chapters:
         return jsonify({"ok": True, "has_chapters": False})
 
+    _sweep_stale_chapter_jobs()
     title = (full.get("title") or "YouTube動画")[:500]
     job = _create_chapter_job(yt_url, vid_id, chapters, title, full.get("thumbnail") or None,
                                _explicit_account_id(data))
@@ -3010,15 +3133,13 @@ def start_chapter_job_from_article():
     if not chapters:
         return jsonify({"ok": True, "has_chapters": False})
 
+    _sweep_stale_chapter_jobs()
     title = article.title or (full.get("title") or "YouTube動画")[:500]
     job = _create_chapter_job(yt_url, vid_id, chapters, title,
                                article.thumbnail_url or full.get("thumbnail") or None,
                                article.account_id, source_local_path=article.video_file_path)
 
     return jsonify({"ok": True, "has_chapters": True, "job_id": job.id})
-
-
-CHAPTER_JOB_STALE_MINUTES = 60  # チャプター分割は複数クリップを順次処理するため長めに設定
 
 
 @app.route("/api/videos/chapters/<int:job_id>/status")

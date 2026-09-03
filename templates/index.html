@@ -236,7 +236,8 @@ function addVideoManual() {
   result.innerHTML = '<span style="color:var(--text-muted)"><span class="spinner-border spinner-border-sm me-1"></span>動画をダウンロード中... しばらくお待ちください</span>';
 
   if (!startVal && !endVal) {
-    fetch('/api/videos/chapters/start', {
+    result.innerHTML = '<span style="color:var(--text-muted)"><span class="spinner-border spinner-border-sm me-1"></span>チャプターの有無を確認中...</span>';
+    fetch('/api/videos/chapters/detect', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ url: url, account_id: CURRENT_ACCOUNT_ID })
@@ -244,11 +245,12 @@ function addVideoManual() {
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.ok && d.has_chapters) {
-        window.location.href = '/videos/chapters/' + d.job_id;
+        showChapterChoice(url, d.chapter_count);
         return;
       }
       if (d.ok && !d.has_chapters) {
-        submitAddVideoManual(url, startVal, endVal);
+        // チャプターなし → これまで通り自動的に通常ダウンロードへ
+        submitAddVideoManual(url, '', '');
         return;
       }
       btn.disabled = false;
@@ -266,6 +268,68 @@ function addVideoManual() {
   }
 
   submitAddVideoManual(url, startVal, endVal);
+}
+
+// チャプター検出時、分割するか動画全体をそのままダウンロードするかをユーザーに選ばせる
+function showChapterChoice(url, count) {
+  var btn    = document.getElementById('add-video-btn');
+  var result = document.getElementById('add-video-result');
+  btn.disabled = false;
+  btn.innerHTML = '<i class="bi bi-camera-video-fill me-1"></i>動画を追加';
+
+  var countLabel = count ? ('<strong>' + count + '個のチャプター</strong>') : 'チャプター';
+  result.innerHTML =
+    '<div style="color:var(--text-muted)">この動画には' + countLabel + 'があります。どうしますか？</div>' +
+    '<div class="d-flex gap-2 mt-2 flex-wrap">' +
+      '<button type="button" class="btn btn-sm btn-accent" id="chapter-split-btn">' +
+        '<i class="bi bi-scissors me-1"></i>チャプターごとに分割</button>' +
+      '<button type="button" class="btn btn-sm btn-outline-secondary" id="chapter-full-btn">' +
+        '<i class="bi bi-download me-1"></i>動画全体をそのままダウンロード</button>' +
+    '</div>';
+
+  document.getElementById('chapter-split-btn').onclick = function() { startChapterSplit(url); };
+  document.getElementById('chapter-full-btn').onclick = function() {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>ダウンロード中...';
+    result.innerHTML = '<span style="color:var(--text-muted)"><span class="spinner-border spinner-border-sm me-1"></span>動画をダウンロード中... しばらくお待ちください</span>';
+    submitAddVideoManual(url, '', '');
+  };
+}
+
+function startChapterSplit(url) {
+  var btn    = document.getElementById('add-video-btn');
+  var result = document.getElementById('add-video-result');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>分割準備中...';
+  result.innerHTML = '<span style="color:var(--text-muted)"><span class="spinner-border spinner-border-sm me-1"></span>チャプター分割を開始しています...</span>';
+
+  fetch('/api/videos/chapters/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ url: url, account_id: CURRENT_ACCOUNT_ID })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok && d.has_chapters) {
+      window.location.href = '/videos/chapters/' + d.job_id;
+      return;
+    }
+    if (d.ok && !d.has_chapters) {
+      // detect時はあったチャプターが取得できなかった場合は通常ダウンロードにフォールバック
+      submitAddVideoManual(url, '', '');
+      return;
+    }
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-camera-video-fill me-1"></i>動画を追加';
+    result.innerHTML =
+      '<span style="color:var(--accent)"><i class="bi bi-exclamation-circle-fill me-1"></i>' +
+      escHtml(d.error) + '</span>';
+  })
+  .catch(function() {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-camera-video-fill me-1"></i>動画を追加';
+    result.innerHTML = '<span style="color:var(--accent)">通信エラーが発生しました</span>';
+  });
 }
 
 function submitAddVideoManual(url, startVal, endVal) {
