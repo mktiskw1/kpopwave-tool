@@ -508,6 +508,17 @@ def _is_program_shorts(title: str, duration: int) -> bool:
     return 0 < duration <= _PROGRAM_SHORTS_MAX_DURATION
 
 
+def _orientation_from_embed(embed_html: str) -> str | None:
+    """videos.list の player.embedHtml (maxHeight指定時、実アスペクト比にスケールされる)の
+    width/height から動画の向きを判定する。"高さ>幅"なら"portrait"、それ以外は"landscape"。
+    width/heightが読めなければNone(不明)。"""
+    w = re.search(r'width="(\d+)"', embed_html or "")
+    h = re.search(r'height="(\d+)"', embed_html or "")
+    if not (w and h):
+        return None
+    return "portrait" if int(h.group(1)) > int(w.group(1)) else "landscape"
+
+
 def _parse_duration_iso8601(s: str) -> int:
     """PT#H#M#S 形式を秒数に変換する。"""
     m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", s or "")
@@ -664,12 +675,18 @@ def _enrich_and_build_videos(items: list, api_key: str, existing_urls: set, max_
 
     durations = {}
     view_counts = {}
+    orientations = {}
     for i in range(0, len(video_ids), 50):
         batch = video_ids[i:i + 50]
         try:
             vresp = requests.get(
                 YOUTUBE_VIDEOS_URL,
-                params={"part": "contentDetails,statistics", "id": ",".join(batch), "key": api_key},
+                # player パートを含めても videos.list のクォータ消費は1ユニットのまま。
+                # maxHeight を指定すると player.embedHtml の width/height が実アスペクト比に
+                # スケールされて返る(snippet.thumbnails の width/height は向きに関わらず
+                # 固定枠のため判定に使えない)。
+                params={"part": "contentDetails,statistics,player",
+                        "id": ",".join(batch), "maxHeight": 8192, "key": api_key},
                 timeout=15,
             )
             vresp.raise_for_status()
@@ -681,8 +698,11 @@ def _enrich_and_build_videos(items: list, api_key: str, existing_urls: set, max_
                     view_counts[item["id"]] = int(item.get("statistics", {}).get("viewCount", 0))
                 except (ValueError, TypeError):
                     view_counts[item["id"]] = 0
+                orientations[item["id"]] = _orientation_from_embed(
+                    item.get("player", {}).get("embedHtml", "")
+                )
         except Exception as exc:
-            logger.warning("動画長さ・再生数取得エラー: %s", exc)
+            logger.warning("動画長さ・再生数・向き取得エラー: %s", exc)
 
     videos = []
     for it in items:
@@ -705,6 +725,7 @@ def _enrich_and_build_videos(items: list, api_key: str, existing_urls: set, max_
             "published_at": snippet.get("publishedAt", ""),
             "duration": duration,
             "view_count": view_counts.get(vid, 0),
+            "orientation": orientations.get(vid),  # "portrait" / "landscape" / None(不明)
         })
         if len(videos) >= max_results:
             break

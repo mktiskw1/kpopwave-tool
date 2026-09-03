@@ -497,6 +497,17 @@ function formatViewCount(n) {
   return n.toLocaleString() + '回';
 }
 
+// 動画の向き(縦長/横長)バッジ。v.orientation は "portrait" / "landscape" / null(不明)。
+function orientationBadge(o) {
+  if (o === 'portrait') {
+    return '<span class="badge bg-info-subtle text-info-emphasis" title="縦長動画"><i class="bi bi-phone"></i> 縦</span>';
+  }
+  if (o === 'landscape') {
+    return '<span class="badge bg-secondary-subtle text-secondary-emphasis" title="横長動画"><i class="bi bi-tv"></i> 横</span>';
+  }
+  return '<span style="color:var(--text-muted)">-</span>';
+}
+
 // ── 動画候補一覧UI(音楽番組検索・fancam検索で共通のロジック) ──────────────────
 // state: { prefix, endpoint, videos, nextPageToken, order, buildLoadMoreBody() }
 var MB_STATE = { prefix: 'mb', endpoint: '/api/videos/music-bank/search', videos: [], nextPageToken: null, order: null, buildLoadMoreBody: null };
@@ -514,6 +525,7 @@ function _rowHtml(state, v, i) {
     '<td>' + escHtml(v.title) + '</td>' +
     '<td>' + escHtml(pubDate) + '</td>' +
     '<td>' + durationLabel + '</td>' +
+    '<td>' + orientationBadge(v.orientation) + '</td>' +
     '<td>' + formatViewCount(v.view_count) + '</td>' +
     '<td>' +
       '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="addSingleVideo(\'' + state.prefix + '\', ' + i + ')" id="' + state.prefix + '-single-btn-' + i + '">' +
@@ -542,7 +554,7 @@ function renderCandidates(state, videos) {
       '</div>' +
     '</div>' +
     '<div class="table-responsive"><table class="table table-hover mb-2" style="font-size:.85rem"><thead><tr>' +
-      '<th style="width:2.5rem"></th><th style="width:5rem">サムネイル</th><th>タイトル</th><th style="width:6rem">公開日</th><th style="width:5rem">長さ</th><th style="width:5.5rem">再生回数</th><th style="width:8rem">操作</th>' +
+      '<th style="width:2.5rem"></th><th style="width:5rem">サムネイル</th><th>タイトル</th><th style="width:6rem">公開日</th><th style="width:5rem">長さ</th><th style="width:4rem">向き</th><th style="width:5.5rem">再生回数</th><th style="width:8rem">操作</th>' +
     '</tr></thead><tbody id="' + state.prefix + '-tbody">' + rows + '</tbody></table></div>' +
     '<div class="d-flex gap-2 flex-wrap">' +
       '<button class="btn btn-accent" onclick="addSelectedVideos(\'' + state.prefix + '\')" id="' + state.prefix + '-add-btn">' +
