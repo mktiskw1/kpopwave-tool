@@ -764,6 +764,8 @@ def _refresh_threads_tokens_job(app):
             if acc.id == legacy_id:
                 Setting.set("threads_access_token", new_token)
                 Setting.set("threads_token_acquired_at", datetime.utcnow().isoformat())
+                if acc.threads_user_id:
+                    Setting.set("threads_user_id", acc.threads_user_id)
             db.session.commit()
             logger.info(
                 "[token_refresh] account_id=%s (%s) トークン更新成功 expires_in=%s秒",

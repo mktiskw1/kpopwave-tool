@@ -1308,12 +1308,32 @@ def reorder_queue():
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
     if request.method == "POST":
-        for key in ("threads_user_id", "threads_access_token", "anthropic_api_key",
+        for key in ("anthropic_api_key",
                     "collect_interval_hours",
                     "youtube_api_key", "youtube_collect_interval_hours",
                     "youtube_min_view_count", "youtube_max_view_count",
                     "meta_app_id", "meta_app_secret", "app_base_url"):
             Setting.set(key, (request.form.get(key) or "").strip())
+
+        # Threads 認証情報は「手動で上書き」欄。空送信では絶対に消さない
+        # (OAuth 済みの値をフォーム保存のたびに空で潰す事故を防ぐ)。
+        # 非空で送られた場合のみ更新し、レガシーアカウント行にも反映する。
+        _manual_uid = (request.form.get("threads_user_id") or "").strip()
+        _manual_token = (request.form.get("threads_access_token") or "").strip()
+        if _manual_uid or _manual_token:
+            _legacy = (ThreadsAccount.query.filter_by(is_active=True)
+                       .order_by(ThreadsAccount.id.asc()).first())
+            if _manual_uid:
+                Setting.set("threads_user_id", _manual_uid)
+                if _legacy:
+                    _legacy.threads_user_id = _manual_uid
+            if _manual_token:
+                Setting.set("threads_access_token", _manual_token)
+                if _legacy:
+                    _legacy.threads_access_token = _manual_token
+                    _legacy.token_acquired_at = datetime.utcnow()
+                    Setting.set("threads_token_acquired_at", datetime.utcnow().isoformat())
+            db.session.commit()
 
         Setting.set("test_mode", "true" if request.form.get("test_mode") else "false")
         Setting.set("early_advance_enabled", "true" if request.form.get("early_advance_enabled") else "false")
@@ -1353,20 +1373,31 @@ def settings():
 
     base_url = Setting.get("app_base_url", "http://localhost:5000").rstrip("/")
 
-    # トークン有効期限の計算
-    token_acquired_at_str = Setting.get("threads_token_acquired_at", "")
-    threads_token_expires_in_days = None
-    if token_acquired_at_str:
+    # 「現在の認証状態」パネルはレガシー(最古のアクティブ)アカウントを表す。
+    # settings のミラーキーはフォーム保存等でドリフトしやすいので、実体である
+    # ThreadsAccount 行を優先し、無ければ settings にフォールバックする。
+    legacy_account = (ThreadsAccount.query.filter_by(is_active=True)
+                      .order_by(ThreadsAccount.id.asc()).first())
+    panel_user_id = (legacy_account.threads_user_id if legacy_account else None) \
+        or Setting.get("threads_user_id")
+    panel_token = (legacy_account.threads_access_token if legacy_account else None) \
+        or Setting.get("threads_access_token")
+
+    # トークン有効期限の計算(レガシーアカウントの token_acquired_at を優先)
+    acquired_at = legacy_account.token_acquired_at if (legacy_account and legacy_account.token_acquired_at) else None
+    if acquired_at is None:
         try:
-            acquired_at = datetime.fromisoformat(token_acquired_at_str)
-            expires_at = acquired_at + timedelta(days=60)
-            threads_token_expires_in_days = max(0, (expires_at - datetime.utcnow()).days)
-        except Exception:
-            pass
+            acquired_at = datetime.fromisoformat(Setting.get("threads_token_acquired_at", ""))
+        except (ValueError, TypeError):
+            acquired_at = None
+    threads_token_expires_in_days = None
+    if acquired_at is not None:
+        expires_at = acquired_at + timedelta(days=60)
+        threads_token_expires_in_days = max(0, (expires_at - datetime.utcnow()).days)
 
     current = {
-        "threads_user_id": Setting.get("threads_user_id"),
-        "threads_access_token": Setting.get("threads_access_token"),
+        "threads_user_id": panel_user_id,
+        "threads_access_token": panel_token,
         "threads_token_expires_in_days": threads_token_expires_in_days,
         "anthropic_api_key": Setting.get("anthropic_api_key"),
         "collect_interval_hours": Setting.get("collect_interval_hours", "2"),
