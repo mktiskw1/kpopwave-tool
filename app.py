@@ -1585,45 +1585,70 @@ def _sync_threads_account_token(user_id: str, token: str, username: str = None,
                                  force_new: bool = False, label: str = None):
     """OAuth認証成功時にトークンを保存する。
 
-    force_new=False（デフォルト・既存の「トークンを再取得」ボタン用）:
-        settings テーブルと「アクティブな最初のアカウント」（＝従来からの唯一アカウント）の
-        両方を更新する。マルチアカウント導入前と完全に同じ挙動。
-    force_new=True（「新しいアカウントを追加」用）:
-        settings テーブルには一切書き込まず、threads_accounts に新規レコードを追加する。
-        既存アカウントのトークンには影響しない。
+    まず threads_user_id が一致する既存アカウントを探し、あればそのアカウントの
+    トークンを更新する（＝「Threadsで認証する」時にログインしていたアカウントの
+    再認証になる。田中アカウント等、レガシー以外の再認証もこれで可能）。
+
+    一致が無い場合:
+      force_new=True（「新しいアカウントを追加」）: threads_accounts に新規レコード追加。
+      force_new=False（「トークンを再取得」）: 最古のアクティブアカウント（レガシー）を更新。
+
+    settings テーブルのミラーキー（threads_access_token 等）は、更新対象が
+    最古のアクティブアカウント（レガシー）のときだけ書き込む。
     """
+    now = datetime.utcnow()
+    first_active = (ThreadsAccount.query.filter_by(is_active=True)
+                    .order_by(ThreadsAccount.id.asc()).first())
+    legacy_id = first_active.id if first_active else None
+
+    # 1) user_id 一致の既存アカウントがあればそれを更新（再認証）
+    existing = ThreadsAccount.query.filter_by(threads_user_id=user_id).first()
+    if existing:
+        existing.threads_access_token = token
+        existing.token_acquired_at = now
+        existing.is_active = True
+        if existing.id == legacy_id:
+            Setting.set("threads_access_token", token)
+            Setting.set("threads_user_id", user_id)
+            Setting.set("threads_token_acquired_at", now.isoformat())
+        db.session.commit()
+        return existing, False
+
+    # 2) 一致なし
     if force_new:
         account = ThreadsAccount(
             account_label=label or username or f"account_{user_id}",
             threads_user_id=user_id,
             threads_access_token=token,
-            token_acquired_at=datetime.utcnow(),
+            token_acquired_at=now,
             is_active=True,
         )
         db.session.add(account)
         db.session.commit()
-        return account
+        return account, True
 
     Setting.set("threads_access_token", token)
     Setting.set("threads_user_id", user_id)
-    Setting.set("threads_token_acquired_at", datetime.utcnow().isoformat())
+    Setting.set("threads_token_acquired_at", now.isoformat())
 
-    account = ThreadsAccount.query.filter_by(is_active=True).order_by(ThreadsAccount.id.asc()).first()
-    if account:
-        account.threads_user_id = user_id
-        account.threads_access_token = token
-        account.token_acquired_at = datetime.utcnow()
+    if first_active:
+        first_active.threads_user_id = user_id
+        first_active.threads_access_token = token
+        first_active.token_acquired_at = now
+        account = first_active
+        created = False
     else:
         account = ThreadsAccount(
             account_label=username or "default",
             threads_user_id=user_id,
             threads_access_token=token,
-            token_acquired_at=datetime.utcnow(),
+            token_acquired_at=now,
             is_active=True,
         )
         db.session.add(account)
+        created = True
     db.session.commit()
-    return account
+    return account, created
 
 
 @app.route("/auth/threads/start")
@@ -1980,21 +2005,21 @@ def threads_auth_exchange():
         user_id = user_data.get("id", "")
         username = user_data.get("username", "")
 
-        _sync_threads_account_token(
+        account, created = _sync_threads_account_token(
             user_id, long_token, username,
             force_new=is_new_account, label=new_account_label,
         )
-        if is_new_account:
+        if created:
             if hasattr(app, "reschedule_post_jobs"):
                 app.reschedule_post_jobs()
             flash(
-                f"新しいアカウント「{new_account_label}」を追加しました！ @{username}（ID: {user_id}）"
+                f"新しいアカウント「{account.account_label}」を追加しました！ @{username}（ID: {user_id}）"
                 f"有効期限：{expires_in_days}日後",
                 "success",
             )
         else:
             flash(
-                f"トークンを更新しました！ @{username}（ID: {user_id}）"
+                f"「{account.account_label}」のトークンを更新しました！ @{username}（ID: {user_id}）"
                 f"有効期限：{expires_in_days}日後",
                 "success",
             )
@@ -2078,21 +2103,21 @@ def threads_auth_callback():
         user_id = user_data.get("id", "")
         username = user_data.get("username", "")
 
-        _sync_threads_account_token(
+        account, created = _sync_threads_account_token(
             user_id, long_token, username,
             force_new=is_new_account, label=new_account_label,
         )
-        if is_new_account:
+        if created:
             if hasattr(app, "reschedule_post_jobs"):
                 app.reschedule_post_jobs()
             flash(
-                f"新しいアカウント「{new_account_label}」を追加しました！ @{username}（ID: {user_id}）"
+                f"新しいアカウント「{account.account_label}」を追加しました！ @{username}（ID: {user_id}）"
                 f"有効期限：{expires_in_days}日後",
                 "success",
             )
         else:
             flash(
-                f"トークンを更新しました！ @{username}（ID: {user_id}）"
+                f"「{account.account_label}」のトークンを更新しました！ @{username}（ID: {user_id}）"
                 f"有効期限：{expires_in_days}日後",
                 "success",
             )

@@ -181,6 +181,11 @@
                   {% endif %}
                 </td>
                 <td class="text-end">
+                  <a href="{{ url_for('threads_auth_start') }}"
+                     class="btn btn-sm btn-outline-success py-0 px-2 me-1" style="font-size:.75rem"
+                     title="ブラウザの threads.net にこのアカウントでログインした状態でクリックしてください。認証したThreadsユーザーIDが一致するアカウントのトークンだけが更新されます。">
+                    🔄 再認証
+                  </a>
                   <form method="post" action="{{ url_for('toggle_account_active', id=acc.id) }}" class="d-inline">
                     <button type="submit" class="btn btn-sm btn-outline-secondary py-0 px-2" style="font-size:.75rem">
                       {% if acc.is_active %}無効化{% else %}有効化{% endif %}
@@ -194,6 +199,12 @@
             </tbody>
           </table>
         </div>
+        <p class="text-muted mt-1 mb-0" style="font-size:.75rem">
+          「🔄 再認証」: トークンの有効期限（約60日）が切れた／切れそうなアカウントを再認証します。
+          <strong>ブラウザで threads.net に対象アカウントでログインした状態</strong>でクリックし、Threads の許可画面で承認してください。
+          認証した Threads ユーザーID が一致する行のトークンだけが更新されます（他のアカウントには影響しません）。
+          通常は45日経過時点で自動更新されるため、手動での再認証は自動更新に失敗した場合のみ必要です。
+        </p>
 
         <hr>
 
