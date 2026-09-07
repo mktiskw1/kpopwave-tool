@@ -702,6 +702,75 @@ def _orphan_video_cleanup_job(app):
     )
 
 
+_TOKEN_REFRESH_MIN_AGE_DAYS = 45   # Threads長期トークンは約60日寿命。失効15日前以内で更新開始
+_THREADS_TOKEN_LIFETIME_DAYS = 60
+_THREADS_REFRESH_URL = "https://graph.threads.net/refresh_access_token"
+
+
+def _refresh_threads_tokens_job(app):
+    """Threads長期アクセストークンを失効前に自動更新する（日次）。
+
+    Threadsの長期トークンは発行から約60日で失効する。失効すると自動投稿が全て
+    止まる（実際に田中アカウントで発生）。失効の手前で grant_type=th_refresh_token
+    により無人更新する。リフレッシュ条件は「トークンが有効 かつ 発行から24時間以上」。
+    既に失効しているトークンは更新できず手動再認証が必要 → その場合はログに明示する。
+    """
+    import requests as _requests
+
+    with app.app_context():
+        legacy = (ThreadsAccount.query.filter_by(is_active=True)
+                  .order_by(ThreadsAccount.id.asc()).first())
+        legacy_id = legacy.id if legacy else None
+        accounts = ThreadsAccount.query.filter_by(is_active=True).all()
+
+        for acc in accounts:
+            if not acc.threads_access_token or not acc.token_acquired_at:
+                continue
+            age_days = (datetime.utcnow() - acc.token_acquired_at).days
+            if age_days < _TOKEN_REFRESH_MIN_AGE_DAYS:
+                continue
+            if age_days >= _THREADS_TOKEN_LIFETIME_DAYS:
+                logger.error(
+                    "[token_refresh] account_id=%s (%s) のトークンは失効済み(発行から%d日) "
+                    "→ 設定画面から手動で再認証してください",
+                    acc.id, acc.account_label, age_days,
+                )
+                continue
+
+            try:
+                resp = _requests.get(
+                    _THREADS_REFRESH_URL,
+                    params={"grant_type": "th_refresh_token",
+                            "access_token": acc.threads_access_token},
+                    timeout=15,
+                )
+                data = resp.json()
+            except Exception as exc:
+                logger.error("[token_refresh] account_id=%s 通信エラー: %s", acc.id, exc)
+                continue
+
+            new_token = data.get("access_token") if resp.status_code == 200 else None
+            if not new_token:
+                logger.error(
+                    "[token_refresh] account_id=%s (%s) 更新失敗(発行から%d日): HTTP %d %s",
+                    acc.id, acc.account_label, age_days, resp.status_code, data,
+                )
+                continue
+
+            acc.threads_access_token = new_token
+            acc.token_acquired_at = datetime.utcnow()
+            # レガシーアカウント(最古のアクティブ)は settings のミラーも更新して
+            # 設定画面の有効期限表示・アカウント未登録時フォールバックと整合させる
+            if acc.id == legacy_id:
+                Setting.set("threads_access_token", new_token)
+                Setting.set("threads_token_acquired_at", datetime.utcnow().isoformat())
+            db.session.commit()
+            logger.info(
+                "[token_refresh] account_id=%s (%s) トークン更新成功 expires_in=%s秒",
+                acc.id, acc.account_label, data.get("expires_in"),
+            )
+
+
 def _post_stats_job(app):
     """KPOPアカウント（account_id=1）の投稿別7日間パフォーマンスを日次取得する。"""
     from analytics_tracker import track_post_stats
@@ -788,6 +857,14 @@ def setup_scheduler(app):
     )
 
     scheduler.add_job(
+        _refresh_threads_tokens_job,
+        CronTrigger(hour=5, minute=0, timezone="Asia/Tokyo"),
+        args=[app],
+        id="refresh_threads_tokens",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
         _post_stats_job,
         CronTrigger(hour=2, minute=30, timezone="Asia/Tokyo"),
         args=[app],
@@ -809,6 +886,6 @@ def setup_scheduler(app):
     logger.info(
         "Scheduler started (post backup 5min, comments/rollover 30min, early engagement 5min, "
         "engagement 2:00 JST, video cleanup 3:00 JST, orphan video cleanup 4:30 JST, "
-        "post stats 2:30 JST, daily snapshot 3:30 JST)"
+        "token refresh 5:00 JST, post stats 2:30 JST, daily snapshot 3:30 JST)"
     )
     return scheduler
