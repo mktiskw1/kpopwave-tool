@@ -79,19 +79,59 @@ def _mark_failed(app, article_id: int, error: str):
             db.session.commit()
 
 
+# コンテナ作成直後の threads_publish は、Meta 側のリードアフターライト遅延で
+# 「The requested resource does not exist」を一時的に返すことがある(特にTEXT投稿は
+# コンテナ作成からpublishまでが一瞬のため発生しやすい)。この種の一時エラーは
+# 少し待ってリトライすれば成功するので、指数的バックオフで数回試す。
+_PUBLISH_RETRYABLE_HINTS = (
+    "does not exist",          # "The requested resource does not exist"
+    "media is not ready",
+    "not ready for publishing",
+    "temporarily",
+    "please retry",
+    "try again",
+)
+_PUBLISH_MAX_ATTEMPTS = 5
+_PUBLISH_BACKOFF_SECONDS = (3, 6, 12, 20)  # 試行間の待機(最終試行後は待たない)
+
+
 def _publish(user_id: str, token: str, container_id: str) -> tuple[bool, str]:
-    """作成済みコンテナを公開する。(success, post_id_or_error) を返す。"""
-    res = requests.post(
-        f"{THREADS_API}/{user_id}/threads_publish",
-        data={"creation_id": container_id, "access_token": token},
-        timeout=30,
-    )
-    data = res.json()
-    logger.info("Publish: HTTP %d %s", res.status_code, data)
-    if res.status_code != 200:
-        err = data.get("error", {}).get("message", res.text[:200])
-        return False, f"公開失敗: {err}"
-    return True, data.get("id", "")
+    """作成済みコンテナを公開する。(success, post_id_or_error) を返す。
+    一時的なエラー(コンテナ未反映など)は指数的バックオフでリトライする。"""
+    last_err = "公開失敗: 不明なエラー"
+    for attempt in range(_PUBLISH_MAX_ATTEMPTS):
+        try:
+            res = requests.post(
+                f"{THREADS_API}/{user_id}/threads_publish",
+                data={"creation_id": container_id, "access_token": token},
+                timeout=30,
+            )
+            data = res.json()
+        except Exception as exc:
+            last_err = f"公開失敗: {exc}"
+            logger.warning("Publish 通信エラー [%d/%d]: %s", attempt + 1, _PUBLISH_MAX_ATTEMPTS, exc)
+            data = None
+            res = None
+
+        if res is not None:
+            logger.info("Publish [%d/%d]: HTTP %d %s", attempt + 1, _PUBLISH_MAX_ATTEMPTS,
+                        res.status_code, data)
+            if res.status_code == 200:
+                return True, data.get("id", "")
+            err = (data or {}).get("error", {}).get("message", (res.text or "")[:200])
+            last_err = f"公開失敗: {err}"
+            # 一時的でないエラー(トークン期限切れ code=190 等)は即座に諦める
+            code = (data or {}).get("error", {}).get("code")
+            retryable = code != 190 and any(h in err.lower() for h in _PUBLISH_RETRYABLE_HINTS)
+            if not retryable:
+                return False, last_err
+
+        if attempt < _PUBLISH_MAX_ATTEMPTS - 1:
+            wait = _PUBLISH_BACKOFF_SECONDS[min(attempt, len(_PUBLISH_BACKOFF_SECONDS) - 1)]
+            logger.info("Publish リトライ待機 %ds (次: %d/%d)", wait, attempt + 2, _PUBLISH_MAX_ATTEMPTS)
+            time.sleep(wait)
+
+    return False, last_err
 
 
 _TUNNEL_URL_PAT = re.compile(r'https://[a-z0-9-]+\.trycloudflare\.com')
@@ -190,8 +230,11 @@ def _post_text_only(user_id: str, token: str, post_text: str, article_id: int, a
     )
     data = res.json()
     logger.info("Container (TEXT): HTTP %d %s", res.status_code, data)
-    if res.status_code != 200:
+    if res.status_code != 200 or not data.get("id"):
         err = data.get("error", {}).get("message", res.text[:200])
+        # ここはフォールバック先が無い最終経路。マークしないと article が
+        # 'posting' のまま固まってしまうため必ず failed にする。
+        _mark_failed(app, article_id, f"コンテナ作成失敗: {err}")
         return False, f"コンテナ作成失敗: {err}"
 
     ok, result = _publish(user_id, token, data["id"])
@@ -319,9 +362,14 @@ def post_to_threads(app, article_id: int, test_mode: bool = False, account_id: i
         # _run_post_job から呼ばれた場合は既に 'posting' なので何もしない。
         # これにより post_now・requeue など全ての呼び出し経路を保護する。
         if article.status == "queued":
+            # updated_at も明示的に進める。生SQLのUPDATEはSQLAlchemyの
+            # onupdate=utcnow を発火しないため、これがないと updated_at が
+            # 古いまま残り、_rollover_overdue_job の「10分以上前ならstuck」
+            # 判定が即座に真になって投稿中の記事を誤ってqueuedに戻してしまう。
             result = db.session.execute(
-                text("UPDATE articles SET status='posting' WHERE id=:id AND status='queued'"),
-                {"id": article_id},
+                text("UPDATE articles SET status='posting', updated_at=:now "
+                     "WHERE id=:id AND status='queued'"),
+                {"id": article_id, "now": datetime.utcnow()},
             )
             db.session.commit()
             if result.rowcount == 0:
@@ -333,6 +381,11 @@ def post_to_threads(app, article_id: int, test_mode: bool = False, account_id: i
             logger.info("[post_to_threads] id=%d status→'posting' ロック取得", article_id)
 
         if not article.summary:
+            # ここに来る時点で status は 'posting'(このメソッド or 呼び出し元が設定済み)。
+            # マークしないと 'posting' のまま固まるため failed にする。
+            article.status = "failed"
+            article.error_message = "要約がありません。先に要約を生成してください"
+            db.session.commit()
             return False, "要約がありません。先に要約を生成してください"
         post_text      = article.summary
         thumbnail_url  = article.thumbnail_url or ""
@@ -382,6 +435,7 @@ def post_to_threads(app, article_id: int, test_mode: bool = False, account_id: i
     # ── 実投稿 ───────────────────────────────────────────────────
     user_id, token = _get_credentials(app, account_id)
     if not user_id or not token:
+        _mark_failed(app, article_id, "Threads の認証情報が設定されていません")
         return False, "Threads の認証情報が設定されていません"
 
     try:

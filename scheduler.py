@@ -171,7 +171,12 @@ def _post_job(app):
         logger.warning("[_post_job] アクティブな threads_accounts が存在しません")
         return
     for account_id in account_ids:
-        _post_job_for_account(app, account_id)
+        # 1アカウントで例外が出ても他アカウントの投稿は止めない。
+        # (以前はここでraiseすると後続アカウントが丸ごとスキップされていた)
+        try:
+            _post_job_for_account(app, account_id)
+        except Exception:
+            logger.exception("[_post_job] account_id=%s の処理で例外", account_id)
 
 
 def _post_job_for_account(app, account_id):
@@ -259,9 +264,12 @@ def _run_post_job_for_account(app, account_id):
         # ── 第2防衛: DBレベルのアトミックロック ─────────────────────────────
         # UPDATE WHERE status='queued' が成功した場合のみ投稿を実行する。
         # 万が一スレッドロックをすり抜けた別ジョブも、rowcount==0 でスキップされる。
+        # updated_at も明示的に進める(生SQLは onupdate=utcnow を発火しないため。
+        # これがないと _rollover_overdue_job のstuck判定が即座に真になる)。
         result = db.session.execute(
-            text("UPDATE articles SET status='posting' WHERE id=:id AND status='queued'"),
-            {"id": article_id},
+            text("UPDATE articles SET status='posting', updated_at=:now "
+                 "WHERE id=:id AND status='queued'"),
+            {"id": article_id, "now": now},
         )
         db.session.commit()
 
@@ -453,7 +461,10 @@ def _rollover_overdue_job(app):
         return
 
     for account_id in account_ids:
-        _rollover_overdue_for_account(app, account_id, now_utc, rollover_threshold)
+        try:
+            _rollover_overdue_for_account(app, account_id, now_utc, rollover_threshold)
+        except Exception:
+            logger.exception("[_rollover_overdue_job] account_id=%s の処理で例外", account_id)
 
 
 def _rollover_overdue_for_account(app, account_id, now_utc, rollover_threshold):
