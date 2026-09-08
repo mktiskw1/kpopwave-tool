@@ -10,8 +10,6 @@ import os
 import webbrowser
 import sys
 import json
-import threading
-import time
 import urllib.request
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -41,86 +39,55 @@ CHROME_PATHS = [
 ]
 
 
-def _show_claude_instructions():
-    """Claude Code 起動手順をポップアップで表示する"""
-    popup = tk.Toplevel(root)
-    popup.title("Claude Code 起動手順")
-    popup.resizable(False, False)
-    popup.configure(bg=BG)
-    popup.grab_set()
-
-    # 中央寄せ
-    popup.update_idletasks()
-    pw, ph = 420, 300
-    rx = root.winfo_x() + (root.winfo_width() - pw) // 2
-    ry = root.winfo_y() + (root.winfo_height() - ph) // 2
-    popup.geometry(f"{pw}x{ph}+{rx}+{ry}")
-
-    SEP = "━" * 24
-
-    def copy_text(text, btn):
-        popup.clipboard_clear()
-        popup.clipboard_append(text)
-        orig = btn.cget("text")
-        btn.config(text="✓ コピー済み", bg="#1a6a1a")
-        popup.after(1500, lambda: btn.config(text=orig, bg="#0f3460"))
-
-    tk.Label(popup, text=SEP, font=("Consolas", 11), bg=BG, fg=ACCENT).pack(pady=(14, 0))
-    tk.Label(popup, text="Claude Code 起動手順", font=("Segoe UI", 13, "bold"), bg=BG, fg=FG).pack()
-    tk.Label(popup, text=SEP, font=("Consolas", 11), bg=BG, fg=ACCENT).pack(pady=(0, 6))
-
-    tk.Label(popup, text="VSCode のターミナルで以下を順番に入力：",
-             font=("Segoe UI", 10), bg=BG, fg=STATUS_FG).pack(pady=(0, 10))
-
-    for step, cmd in [("Step 1", r".\venv\Scripts\activate"), ("Step 2", "claude")]:
-        row = tk.Frame(popup, bg=BG)
-        row.pack(fill="x", padx=30, pady=4)
-        tk.Label(row, text=f"{step}:", font=("Segoe UI", 10, "bold"), bg=BG, fg=FG,
-                 width=7, anchor="w").pack(side="left")
-        tk.Label(row, text=cmd, font=("Consolas", 11), bg=PANEL, fg="#7ec8e3",
-                 padx=8, pady=4, relief="flat").pack(side="left", expand=True, fill="x")
-        copy_btn = tk.Button(row, text="コピー", font=("Segoe UI", 9),
-                             bg="#0f3460", fg=FG, relief="flat", bd=0,
-                             padx=10, cursor="hand2")
-        copy_btn.config(command=lambda t=cmd, b=copy_btn: copy_text(t, b))
-        copy_btn.pack(side="left", padx=(6, 0))
-
-    tk.Label(popup, text=SEP, font=("Consolas", 11), bg=BG, fg=ACCENT).pack(pady=(10, 6))
-
-    tk.Button(popup, text="OK", font=("Segoe UI", 10),
-              bg=ACCENT, fg=FG, relief="flat", bd=0, padx=20, pady=6,
-              cursor="hand2", command=popup.destroy).pack()
-
-    return popup
+# Claude Desktop (Microsoft Store / MSIX 版) の AppUserModelID
+CLAUDE_DESKTOP_AUMID = "Claude_pzs8sxrjxfjjc!Claude"
 
 
 def run_claude():
-    """VS Code を起動すると同時に起動手順ポップアップを表示する"""
-    from urllib.parse import quote
-
-    # ① VSCode をプロジェクトフォルダで起動
+    """Claude Desktop アプリを起動する"""
+    # ① Store アプリ (AppUserModelID) 経由で起動 ― バージョンに依存しない標準的な方法
     try:
-        subprocess.Popen(["cmd.exe", "/c", "code", PROJECT_DIR])
-        set_status("VSCode を起動しました。claude.ai を開いています...")
-    except Exception:
-        set_status("VSCode が見つかりません（PATH を確認してください）")
+        subprocess.Popen(
+            ["explorer.exe", f"shell:AppsFolder\\{CLAUDE_DESKTOP_AUMID}"],
+            cwd=PROJECT_DIR,
+        )
+        set_status("Claude Desktop を起動しました")
         return
+    except Exception:
+        pass
 
-    # ② バックグラウンドで待機してから Simple Browser を開く
-    def _open_simple_browser():
-        time.sleep(3)
-        try:
-            target_url = "https://claude.ai"
-            vscode_uri = f"vscode://vscode.simple-browser/open?url={quote(target_url, safe='')}"
-            subprocess.Popen(["cmd.exe", "/c", "code", "--open-url", vscode_uri])
-        except Exception:
-            pass
+    # ② フォールバック: インストール済みの実行ファイルを直接探して起動
+    candidates = []
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    windows_apps = os.path.join(program_files, "WindowsApps")
+    try:
+        for name in os.listdir(windows_apps):
+            if name.lower().startswith("claude_"):
+                exe = os.path.join(windows_apps, name, "app", "Claude.exe")
+                if os.path.exists(exe):
+                    candidates.append(exe)
+    except Exception:
+        pass
+    candidates += [
+        os.path.expandvars(r"%LOCALAPPDATA%\AnthropicClaude\claude.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\claude\Claude.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Claude\Claude.exe"),
+    ]
+    for exe in candidates:
+        if os.path.exists(exe):
+            try:
+                subprocess.Popen([exe])
+                set_status("Claude Desktop を起動しました")
+                return
+            except Exception:
+                continue
 
-    threading.Thread(target=_open_simple_browser, daemon=True).start()
-    set_status("VS Code を開きました")
-
-    # ③ 起動手順ポップアップを表示（OK で閉じるだけ）
-    _show_claude_instructions()
+    messagebox.showerror(
+        "エラー",
+        "Claude Desktop が見つかりませんでした。\n"
+        "アプリがインストールされているか確認してください。",
+    )
+    set_status("Claude Desktop が見つかりません")
 
 
 def open_admin():
@@ -225,7 +192,7 @@ tk.Label(
 
 BUTTONS = [
     ("① ツール起動",        "▶  コマンドプロンプトで run.py を実行",   run_tool,   "#0f3460"),
-    ("② Claude Code 起動", "🤖  VS Code + claude.ai を開く",          run_claude, "#0f3460"),
+    ("② Claude Desktop 起動", "🤖  Claude Desktop アプリを開く",         run_claude, "#0f3460"),
     ("③ トンネル起動",      "🌐  Cloudflare Tunnel → URL を設定に反映", run_tunnel, "#0d4d4d"),
     ("④ 管理画面を開く",    "🌐  Chrome で localhost:5000 を開く",     open_admin, "#2d1b69"),
     ("⑤ GitHub 保存",      "⬆  add → commit → push",                 git_push,   "#1a472a"),
