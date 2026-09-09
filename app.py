@@ -2675,7 +2675,22 @@ def _classify_ytdlp_error(exc: Exception) -> str:
     lower = text.lower()
 
     if "403" in text or "forbidden" in lower:
-        return "YouTube側の認証エラーです(403)。この動画は現在ダウンロードできない可能性があります。"
+        return "配信元の認証エラーです(403)。この動画は現在ダウンロードできない可能性があります。"
+
+    if any(k in lower for k in ("no video could be found", "no media found", "does not contain a video")):
+        return "この投稿には動画が含まれていないようです。"
+
+    if any(k in lower for k in ("age-restricted", "age restricted", "nsfw", "sensitive media", "adult content")):
+        return "年齢制限・センシティブ設定のある投稿のため取得できませんでした。"
+
+    if any(k in lower for k in ("private account", "account is private", "not authorized to view",
+                                "login required", "requested tweet is not available",
+                                "sign in to confirm", "this account is protected")):
+        return "非公開アカウント、またはログインが必要な投稿のため取得できません。"
+
+    if any(k in lower for k in ("no status found", "tweet is not available", "post unavailable",
+                                "page does not exist", "tweet was deleted", "media has been deleted")):
+        return "投稿が見つかりません。削除済みか、URLが間違っている可能性があります。"
 
     if any(k in lower for k in ("incomplete youtube id", "is not a valid url", "unsupported url", "looks truncated", "invalid url")):
         return "URLが正しくない可能性があります。動画IDが省略・欠落していないか確認してください。"
@@ -2689,11 +2704,12 @@ class _YouTubeDownloadNotFoundError(Exception):
     """ダウンロード自体は成功したが、ローカルに出力ファイルが見つからない場合に送出する。"""
 
 
-def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, end_time: float | None, suffix: str, use_cookie: bool = True) -> tuple[str, str]:
+def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, end_time: float | None, suffix: str, use_cookie: bool = True, playlist_index: int | None = None) -> tuple[str, str]:
     """指定範囲(start_time が None なら動画全体)をダウンロードし、(ローカルの一時ファイルパス, 拡張子) を返す。
     ダウンロード自体の失敗は例外をそのまま送出する。ダウンロードは成功したがファイルが見つからない場合は
     _YouTubeDownloadNotFoundError を送出する。use_cookie=False の場合、Cookie認証・js_runtimes・
-    remote_componentsを一切使わない素のダウンロードを行う(範囲指定なしの通常ダウンロードで十分な場合用)。"""
+    remote_componentsを一切使わない素のダウンロードを行う(範囲指定なしの通常ダウンロードで十分な場合用)。
+    playlist_index 指定時は、複数動画を含む投稿(X の複数動画ツイート等)からその番号(1始まり)の動画だけを取得する。"""
     import tempfile
     import yt_dlp
     from yt_dlp.utils import download_range_func
@@ -2720,6 +2736,8 @@ def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, 
         dl_opts["download_ranges"] = download_range_func(
             [], [(start_time, end_time if end_time is not None else float("inf"))]
         )
+    if playlist_index is not None:
+        dl_opts["playlist_items"] = str(playlist_index)
 
     with yt_dlp.YoutubeDL(dl_opts) as ydl:
         ydl.download([yt_url])
@@ -2894,6 +2912,159 @@ def add_video_manual():
 
     logger.info("動画手動追加: %s (%s)", title[:60], yt_url)
     return jsonify({"ok": True, "title": title})
+
+
+_SOCIAL_X_HINTS = ("x.com/", "twitter.com/", "mobile.twitter.com/", "mobile.x.com/")
+_SOCIAL_THREADS_HINTS = ("threads.net/", "threads.com/")
+
+
+@app.route("/api/videos/add-social", methods=["POST"])
+def add_video_social():
+    """X（Twitter）の投稿URLを貼り付けて動画をフルダウンロードし、承認待ちキューに追加する。
+    Threads は yt-dlp に extractor が無く未対応のため、URLは受け付けるが未対応メッセージを返す。
+    複数動画を含むツイートは include_all=True なら全動画、既定では先頭のみ取り込む。"""
+    import shutil
+
+    data = request.get_json(force=True) or {}
+    url = (data.get("url") or "").strip()
+    include_all = bool(data.get("include_all"))
+
+    if not url:
+        return jsonify({"ok": False, "error": "URLを入力してください"}), 400
+
+    lower = url.lower()
+    if any(h in lower for h in _SOCIAL_THREADS_HINTS):
+        return jsonify({"ok": False, "error": "Threadsは現在 yt-dlp が未対応のため動画を取得できません。X（x.com / twitter.com）のURLを使ってください。"}), 400
+    if not any(h in lower for h in _SOCIAL_X_HINTS):
+        return jsonify({"ok": False, "error": "X（x.com / twitter.com）の投稿URLを入力してください"}), 400
+
+    if Article.query.filter(
+        Article.url == url,
+        Article.status.in_(["pending", "queued"]),
+    ).first():
+        return jsonify({"ok": False, "error": "この投稿はすでに承認待ち・キュー中です"}), 400
+
+    try:
+        import yt_dlp
+    except ImportError:
+        return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
+
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+            full = ydl.extract_info(url, download=False)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_classify_ytdlp_error(exc)}"}), 500
+    if not full:
+        return jsonify({"ok": False, "error": "動画情報を取得できませんでした"}), 400
+
+    raw_entries = full.get("entries")
+    if raw_entries is not None:
+        entries = [e for e in raw_entries if e]
+        if not entries:
+            return jsonify({"ok": False, "error": "この投稿に動画が見つかりませんでした"}), 400
+        targets = [(i + 1, e) for i, e in enumerate(entries)]
+        if not include_all:
+            targets = targets[:1]
+    else:
+        targets = [(None, full)]
+
+    multi = len(targets) > 1
+    account_id = _explicit_account_id(data)
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
+    os.makedirs(static_dir, exist_ok=True)
+
+    parent_uploader = full.get("uploader") or full.get("uploader_id") or full.get("channel") or "X"
+
+    added_titles = []
+    last_error = None
+    for pl_index, info in targets:
+        vid_id = (info.get("id") or "").strip()
+        if not vid_id:
+            last_error = "動画IDを取得できませんでした"
+            if not multi:
+                return jsonify({"ok": False, "error": last_error}), 400
+            continue
+
+        suffix = f"_{pl_index}" if multi else ""
+        article_url = f"{url}#v{pl_index}" if multi else url
+        if Article.query.filter_by(url=article_url).first():
+            continue
+
+        try:
+            found = _download_youtube_range(
+                url, vid_id, None, None, suffix,
+                use_cookie=False, playlist_index=pl_index,
+            )
+        except _YouTubeDownloadNotFoundError:
+            last_error = "ダウンロードファイルが見つかりません"
+            if not multi:
+                return jsonify({"ok": False, "error": last_error}), 500
+            continue
+        except Exception as exc:
+            last_error = f"ダウンロードエラー: {_classify_ytdlp_error(exc)}"
+            if not multi:
+                return jsonify({"ok": False, "error": last_error}), 500
+            continue
+
+        local_path, ext = found
+        dest_filename = f"{vid_id}{suffix}.{ext}"
+        dest_path = os.path.join(static_dir, dest_filename)
+        try:
+            shutil.copy2(local_path, dest_path)
+            try:
+                os.remove(local_path)
+            except Exception:
+                pass
+        except Exception as exc:
+            last_error = f"ファイルコピーエラー: {str(exc)[:120]}"
+            if not multi:
+                return jsonify({"ok": False, "error": last_error}), 500
+            continue
+
+        published_at = None
+        ts = info.get("timestamp") or full.get("timestamp")
+        ud = info.get("upload_date") or full.get("upload_date")
+        if ts:
+            try:
+                published_at = datetime.utcfromtimestamp(int(ts))
+            except Exception:
+                pass
+        if published_at is None and ud and len(str(ud)) == 8:
+            try:
+                published_at = datetime.strptime(str(ud), "%Y%m%d")
+            except Exception:
+                pass
+
+        uploader = info.get("uploader") or info.get("uploader_id") or parent_uploader
+        title = (info.get("title") or info.get("description") or "X動画")[:500]
+        article = Article(
+            feed_source=f"X動画: {uploader}",
+            title=title,
+            url=article_url,
+            published_at=published_at,
+            raw_content=(info.get("description") or full.get("description") or "")[:5000],
+            thumbnail_url=info.get("thumbnail") or full.get("thumbnail") or None,
+            status="pending",
+            content_type="video",
+            video_file_path=f"videos/{dest_filename}",
+            view_count=info.get("view_count") or full.get("view_count"),
+            account_id=account_id,
+        )
+        db.session.add(article)
+        db.session.commit()
+        added_titles.append(title)
+        logger.info("X動画手動追加: %s (%s)", title[:60], article_url)
+
+    if not added_titles:
+        return jsonify({"ok": False, "error": last_error or "この投稿はすでに追加済みです"}), 400
+
+    if len(added_titles) == 1 and not last_error:
+        return jsonify({"ok": True, "title": added_titles[0], "count": 1,
+                        "message": f"追加しました！ {added_titles[0]}"})
+    msg = f"{len(added_titles)}件の動画を承認待ちに追加しました"
+    if last_error:
+        msg += f"（一部失敗: {last_error}）"
+    return jsonify({"ok": True, "title": added_titles[0], "count": len(added_titles), "message": msg})
 
 
 def _probe_duration(path: str) -> float | None:

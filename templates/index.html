@@ -65,6 +65,32 @@
   </div>
 </div>
 
+<!-- X / Threads動画手動追加 -->
+<div class="card mb-4">
+  <div class="card-header"><i class="bi bi-camera-video-fill me-2"></i>X / Threads 動画URLを追加（動画投稿用）</div>
+  <div class="card-body">
+    <div class="d-flex gap-2">
+      <input type="url" id="add-social-input" class="form-control"
+             placeholder="https://x.com/ユーザー名/status/... （X / Twitter）"
+             style="font-size:.88rem"
+             onkeydown="if(event.key==='Enter') addSocialVideo()">
+      <button class="btn btn-accent px-3 flex-shrink-0" onclick="addSocialVideo()" id="add-social-btn">
+        <i class="bi bi-camera-video-fill me-1"></i>動画を追加
+      </button>
+    </div>
+    <div class="form-check mt-2" style="font-size:.82rem">
+      <input class="form-check-input" type="checkbox" id="add-social-all">
+      <label class="form-check-label" for="add-social-all" style="color:var(--text-muted)">
+        投稿に動画が複数ある場合は全部追加する（OFFなら先頭の1本のみ）
+      </label>
+    </div>
+    <div class="form-text mt-1" style="font-size:.75rem">
+      現在 X（x.com / twitter.com）の公開投稿のみ対応。Threads は yt-dlp 未対応のため取得できません。
+    </div>
+    <div id="add-social-result" class="mt-2" style="font-size:.83rem;min-height:1.2em"></div>
+  </div>
+</div>
+
 <!-- 音楽番組検索 -->
 <div class="card mb-4">
   <div class="card-header"><i class="bi bi-search me-2"></i>音楽番組から出演回を探す</div>
@@ -188,6 +214,14 @@ function addFromUrl() {
     result.innerHTML =
       '<span style="color:#E65100"><i class="bi bi-exclamation-triangle-fill me-1"></i>' +
       'YouTubeのURLは下の「YouTube動画URLを追加（動画投稿用）」フォームを使ってください。</span>';
+    input.focus();
+    return;
+  }
+
+  if (/(^|\/\/|\.)(x\.com|twitter\.com|threads\.net|threads\.com)\//i.test(url)) {
+    result.innerHTML =
+      '<span style="color:#E65100"><i class="bi bi-exclamation-triangle-fill me-1"></i>' +
+      'X / Threads のURLは下の「X / Threads 動画URLを追加」フォームを使ってください。</span>';
     input.focus();
     return;
   }
@@ -364,6 +398,46 @@ function submitAddVideoManual(url, startVal, endVal) {
       result.innerHTML =
         '<span style="color:var(--accent3)"><i class="bi bi-check-circle-fill me-1"></i>' +
         '追加しました！ <strong>' + escHtml(d.title) + '</strong>' +
+        ' — <a href="/pending">承認待ち画面で確認してください</a></span>';
+    } else {
+      result.innerHTML =
+        '<span style="color:var(--accent)"><i class="bi bi-exclamation-circle-fill me-1"></i>' +
+        escHtml(d.error) + '</span>';
+    }
+  })
+  .catch(function() {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-camera-video-fill me-1"></i>動画を追加';
+    result.innerHTML = '<span style="color:var(--accent)">通信エラーが発生しました</span>';
+  });
+}
+
+function addSocialVideo() {
+  var input  = document.getElementById('add-social-input');
+  var btn    = document.getElementById('add-social-btn');
+  var result = document.getElementById('add-social-result');
+  var url = input.value.trim();
+  if (!url) { input.focus(); return; }
+  var includeAll = document.getElementById('add-social-all').checked;
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>ダウンロード中...';
+  result.innerHTML = '<span style="color:var(--text-muted)"><span class="spinner-border spinner-border-sm me-1"></span>動画をダウンロード中... しばらくお待ちください</span>';
+
+  fetch('/api/videos/add-social', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ url: url, account_id: CURRENT_ACCOUNT_ID, include_all: includeAll })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-camera-video-fill me-1"></i>動画を追加';
+    if (d.ok) {
+      input.value = '';
+      result.innerHTML =
+        '<span style="color:var(--accent3)"><i class="bi bi-check-circle-fill me-1"></i>' +
+        escHtml(d.message || '追加しました！') +
         ' — <a href="/pending">承認待ち画面で確認してください</a></span>';
     } else {
       result.innerHTML =

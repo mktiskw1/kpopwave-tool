@@ -163,7 +163,7 @@
           {% endif %}
           <span>yt-dlpダウンロード済み · Threads動画投稿</span>
           {% if a.published_at %}
-          <span class="ms-2" style="color:var(--text-muted)">📅 YouTube投稿日: <strong>{{ a.published_at.strftime('%Y/%m/%d') }}</strong></span>
+          <span class="ms-2" style="color:var(--text-muted)">📅 元投稿日: <strong>{{ a.published_at.strftime('%Y/%m/%d') }}</strong></span>
           {% endif %}
         </div>
         {% if active_tab == 'posted' and early_engagement_map and early_engagement_map.get(a.id) %}

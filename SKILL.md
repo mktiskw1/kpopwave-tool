@@ -164,6 +164,7 @@ queued  → failed
 |---|---|---|
 | RSSフィード収集 | `rss_collector.py` | 女性KPOPキーワードフィルタ + AI判定 |
 | YouTube動画収集 | `video_collector.py` | yt-dlp、再生数フィルタあり |
+| X（Twitter）動画URL追加 | `app.py` `/api/videos/add-social` | 投稿URL貼付でyt-dlpフルDL（Cookie不要）→承認待ちへ。`feed_source="X動画: <投稿者>"`。複数動画ツイートはUIチェックボックスで「全部/先頭のみ」。**Threadsはyt-dlp未対応のため受付だけして未対応メッセージを返す**（対応が入ったら`add_video_social`のThreadsガードを外すだけ） |
 | AI投稿文生成 | `summarizer.py` | Claude Haiku、2段階生成（生成→口語化） |
 | Threads投稿 | `threads_api.py` | テキスト・画像カルーセル・動画 |
 | 自動スケジューラ | `app.py` | APScheduler、`post_times`設定に従う |
