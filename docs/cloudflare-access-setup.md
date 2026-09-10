@@ -13,7 +13,7 @@
 | ログイン方法 | One-time PIN（メールに 6 桁コード） |
 | Application ① | `ContentWave Admin` → `mktiskw.com`（全体）→ ポリシー `Allow` / email `mktiskw1@gmail.com` |
 | Application ② | `ContentWave video (public)` → `mktiskw.com/video` → ポリシー `Bypass` / Everyone |
-| Session Duration | 24h |
+| Session Duration | ① `720h`（30日、2026-09-10 に 24h から延長 / API 経由）・② `24h` |
 
 **動作確認結果:**
 - `https://mktiskw.com/` → 302 で Access ログイン画面へリダイレクト（"Sign in ・ Cloudflare Access"）
