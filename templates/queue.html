@@ -109,6 +109,17 @@
             <i class="bi bi-send-fill"></i> 今すぐ投稿
           </button>
         </form>
+        {% if not loop.first %}
+        <button class="btn btn-outline-warning btn-sm" style="font-size:.8rem"
+                onclick="prioritizeArticle({{ a.id }}, this)"
+                title="現在の先頭記事とスケジュール枠を入れ替えて、この投稿を次の投稿にします">
+          <i class="bi bi-arrow-bar-up"></i> この投稿を最優先にする
+        </button>
+        {% else %}
+        <span class="badge badge-queued align-self-stretch text-center" style="font-size:.72rem;padding:.35rem">
+          <i class="bi bi-arrow-bar-up"></i> 次の投稿
+        </span>
+        {% endif %}
         <button class="btn btn-outline-info btn-sm" style="font-size:.8rem"
                 onclick="toggleSchedule({{ a.id }})">
           <i class="bi bi-calendar3"></i> 日時指定
@@ -417,6 +428,50 @@ function setSchedule(id) {
   }).then(r => r.json()).then(d => {
     if (d.success) { location.reload(); }
     else { alert('エラー: ' + d.error); }
+  });
+}
+
+// ── 割り込み（この投稿を次の投稿にする） ────────────────────────────────
+function showQueueToast(message) {
+  const existing = document.getElementById('queue-toast');
+  if (existing) existing.remove();
+  const toast = document.createElement('div');
+  toast.id = 'queue-toast';
+  toast.textContent = message;
+  toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);' +
+    'background:#2e2e2e;color:#fff;padding:10px 20px;border-radius:10px;' +
+    'box-shadow:0 4px 16px rgba(0,0,0,.28);z-index:3000;font-size:.9rem;white-space:nowrap';
+  document.body.appendChild(toast);
+  setTimeout(() => { if (toast.parentNode) toast.remove(); }, 3000);
+}
+
+function prioritizeArticle(id, btn) {
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  fetch('/queue/' + id + '/prioritize', {
+    method: 'POST',
+    headers: { 'X-Requested-With': 'fetch' }
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (d.success) {
+      showQueueToast('⏫ この投稿を次の投稿にしました');
+      setTimeout(() => location.reload(), 900);
+    } else if (d.already_head) {
+      btn.disabled = false;
+      btn.innerHTML = orig;
+      showQueueToast('この投稿はすでに次の投稿です');
+    } else {
+      btn.disabled = false;
+      btn.innerHTML = orig;
+      alert('割り込みに失敗しました: ' + (d.error || ''));
+    }
+  })
+  .catch(() => {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+    alert('通信エラーが発生しました');
   });
 }
 

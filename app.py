@@ -1302,6 +1302,57 @@ def reorder_queue():
         return jsonify({"success": False, "error": str(exc)})
 
 
+@app.route("/queue/<int:id>/prioritize", methods=["POST"])
+def prioritize_queue_article(id):
+    """選択したキュー記事を「次に投稿される1件」に割り込ませる。
+
+    現在キューの先頭（次に投稿される予定）の記事と scheduled_at をスワップするだけで、
+    投稿スケジュールの枠（時刻）自体は変更しない。元々先頭だった記事は2番目にずれる。
+    対象は選択記事と同じアカウントのキューに限定し、他アカウントには影響しない。
+    選択記事が既に先頭の場合は何もしない。
+    """
+    from datetime import timedelta
+
+    article = Article.query.get_or_404(id)
+    if article.status != "queued":
+        return jsonify({"success": False, "error": "この記事はキューにありません"})
+
+    legacy = get_active_account(app)
+    legacy_id = legacy["id"] if legacy else None
+    account_id = article.account_id if article.account_id is not None else legacy_id
+
+    scoped = _account_query_scope(
+        Article.query.filter_by(status="queued"), Article, account_id, legacy_id
+    )
+    queued = scoped.order_by(
+        Article.scheduled_at.asc().nullsfirst(), Article.created_at.asc()
+    ).all()
+
+    if not queued:
+        return jsonify({"success": False, "error": "キューが空です"})
+
+    head = queued[0]
+    if head.id == article.id:
+        return jsonify({"success": False, "already_head": True,
+                        "error": "この投稿はすでに次の投稿です"})
+
+    # scheduled_at をスワップ（スケジュール枠自体は変えない）
+    head.scheduled_at, article.scheduled_at = article.scheduled_at, head.scheduled_at
+
+    # 両方 scheduled_at=None など、スワップしても並び順が変わらない場合は
+    # created_at を繰り上げて確実に先頭へ出す
+    if article.scheduled_at == head.scheduled_at:
+        article.created_at = (head.created_at or datetime.utcnow()) - timedelta(seconds=1)
+
+    db.session.commit()
+    logger.info(
+        "[prioritize] account_id=%s id=%d を先頭へ（旧先頭 id=%d とスワップ）"
+        " new_head_scheduled=%s old_head_scheduled=%s",
+        account_id, article.id, head.id, article.scheduled_at, head.scheduled_at,
+    )
+    return jsonify({"success": True})
+
+
 # ── 設定 ───────────────────────────────────────────────────────────────────
 
 
