@@ -18,6 +18,7 @@ certs/
 
 # ログファイル
 *.log
+logs/
 
 # バイナリ
 cloudflared.exe

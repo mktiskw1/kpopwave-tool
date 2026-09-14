@@ -1,6 +1,8 @@
+import functools
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -23,6 +25,33 @@ _JST = ZoneInfo("Asia/Tokyo")
 _UTC = ZoneInfo("UTC")
 _DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 _DEFAULT_TIMES = ["07:00", "12:00", "15:00", "18:00", "21:00"]
+
+# 日次/定期ジョブの既定misfire猶予(秒)。PCスリープ等でスケジュール実行時刻を過ぎても、
+# この時間内にプロセスが動いていれば実行を試みる(APScheduler既定値は1秒しかなく、
+# 数秒でもスリープで遅れると実行自体がスキップされていた。2026-09-10に日次ジョブが
+# 丸ごと欠落した件の根本原因)。
+_DAILY_MISFIRE_GRACE = 6 * 3600   # 日次系: 6時間
+_INTERVAL_MISFIRE_GRACE = 1800    # 短間隔系: 30分
+_POST_MISFIRE_GRACE = 3600        # 投稿系: 1時間(interval_post_backupが5分毎の安全網になる)
+
+
+def _logged_job(name: str):
+    """ジョブ関数の開始・終了・例外をログに残すデコレータ(logs/scheduler.log参照)。
+    例外は再送出し、APScheduler自身の失敗処理・次回実行時刻の計算は従来通り動作させる。"""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            t0 = time.monotonic()
+            logger.info("[job:%s] 開始", name)
+            try:
+                result = func(*args, **kwargs)
+            except Exception:
+                logger.exception("[job:%s] 異常終了 (%.1fs)", name, time.monotonic() - t0)
+                raise
+            logger.info("[job:%s] 正常終了 (%.1fs)", name, time.monotonic() - t0)
+            return result
+        return wrapper
+    return decorator
 
 
 # ── ユーティリティ ─────────────────────────────────────────────────────────────
@@ -71,6 +100,57 @@ def set_weekly_schedule(app, schedule_dict: dict, account_id: int = None) -> Non
     schedule_key = "weekly_schedule" if is_legacy else f"weekly_schedule_{resolved_id}"
     with app.app_context():
         Setting.set(schedule_key, json.dumps(schedule_dict))
+
+
+def prioritize_article(app, article_id: int) -> tuple[bool, dict]:
+    """選択したキュー記事を「次に投稿される1件」に割り込ませる。
+
+    現在キューの先頭（次に投稿される予定）の記事と scheduled_at をスワップするだけで、
+    投稿スケジュールの枠（時刻）自体は変更しない。元々先頭だった記事は2番目にずれる。
+    対象は選択記事と同じアカウントのキューに限定し、他アカウントには影響しない。
+    /queue/<id>/prioritize エンドポイント（app.py）と _buzz_requeue_job の共通ロジック。
+    """
+    with app.app_context():
+        article = Article.query.get(article_id)
+        if not article:
+            return False, {"error": "記事が見つかりません"}
+        if article.status != "queued":
+            return False, {"error": "この記事はキューにありません"}
+
+        legacy = get_active_account(app)
+        legacy_id = legacy["id"] if legacy else None
+        account_id = article.account_id if article.account_id is not None else legacy_id
+
+        query = Article.query.filter_by(status="queued")
+        if account_id is not None:
+            if account_id == legacy_id:
+                query = query.filter(or_(Article.account_id == account_id, Article.account_id.is_(None)))
+            else:
+                query = query.filter(Article.account_id == account_id)
+        queued = query.order_by(Article.scheduled_at.asc().nullsfirst(), Article.created_at.asc()).all()
+
+        if not queued:
+            return False, {"error": "キューが空です"}
+
+        head = queued[0]
+        if head.id == article.id:
+            return True, {"already_head": True}
+
+        # scheduled_at をスワップ（スケジュール枠自体は変えない）
+        head.scheduled_at, article.scheduled_at = article.scheduled_at, head.scheduled_at
+
+        # 両方 scheduled_at=None など、スワップしても並び順が変わらない場合は
+        # created_at を繰り上げて確実に先頭へ出す
+        if article.scheduled_at == head.scheduled_at:
+            article.created_at = (head.created_at or datetime.utcnow()) - timedelta(seconds=1)
+
+        db.session.commit()
+        logger.info(
+            "[prioritize] account_id=%s id=%d を先頭へ（旧先頭 id=%d とスワップ）"
+            " new_head_scheduled=%s old_head_scheduled=%s",
+            account_id, article.id, head.id, article.scheduled_at, head.scheduled_at,
+        )
+        return True, {"swapped_with": head.id}
 
 
 def next_post_slot(app, account_id: int = None) -> datetime | None:
@@ -532,6 +612,150 @@ def _rollover_overdue_for_account(app, account_id, now_utc, rollover_threshold):
         db.session.commit()
 
 
+_BUZZ_REQUEUE_ACCOUNT_ID = 1  # KPOPアカウント。他ジョブ(_post_stats_job等)と同じ規約
+
+
+def _buzz_requeue_candidate(app, account_id: int) -> Article | None:
+    """自動再キュー対象(最終投稿日が最も古いもの)を1件返す。無ければNone。
+
+    「200いいね以上を達成し永久保存されている動画」は、_video_cleanup_job の
+    削除ルールを生き延びた status='posted' の動画そのものとして扱う
+    (200未満だった動画は7日後に削除されるため、残っている＝達成済み、または
+    2・3回目の猶予期間中)。
+    """
+    with app.app_context():
+        interval_days = int(Setting.get("buzz_requeue_interval_days", "60") or "60")
+        cutoff = datetime.utcnow() - timedelta(days=interval_days)
+        return (
+            Article.query
+            .filter(
+                Article.account_id == account_id,
+                Article.status == "posted",
+                Article.content_type == "video",
+                Article.video_file_path.isnot(None),
+                Article.posted_at.isnot(None),
+                Article.posted_at <= cutoff,
+            )
+            .order_by(Article.posted_at.asc())
+            .first()
+        )
+
+
+@_logged_job("buzz_requeue")
+def _buzz_requeue_job(app, account_id: int = _BUZZ_REQUEUE_ACCOUNT_ID) -> None:
+    """バズった動画(200いいね達成・永久保存)を自動で再キューする。
+
+    複数対象がある場合も1日1件のみ処理する(ジョブ自体がその日1回しか実行されないため)。
+    キュー追加後、既存の割り込み機能と同じロジックでその日の1番目の投稿枠に割り込ませる。
+    グループ・メンバーのタグ(group_id/member_id)や動画ファイルは同じArticle行を
+    再利用するため自動的に引き継がれる。
+    """
+    # candidate/slot の算出はそれぞれ内部で独立した app_context を使う(next_post_slot等)。
+    # Flask-SQLAlchemyのセッションはapp_contextインスタンス単位でスコープされるため、
+    # ここで取得したオブジェクトをそのまま後段のcommitで書き換えても保存されない。
+    # そのため book-keeping (更新・commit) は最後に1つの app_context 内で
+    # id から取得し直してから行う。
+    candidate = _buzz_requeue_candidate(app, account_id)
+    if not candidate:
+        logger.info("[buzz_requeue] account_id=%s 再キュー対象なし", account_id)
+        return
+    article_id = candidate.id
+
+    slot = next_post_slot(app, account_id)
+    if slot is None:
+        logger.warning(
+            "[buzz_requeue] account_id=%s id=%d 空きスロットなし → 見送り",
+            account_id, article_id,
+        )
+        return
+
+    with app.app_context():
+        article = Article.query.get(article_id)
+        if not article or article.status != "posted":
+            logger.warning(
+                "[buzz_requeue] account_id=%s id=%d 状態が変化したため見送り(status=%s)",
+                account_id, article_id, article.status if article else None,
+            )
+            return
+
+        # track_post_stats は posted_at の更新を検知して自動的に新サイクルとして
+        # 追跡を再開する(analytics_tracker.track_post_stats参照)ため、ここでは
+        # post_stats の履歴を消さずそのまま残す(過去の投稿実績として分析に使える)。
+        article.status = "queued"
+        article.scheduled_at = slot
+        article.threads_post_id = None
+        article.buzz_repost_count = (article.buzz_repost_count or 1) + 1
+        new_repost_count = article.buzz_repost_count
+        db.session.commit()
+        logger.info(
+            "[buzz_requeue] account_id=%s id=%d を再キュー(%d回目の投稿) slot=%s",
+            account_id, article_id, new_repost_count, slot,
+        )
+
+    success, info = prioritize_article(app, article_id)
+    if not success:
+        logger.warning(
+            "[buzz_requeue] account_id=%s id=%d 先頭化失敗: %s", account_id, article_id, info,
+        )
+    else:
+        logger.info("[buzz_requeue] account_id=%s id=%d をその日の1番目の投稿枠へ", account_id, article_id)
+
+
+def _shift_day_and_time(day_key: str, hour: int, minute: int, delta_hours: int) -> tuple[str, int, int]:
+    """day_key(mon..sun) の hour:minute から delta_hours 時間ずらした (day_key, hour, minute) を返す。"""
+    idx = _DAY_KEYS.index(day_key)
+    # 2000-01-03 は月曜日なので、_DAY_KEYS のインデックスとそのまま対応する
+    dummy = datetime(2000, 1, 3 + idx, hour, minute) + timedelta(hours=delta_hours)
+    return _DAY_KEYS[dummy.weekday()], dummy.hour, dummy.minute
+
+
+def _setup_buzz_requeue_jobs(app, account_id: int = _BUZZ_REQUEUE_ACCOUNT_ID):
+    """その日の1投稿目の1時間前に自動再キュージョブが実行されるようCronJobを設定する。
+
+    _setup_weekly_post_jobs と同じタイミング(起動時・投稿スケジュール変更時)で
+    呼び出すことで、スケジュール変更に自動追従する。
+    """
+    for job in scheduler.get_jobs():
+        if job.id.startswith("buzz_requeue_"):
+            scheduler.remove_job(job.id)
+
+    schedule = get_weekly_schedule(app, account_id)
+    job_count = 0
+    for day, times in schedule.items():
+        parsed_times = []
+        for t in times or []:
+            t = t.strip()
+            if not t:
+                continue
+            try:
+                h, m = map(int, t.split(":"))
+                parsed_times.append((h, m))
+            except Exception:
+                continue
+        if not parsed_times:
+            continue
+
+        first_h, first_m = min(parsed_times)
+        run_day, run_h, run_m = _shift_day_and_time(day, first_h, first_m, -1)
+        try:
+            scheduler.add_job(
+                _buzz_requeue_job,
+                CronTrigger(day_of_week=run_day, hour=run_h, minute=run_m, timezone="Asia/Tokyo"),
+                args=[app, account_id],
+                id=f"buzz_requeue_{day}",
+                replace_existing=True,
+                misfire_grace_time=_DAILY_MISFIRE_GRACE,
+            )
+            job_count += 1
+        except Exception as exc:
+            logger.error(
+                "Invalid buzz-requeue schedule day=%s (1投稿目 %02d:%02d): %s",
+                day, first_h, first_m, exc,
+            )
+
+    logger.info("バズ再キュージョブ設定完了: %d件", job_count)
+
+
 # ── スケジューラーセットアップ ─────────────────────────────────────────────────
 
 def _setup_weekly_post_jobs(app):
@@ -568,6 +792,7 @@ def _setup_weekly_post_jobs(app):
                         args=[app, account_id],
                         id=f"cron_post_{account_id}_{day}_{i}",
                         replace_existing=True,
+                        misfire_grace_time=_POST_MISFIRE_GRACE,
                     )
                     job_count += 1
                 except Exception as exc:
@@ -576,6 +801,7 @@ def _setup_weekly_post_jobs(app):
     logger.info("投稿ジョブ設定完了: %d件 (%dアカウント)", job_count, len(account_ids))
 
 
+@_logged_job("engagement_daily")
 def _engagement_job(app):
     """投稿済み記事のいいね数をThreads APIから取得してDBに保存する（毎日1回）。"""
     from engagement_tracker import refresh_engagement
@@ -587,25 +813,65 @@ def _engagement_job(app):
     )
 
 
+@_logged_job("video_cleanup")
 def _video_cleanup_job(app):
-    """投稿済み動画ファイルのうち7日経過・いいね200未満のものを削除する（毎日1回）。"""
+    """投稿済み動画のうち7日経過したものを判定し、200いいね未満なら削除する（毎日1回）。
+
+    バズ動画自動再キュー機能により、以下の猶予ルールが適用される
+    (buzz_repost_count は通算の投稿回数。初回投稿=1、1回目の再投稿=2、…):
+    - 初回投稿(buzz_repost_count<=1)で200未満: 従来通り即削除。
+    - 2・3回目の投稿で200未満: 即削除せず、次回の再キュー対象として残す。
+      ただし2回目・3回目 両方とも200未満だった場合は3回目の判定時点で削除する
+      (buzz_low_streak で直近判定が猶予付きの200未満だったかを追跡)。
+    - 4回目以降の投稿で200未満: 猶予なしで即削除する。
+    - 200以上を達成した場合は回数に関わらず削除せず保持する
+      (posted_atが最終投稿日として機能し、再キュー間隔経過後に再び対象になる)。
+    """
     import os
     cutoff = datetime.utcnow() - timedelta(days=7)
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
     videos_dir = os.path.join(static_dir, "videos")
 
     with app.app_context():
-        targets = (
+        candidates = (
             Article.query
             .filter(
                 Article.status == "posted",
                 Article.content_type == "video",
                 Article.video_file_path.isnot(None),
                 Article.posted_at < cutoff,
-                or_(Article.like_count.is_(None), Article.like_count < 200),
             )
             .all()
         )
+
+        targets = []
+        dirty = False
+        kept_grace = 0
+        for article in candidates:
+            likes = article.like_count or 0
+            repost_count = article.buzz_repost_count or 1
+
+            if likes >= 200:
+                if article.buzz_low_streak:
+                    article.buzz_low_streak = False
+                    dirty = True
+                continue
+
+            if repost_count in (2, 3):
+                if article.buzz_low_streak:
+                    # 2回目・3回目 両方とも200未満 → 3回目の判定時点で削除
+                    targets.append(article)
+                else:
+                    article.buzz_low_streak = True
+                    dirty = True
+                    kept_grace += 1
+                continue
+
+            # 初回投稿、または4回目以降の投稿 → 猶予なし
+            targets.append(article)
+
+        if kept_grace:
+            logger.info("[_video_cleanup_job] 猶予により削除を見送り: %d件", kept_grace)
 
         deleted_files = 0
         for article in targets:
@@ -633,7 +899,7 @@ def _video_cleanup_job(app):
 
             db.session.delete(article)
 
-        if targets:
+        if targets or dirty:
             db.session.commit()
 
         logger.info("動画クリーンアップ: %d件対象 %dファイル削除 %dレコード削除", len(targets), deleted_files, len(targets))
@@ -642,6 +908,7 @@ def _video_cleanup_job(app):
 _ORPHAN_VIDEO_MIN_AGE_DAYS = 3
 
 
+@_logged_job("orphan_video_cleanup")
 def _orphan_video_cleanup_job(app):
     """static/videos/ 内で、DB上のどのファイルパス列からも参照されておらず、かつ
     最終更新から一定日数(_ORPHAN_VIDEO_MIN_AGE_DAYS)経過したファイルを削除する。
@@ -707,6 +974,7 @@ _THREADS_TOKEN_LIFETIME_DAYS = 60
 _THREADS_REFRESH_URL = "https://graph.threads.net/refresh_access_token"
 
 
+@_logged_job("refresh_threads_tokens")
 def _refresh_threads_tokens_job(app):
     """Threads長期アクセストークンを失効前に自動更新する（日次）。
 
@@ -773,6 +1041,7 @@ def _refresh_threads_tokens_job(app):
             )
 
 
+@_logged_job("post_stats_daily")
 def _post_stats_job(app):
     """KPOPアカウント（account_id=1）の投稿別7日間パフォーマンスを日次取得する。"""
     from analytics_tracker import track_post_stats
@@ -789,6 +1058,7 @@ def _early_engagement_job(app):
     _check_and_advance_on_zero_engagement(app, account_id=1)
 
 
+@_logged_job("daily_snapshot")
 def _daily_snapshot_job(app):
     """KPOPアカウント（account_id=1）のフォロワー数・閲覧数を日次スナップショットする。"""
     from analytics_tracker import snapshot_daily_stats
@@ -799,6 +1069,7 @@ def _daily_snapshot_job(app):
 def setup_scheduler(app):
     """スケジューラを初期化して起動する。"""
     _setup_weekly_post_jobs(app)
+    _setup_buzz_requeue_jobs(app)
 
     # バックアップ投稿ジョブ: CronTrigger が missed/競合した場合でも5分以内に投稿を実行する
     # ID は "cron_post_" で始まらない名前にして _setup_weekly_post_jobs で削除されないようにする
@@ -808,6 +1079,7 @@ def setup_scheduler(app):
         args=[app],
         id="interval_post_backup",
         replace_existing=True,
+        misfire_grace_time=_INTERVAL_MISFIRE_GRACE,
     )
 
     scheduler.add_job(
@@ -816,6 +1088,7 @@ def setup_scheduler(app):
         args=[app],
         id="rollover_overdue",
         replace_existing=True,
+        misfire_grace_time=_INTERVAL_MISFIRE_GRACE,
     )
 
     scheduler.add_job(
@@ -824,6 +1097,7 @@ def setup_scheduler(app):
         args=[app],
         id="collect_comments",
         replace_existing=True,
+        misfire_grace_time=_INTERVAL_MISFIRE_GRACE,
     )
 
     scheduler.add_job(
@@ -832,6 +1106,7 @@ def setup_scheduler(app):
         args=[app],
         id="early_engagement",
         replace_existing=True,
+        misfire_grace_time=_INTERVAL_MISFIRE_GRACE,
     )
 
     scheduler.add_job(
@@ -840,6 +1115,7 @@ def setup_scheduler(app):
         args=[app],
         id="engagement_daily",
         replace_existing=True,
+        misfire_grace_time=_DAILY_MISFIRE_GRACE,
     )
 
     scheduler.add_job(
@@ -848,6 +1124,7 @@ def setup_scheduler(app):
         args=[app],
         id="video_cleanup",
         replace_existing=True,
+        misfire_grace_time=_DAILY_MISFIRE_GRACE,
     )
 
     scheduler.add_job(
@@ -856,6 +1133,7 @@ def setup_scheduler(app):
         args=[app],
         id="orphan_video_cleanup",
         replace_existing=True,
+        misfire_grace_time=_DAILY_MISFIRE_GRACE,
     )
 
     scheduler.add_job(
@@ -864,6 +1142,7 @@ def setup_scheduler(app):
         args=[app],
         id="refresh_threads_tokens",
         replace_existing=True,
+        misfire_grace_time=_DAILY_MISFIRE_GRACE,
     )
 
     scheduler.add_job(
@@ -872,6 +1151,7 @@ def setup_scheduler(app):
         args=[app],
         id="post_stats_daily",
         replace_existing=True,
+        misfire_grace_time=_DAILY_MISFIRE_GRACE,
     )
 
     scheduler.add_job(
@@ -880,9 +1160,14 @@ def setup_scheduler(app):
         args=[app],
         id="daily_snapshot",
         replace_existing=True,
+        misfire_grace_time=_DAILY_MISFIRE_GRACE,
     )
 
-    app.reschedule_post_jobs = lambda: _setup_weekly_post_jobs(app)
+    def _reschedule_post_jobs():
+        _setup_weekly_post_jobs(app)
+        _setup_buzz_requeue_jobs(app)
+
+    app.reschedule_post_jobs = _reschedule_post_jobs
 
     scheduler.start()
     logger.info(

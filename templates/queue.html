@@ -40,6 +40,12 @@
           {% else %}
           <span class="badge bg-secondary" style="font-size:.72rem;opacity:.6">時間未設定</span>
           {% endif %}
+          {% if (a.buzz_repost_count or 1) > 1 %}
+          <span class="badge bg-warning-subtle text-warning-emphasis ms-1" style="font-size:.7rem"
+                title="バズ動画自動再キューにより投稿された回数(初回投稿を1回目として通算)">
+            🔁 再投稿 {{ a.buzz_repost_count }}回目
+          </span>
+          {% endif %}
         </div>
         <div style="font-size:.88rem;font-weight:600">
           {% if (a.content_type or 'article') == 'text' %}

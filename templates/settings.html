@@ -286,12 +286,21 @@
             定期収集の間隔（時間単位）。変更は次回起動時に反映されます。
           </div>
         </div>
-        <div class="form-check mb-0">
+        <div class="form-check mb-3">
           <input type="checkbox" class="form-check-input" name="early_advance_enabled" id="early_advance_enabled"
                  {% if settings.early_advance_enabled %}checked{% endif %}>
           <label class="form-check-label" for="early_advance_enabled" style="font-size:.85rem">
             前倒し投稿（KPOPアカウント、投稿後60分いいね0で次の投稿を前倒し、連鎖は最大2回まで）
           </label>
+        </div>
+        <div class="mb-0">
+          <label class="form-label" style="font-size:.85rem">バズ動画 自動再キュー間隔（日）</label>
+          <input type="number" class="form-control" name="buzz_requeue_interval_days"
+                 value="{{ settings.buzz_requeue_interval_days }}" min="1" style="max-width:100px">
+          <div class="form-text" style="font-size:.75rem">
+            200いいね達成・永久保存された動画を、最終投稿日からこの日数以上経過後に
+            その日の1投稿目として自動で再キューします（KPOPアカウント）。
+          </div>
         </div>
       </div>
     </div>

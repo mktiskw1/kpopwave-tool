@@ -7,6 +7,7 @@ import threading
 import unicodedata
 import uuid
 from datetime import datetime, timedelta
+from logging.handlers import RotatingFileHandler
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
@@ -22,7 +23,24 @@ from database import (
 )
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+# ログはコンソールに加え logs/scheduler.log にもローテーション付きで残す。
+# コンソールのみだと、ターミナルを閉じた時点でジョブ失敗などの記録が完全に失われるため
+# (2026-09の日次ジョブ欠落調査で、DBの記録パターンからの逆算でしか原因究明できなかった経緯がある)。
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+_log_formatter = logging.Formatter(_LOG_FORMAT)
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_log_formatter)
+_file_handler = RotatingFileHandler(
+    os.path.join(_LOG_DIR, "scheduler.log"),
+    maxBytes=5 * 1024 * 1024,  # 5MB
+    backupCount=5,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(_log_formatter)
+logging.basicConfig(level=logging.INFO, handlers=[_console_handler, _file_handler])
 logger = logging.getLogger(__name__)
 
 # yt-dlpの部分ダウンロード可否チェック(FFmpegFD.available())はffmpeg_locationを見ず
@@ -118,6 +136,8 @@ def _migrate_db():
         ("group_id", "INTEGER"),
         ("member_id", "INTEGER"),
         ("is_favorite", "INTEGER DEFAULT 0"),
+        ("buzz_repost_count", "INTEGER DEFAULT 1"),
+        ("buzz_low_streak", "INTEGER DEFAULT 0"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -306,6 +326,7 @@ def _init_default_settings():
         "meta_app_secret": os.getenv("META_APP_SECRET", ""),
         "app_base_url": os.getenv("APP_BASE_URL", "http://localhost:5000"),
         "youtube_channels": json.dumps(DEFAULT_YOUTUBE_CHANNELS),
+        "buzz_requeue_interval_days": "60",
     }
     for key, value in defaults.items():
         if not Setting.query.filter_by(key=key).first():
@@ -653,17 +674,25 @@ def pending():
 
     all_groups = Group.query.order_by(Group.name.asc()).all()
     group_by_id = {g.id: g for g in all_groups}
+    member_ids = {a.member_id for a in articles if a.member_id}
+    member_by_id = {m.id: m for m in Member.query.filter(Member.id.in_(member_ids)).all()} if member_ids else {}
     group_tag_map = {}
+    article_tags = {}
     for a in articles:
         if a.group_id and a.group_id in group_by_id:
             group_tag_map[a.id] = group_by_id[a.group_id].name
         else:
             group_tag_map[a.id] = _guess_group_tag(a.title, all_groups)
+        # タグ編集モーダルの初期値用: 推測ではない実際のタグのみを保持する
+        article_tags[a.id] = {
+            "group": group_by_id[a.group_id].name if a.group_id and a.group_id in group_by_id else "",
+            "member": member_by_id[a.member_id].name if a.member_id and a.member_id in member_by_id else "",
+        }
 
     return render_template("pending.html", articles=articles, images_map=images_map,
                            active_tab=tab, counts=counts, now_utc=datetime.utcnow(),
                            active_trim_jobs=active_trim_jobs, active_chapter_jobs=active_chapter_jobs,
-                           all_groups=all_groups, group_tag_map=group_tag_map,
+                           all_groups=all_groups, group_tag_map=group_tag_map, article_tags=article_tags,
                            early_engagement_map=early_engagement_map)
 
 
@@ -839,6 +868,34 @@ def approve_article(id):
     return redirect(url_for("pending"))
 
 
+@app.route("/articles/<int:id>/tag", methods=["POST"])
+def tag_article(id):
+    """記事のグループ・メンバータグだけを更新する(statusは変更しない)。
+
+    承認フロー導入前の投稿など、承認時にタグ付けできなかった記事を後から
+    正しくタグ付け・修正するための軽量エンドポイント。group_name を空で送ると
+    タグを解除する(_resolve_group_and_member の仕様通り)。
+    """
+    article = Article.query.get_or_404(id)
+
+    data = request.get_json(silent=True) or {}
+    group_name = data.get("group_name", "")
+    member_name = data.get("member_name", "")
+
+    group_id, member_id = _resolve_group_and_member(group_name, member_name)
+    article.group_id = group_id
+    article.member_id = member_id
+    db.session.commit()
+
+    group = Group.query.get(group_id) if group_id else None
+    member = Member.query.get(member_id) if member_id else None
+    return jsonify({
+        "ok": True,
+        "group_name": group.name if group else "",
+        "member_name": member.name if member else "",
+    })
+
+
 @app.route("/articles/<int:id>/reject", methods=["POST"])
 def reject_article(id):
     article = Article.query.get_or_404(id)
@@ -854,7 +911,7 @@ _ARTICLE_RESTORE_FIELDS = [
     "error_message", "created_at", "like_count", "view_count", "reply_count",
     "repost_count", "quote_count", "engagement_fetched_at", "post_style",
     "image_urls", "content_type", "video_file_path", "is_fancam", "account_id",
-    "group_id", "member_id",
+    "group_id", "member_id", "buzz_repost_count", "buzz_low_streak",
 ]
 _ARTICLE_DATETIME_FIELDS = {
     "published_at", "scheduled_at", "posted_at", "created_at", "engagement_fetched_at",
@@ -1304,52 +1361,15 @@ def reorder_queue():
 
 @app.route("/queue/<int:id>/prioritize", methods=["POST"])
 def prioritize_queue_article(id):
-    """選択したキュー記事を「次に投稿される1件」に割り込ませる。
+    """選択したキュー記事を「次に投稿される1件」に割り込ませる（scheduler.prioritize_article参照）。"""
+    from scheduler import prioritize_article
 
-    現在キューの先頭（次に投稿される予定）の記事と scheduled_at をスワップするだけで、
-    投稿スケジュールの枠（時刻）自体は変更しない。元々先頭だった記事は2番目にずれる。
-    対象は選択記事と同じアカウントのキューに限定し、他アカウントには影響しない。
-    選択記事が既に先頭の場合は何もしない。
-    """
-    from datetime import timedelta
-
-    article = Article.query.get_or_404(id)
-    if article.status != "queued":
-        return jsonify({"success": False, "error": "この記事はキューにありません"})
-
-    legacy = get_active_account(app)
-    legacy_id = legacy["id"] if legacy else None
-    account_id = article.account_id if article.account_id is not None else legacy_id
-
-    scoped = _account_query_scope(
-        Article.query.filter_by(status="queued"), Article, account_id, legacy_id
-    )
-    queued = scoped.order_by(
-        Article.scheduled_at.asc().nullsfirst(), Article.created_at.asc()
-    ).all()
-
-    if not queued:
-        return jsonify({"success": False, "error": "キューが空です"})
-
-    head = queued[0]
-    if head.id == article.id:
+    success, info = prioritize_article(app, id)
+    if not success:
+        return jsonify({"success": False, "error": info.get("error", "エラーが発生しました")})
+    if info.get("already_head"):
         return jsonify({"success": False, "already_head": True,
                         "error": "この投稿はすでに次の投稿です"})
-
-    # scheduled_at をスワップ（スケジュール枠自体は変えない）
-    head.scheduled_at, article.scheduled_at = article.scheduled_at, head.scheduled_at
-
-    # 両方 scheduled_at=None など、スワップしても並び順が変わらない場合は
-    # created_at を繰り上げて確実に先頭へ出す
-    if article.scheduled_at == head.scheduled_at:
-        article.created_at = (head.created_at or datetime.utcnow()) - timedelta(seconds=1)
-
-    db.session.commit()
-    logger.info(
-        "[prioritize] account_id=%s id=%d を先頭へ（旧先頭 id=%d とスワップ）"
-        " new_head_scheduled=%s old_head_scheduled=%s",
-        account_id, article.id, head.id, article.scheduled_at, head.scheduled_at,
-    )
     return jsonify({"success": True})
 
 
@@ -1363,7 +1383,8 @@ def settings():
                     "collect_interval_hours",
                     "youtube_api_key", "youtube_collect_interval_hours",
                     "youtube_min_view_count", "youtube_max_view_count",
-                    "meta_app_id", "meta_app_secret", "app_base_url"):
+                    "meta_app_id", "meta_app_secret", "app_base_url",
+                    "buzz_requeue_interval_days"):
             Setting.set(key, (request.form.get(key) or "").strip())
 
         # Threads 認証情報は「手動で上書き」欄。空送信では絶対に消さない
@@ -1458,6 +1479,7 @@ def settings():
         "youtube_max_view_count": Setting.get("youtube_max_view_count", "0"),
         "test_mode": Setting.get("test_mode", "true") == "true",
         "early_advance_enabled": Setting.get("early_advance_enabled", "true") == "true",
+        "buzz_requeue_interval_days": Setting.get("buzz_requeue_interval_days", "60"),
         "rss_feeds": json.loads(Setting.get("rss_feeds", "[]") or "[]"),
         "youtube_channels": json.loads(Setting.get("youtube_channels", "[]") or "[]"),
         "meta_app_id": Setting.get("meta_app_id"),

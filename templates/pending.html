@@ -102,9 +102,7 @@
                  class="form-check-input article-cb mt-0 flex-shrink-0"
                  onchange="updateSelection()">
           <span class="badge bg-secondary" style="font-size:.72rem">{{ a.feed_source }}</span>
-          {% if group_tag_map and group_tag_map.get(a.id) %}
-          <span class="badge bg-info-subtle text-info-emphasis" style="font-size:.72rem">{{ group_tag_map[a.id] }}</span>
-          {% endif %}
+          <span id="group-badge-{{ a.id }}" class="badge bg-info-subtle text-info-emphasis{% if not (group_tag_map and group_tag_map.get(a.id)) %} d-none{% endif %}" style="font-size:.72rem">{{ group_tag_map.get(a.id) if group_tag_map else '' }}</span>
           {% if a.published_at %}
           <span style="font-size:.75rem;color:#666">{{ a.published_at.strftime('%Y/%m/%d') }}</span>
           {% endif %}
@@ -118,6 +116,12 @@
             <i class="bi {% if a.is_favorite %}bi-star-fill{% else %}bi-star{% endif %}"></i>
           </button>
           {% if active_tab == 'posted' %}
+          {% if nav_is_kpop_account %}
+          <button type="button" class="btn btn-outline-secondary btn-sm px-2" title="タグ編集"
+                  onclick="editTag({{ a.id }}, this)">
+            🏷️ タグ編集
+          </button>
+          {% endif %}
           <button type="button" class="btn btn-primary btn-sm px-2" title="承認待ちに戻して再投稿"
                   onclick="requeueArticle({{ a.id }}, this)">
             🔄 再投稿
@@ -158,6 +162,12 @@
             📤 最終投稿日:
             <strong style="color:var(--text)">{{ (a.posted_at | utc_to_jst).strftime('%Y/%m/%d') }}</strong>
             <span style="color:var(--accent)">&nbsp;（{{ (now_utc - a.posted_at).days }}日前）</span>
+          </span>
+          {% endif %}
+          {% if (a.buzz_repost_count or 1) > 1 %}
+          <span class="badge bg-warning-subtle text-warning-emphasis ms-1" style="font-size:.7rem"
+                title="バズ動画自動再キューにより投稿された回数(初回投稿を1回目として通算)">
+            🔁 再投稿 {{ a.buzz_repost_count }}回目
           </span>
           {% endif %}
           {% endif %}
@@ -415,7 +425,7 @@
        onclick="event.stopPropagation()">
     <button type="button" onclick="closeTagModal()"
             style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:1.3rem;cursor:pointer;color:#888;line-height:1;padding:0">✕</button>
-    <h6 class="fw-bold mb-3" style="color:#000">グループ・メンバーを入力（任意）</h6>
+    <h6 id="tag-modal-title" class="fw-bold mb-3" style="color:#000">グループ・メンバーを入力（任意）</h6>
     <div class="mb-2" style="position:relative">
       <label class="form-label" style="font-size:.8rem">グループ名</label>
       <input type="text" id="tag-group-input" class="form-control form-control-sm"
@@ -431,7 +441,7 @@
     </div>
     <div class="d-flex gap-2 justify-content-end">
       <button type="button" class="btn btn-sm btn-outline-secondary" onclick="closeTagModal()">キャンセル</button>
-      <button type="button" class="btn btn-sm btn-success" onclick="confirmApprove()">承認してキューへ</button>
+      <button type="button" id="tag-modal-confirm-btn" class="btn btn-sm btn-success" onclick="confirmTagModal()">承認してキューへ</button>
     </div>
   </div>
 </div>
@@ -588,6 +598,9 @@ var ALL_GROUPS = [
   {% for g in all_groups %}{ id: {{ g.id }}, name: {{ g.name | tojson }} }{% if not loop.last %},{% endif %}{% endfor %}
 ];
 
+// ── 記事ごとの現在のタグ(推測ではない実際のgroup_id/member_idの名前) ──────────
+var ARTICLE_TAGS = {{ (article_tags or {}) | tojson }};
+
 function escHtmlPending(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
@@ -650,36 +663,91 @@ document.addEventListener('click', function(e) {
   }
 });
 
-// ── 承認（Ajax：ページ遷移なし） ───────────────────────────────────────
+// ── 承認 / タグ編集共通モーダル（Ajax：ページ遷移なし） ───────────────────
+let tagModalMode = 'approve';  // 'approve' | 'edit'
 let pendingApproveId = null;
 let pendingApproveBtn = null;
+let pendingEditId = null;
+let pendingEditBtn = null;
 
 function approveArticle(id, btn) {
   var modal = document.getElementById('tag-modal');
   if (modal) {
+    tagModalMode = 'approve';
     pendingApproveId = id;
     pendingApproveBtn = btn;
     document.getElementById('tag-group-input').value = '';
     document.getElementById('tag-member-input').value = '';
+    document.getElementById('tag-modal-title').textContent = 'グループ・メンバーを入力（任意）';
+    document.getElementById('tag-modal-confirm-btn').textContent = '承認してキューへ';
     modal.classList.remove('d-none');
     return;
   }
   doApprove(id, btn, '', '');
 }
 
+function editTag(id, btn) {
+  var modal = document.getElementById('tag-modal');
+  if (!modal) return;
+  tagModalMode = 'edit';
+  pendingEditId = id;
+  pendingEditBtn = btn;
+  var current = ARTICLE_TAGS[id] || { group: '', member: '' };
+  document.getElementById('tag-group-input').value = current.group || '';
+  document.getElementById('tag-member-input').value = current.member || '';
+  document.getElementById('tag-modal-title').textContent = 'グループ・メンバーを編集';
+  document.getElementById('tag-modal-confirm-btn').textContent = '保存';
+  modal.classList.remove('d-none');
+}
+
 function closeTagModal() {
   document.getElementById('tag-modal').classList.add('d-none');
   pendingApproveId = null;
   pendingApproveBtn = null;
+  pendingEditId = null;
+  pendingEditBtn = null;
 }
 
-function confirmApprove() {
+function confirmTagModal() {
   var groupName = document.getElementById('tag-group-input').value.trim();
   var memberName = document.getElementById('tag-member-input').value.trim();
-  var id = pendingApproveId;
-  var btn = pendingApproveBtn;
   document.getElementById('tag-modal').classList.add('d-none');
-  doApprove(id, btn, groupName, memberName);
+  if (tagModalMode === 'edit') {
+    doSaveTag(pendingEditId, pendingEditBtn, groupName, memberName);
+  } else {
+    doApprove(pendingApproveId, pendingApproveBtn, groupName, memberName);
+  }
+}
+
+function doSaveTag(id, btn, groupName, memberName) {
+  if (btn) { btn.disabled = true; }
+  var orig = btn ? btn.innerHTML : null;
+  if (btn) btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  fetch('/articles/' + id + '/tag', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_name: groupName, member_name: memberName })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+    if (!d.ok) { alert(d.error || 'タグの保存に失敗しました'); return; }
+    ARTICLE_TAGS[id] = { group: d.group_name || '', member: d.member_name || '' };
+    var badge = document.getElementById('group-badge-' + id);
+    if (badge) {
+      if (d.group_name) {
+        badge.textContent = d.group_name;
+        badge.classList.remove('d-none');
+      } else {
+        badge.textContent = '';
+        badge.classList.add('d-none');
+      }
+    }
+  })
+  .catch(function() {
+    if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+    alert('通信エラーが発生しました');
+  });
 }
 
 function doApprove(id, btn, groupName, memberName) {

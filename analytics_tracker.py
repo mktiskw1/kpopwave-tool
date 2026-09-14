@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
+from sqlalchemy import func
 
 from database import Article, DailyStat, PostStat, get_active_account, db
 
@@ -130,16 +131,19 @@ def track_early_engagement(app, account_id: int = 1) -> dict:
 def track_post_stats(app, account_id: int = 1) -> dict:
     """account_id の posted 記事のうち、7日確定値がまだ出ていないものを対象に
     Threads Media Insights を取得し post_stats に1行追加する。
-    day_index >= 7 に達した回で is_final=True を立て、以後その記事は対象から外れる。"""
+    day_index >= 7 に達した回で is_final=True を立て、以後その「投稿サイクル」は対象から外れる。
+
+    確定済みかどうかは article_id 単体ではなく、現在の posted_at との時系列比較で判定する
+    (is_finalな記録のうち最新のfetched_atが現posted_at以降なら確定済み)。これにより、
+    記事が再投稿されてposted_atが更新された場合、古いサイクルのis_final記録は「過去のもの」
+    とみなされ、新しいサイクルとして再び7日間の追跡が始まる。post_stats の行自体は
+    履歴として残し、削除はしない(複数回投稿された記事は分析上も複数の投稿実績として扱う)。
+    """
     _, token = _get_credentials(app, account_id)
     if not token:
         return {"error": "Threadsアクセストークン未設定", "updated": 0, "total": 0}
 
     with app.app_context():
-        finalized_ids = {
-            row[0] for row in
-            db.session.query(PostStat.article_id).filter(PostStat.is_final.is_(True)).distinct()
-        }
         candidates = (
             Article.query
             .filter(Article.account_id == account_id)
@@ -150,7 +154,19 @@ def track_post_stats(app, account_id: int = 1) -> dict:
             .with_entities(Article.id, Article.threads_post_id, Article.posted_at)
             .all()
         )
-        targets = [row for row in candidates if row[0] not in finalized_ids]
+        candidate_ids = [row[0] for row in candidates]
+        latest_final_fetched_at = dict(
+            db.session.query(PostStat.article_id, func.max(PostStat.fetched_at))
+            .filter(PostStat.article_id.in_(candidate_ids), PostStat.is_final.is_(True))
+            .group_by(PostStat.article_id)
+            .all()
+        ) if candidate_ids else {}
+
+        targets = [
+            row for row in candidates
+            if latest_final_fetched_at.get(row[0]) is None
+            or latest_final_fetched_at[row[0]] < row[2]
+        ]
 
     updated = errors = skipped = 0
     now = datetime.utcnow()

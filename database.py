@@ -60,6 +60,12 @@ class Article(db.Model):
     member_id = db.Column(db.Integer, db.ForeignKey("members.id"), nullable=True)
     # お気に入り(誤削除防止用のマーク)
     is_favorite = db.Column(db.Boolean, nullable=False, default=False)
+    # バズ動画自動再キュー機能
+    # 「Threads側のリポスト数」を表す既存のrepost_countと紛らわしいため別名にしている。
+    # 通算の投稿回数を表す(初回投稿=1、1回目の再投稿=2、2回目の再投稿=3、…)。
+    buzz_repost_count = db.Column(db.Integer, nullable=False, default=1)
+    # 再投稿2・3回目のいいね未達を1回だけ猶予するための直近判定フラグ(scheduler._video_cleanup_job参照)。
+    buzz_low_streak = db.Column(db.Boolean, nullable=False, default=False)
 
     def to_dict(self):
         return {

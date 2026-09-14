@@ -12,6 +12,7 @@ run.py — ファイル変更を検知して Flask を自動再起動するウ�
 
 import os
 import platform
+import re
 import subprocess
 import sys
 import threading
@@ -148,7 +149,43 @@ def _schedule_watches(observer: PollingObserver, handler: FileSystemEventHandler
                 observer.schedule(handler, path=entry.path, recursive=True)
 
 
+def _ensure_sleep_disabled():
+    """PCのスリープ(AC/DCとも)を無効化する。既に無効ならAPIコールを行わず即座に戻る(冪等)。
+
+    以前はランチャーの手動トグルボタン(⑦)で有効/無効を切り替えていたが、無効化し忘れた
+    状態が続くと日次ジョブ(track_post_stats等)がスリープ中に丸ごと欠落する
+    (2026-09-10に実際に発生・確認済み)。ボタン削除後の恒久対策として、ツール起動の
+    たびに自動で確認・設定する。失敗しても(権限不足等)起動自体は継続する。"""
+    if not IS_WINDOWS:
+        return
+    try:
+        result = subprocess.run(
+            ["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"],
+            capture_output=True, text=True, timeout=10,
+        )
+        # powercfgの出力ラベルはOSの表示言語によって変わる(例: 日本語環境では
+        # "現在の AC 電源設定のインデックス: 0x..." のようにローカライズされる)が、
+        # "AC"/"DC" というトークン自体はどの言語でも変わらないため、それを手掛かりに
+        # 同一行内のhex値を拾う(行をまたいで誤マッチしないよう[^\n]*で制限する)。
+        ac_m = re.search(r"AC[^\n]*0x([0-9a-fA-F]+)", result.stdout)
+        dc_m = re.search(r"DC[^\n]*0x([0-9a-fA-F]+)", result.stdout)
+        ac = int(ac_m.group(1), 16) if ac_m else None
+        dc = int(dc_m.group(1), 16) if dc_m else None
+
+        if ac == 0 and dc == 0:
+            print("[watcher] スリープは既に無効化されています", flush=True)
+            return
+
+        subprocess.run(["powercfg", "/change", "standby-timeout-ac", "0"], check=True, capture_output=True)
+        subprocess.run(["powercfg", "/change", "standby-timeout-dc", "0"], check=True, capture_output=True)
+        print("[watcher] スリープを無効化しました(日次ジョブの欠落防止)", flush=True)
+    except Exception as exc:
+        print(f"[watcher] スリープ無効化の確認/設定に失敗しました(起動は継続します): {exc}", flush=True)
+
+
 def main():
+    _ensure_sleep_disabled()
+
     flask = _FlaskProcess()
     flask.start()
 
