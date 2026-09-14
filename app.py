@@ -896,6 +896,39 @@ def tag_article(id):
     })
 
 
+@app.route("/api/articles/guess-groups", methods=["GET"])
+def guess_groups_for_posted():
+    """投稿済みタブの一括グループタグ付け用: group_id未設定のposted動画記事について、
+    タイトルからのグループ推測結果を返す(表示のみ、DBは変更しない)。
+    現在選択中のアカウントにスコープする(pending()のposted表示と同じ範囲)。"""
+    from youtube_collector import _matches_target_artist
+
+    account_id = _selected_account_id()
+    legacy = get_active_account(app)
+    legacy_id = legacy["id"] if legacy else None
+
+    scoped = _account_query_scope(
+        Article.query.filter_by(status="posted", content_type="video", group_id=None),
+        Article, account_id, legacy_id,
+    )
+    articles = scoped.order_by(Article.posted_at.desc().nullslast()).all()
+
+    all_groups = Group.query.order_by(Group.name.asc()).all()
+
+    results = []
+    for a in articles:
+        matched = [g.name for g in all_groups if _matches_target_artist(a.title, "", g.name)]
+        results.append({
+            "id": a.id,
+            "title": a.title,
+            "guessed_group": matched[0] if matched else None,
+            "ambiguous": len(matched) > 1,
+            "candidates": matched,
+        })
+
+    return jsonify({"ok": True, "results": results})
+
+
 @app.route("/articles/<int:id>/reject", methods=["POST"])
 def reject_article(id):
     article = Article.query.get_or_404(id)

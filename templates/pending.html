@@ -77,6 +77,11 @@
     <label for="select-all" class="text-muted mb-0" style="font-size:.82rem;cursor:pointer">全選択</label>
     <span id="selected-count" class="text-muted ms-1" style="font-size:.8rem"></span>
     <div class="ms-auto d-flex gap-2">
+      {% if active_tab == 'posted' and nav_is_kpop_account %}
+      <button type="button" class="btn btn-outline-secondary btn-sm" onclick="openBulkGuessModal()">
+        🏷️ 未タグ付け記事を一括推測
+      </button>
+      {% endif %}
       <button type="submit" id="btn-bulk-delete" class="btn btn-outline-danger btn-sm" disabled
               onclick="return confirmBulk()">
         <i class="bi bi-trash3 me-1"></i>選択削除
@@ -445,6 +450,46 @@
     </div>
   </div>
 </div>
+
+<!-- 未タグ付け記事 一括推測モーダル -->
+<div id="bulk-guess-modal" class="d-none"
+     style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;"
+     onclick="if(event.target===this)closeBulkGuessModal()">
+  <div style="background:#fff;border-radius:16px;width:min(640px,94vw);max-height:88vh;padding:20px;
+              position:relative;display:flex;flex-direction:column"
+       onclick="event.stopPropagation()">
+    <button type="button" onclick="closeBulkGuessModal()"
+            style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:1.3rem;cursor:pointer;color:#888;line-height:1;padding:0">✕</button>
+    <h6 class="fw-bold mb-1" style="color:#000">未タグ付け記事の一括推測</h6>
+    <div id="bulk-guess-summary" class="mb-2" style="font-size:.8rem;color:#666"></div>
+    <div id="bulk-guess-loading" style="font-size:.85rem;color:#666;padding:20px 0;text-align:center">
+      <span class="spinner-border spinner-border-sm"></span> 推測中...
+    </div>
+    <div id="bulk-guess-list" class="d-none" style="overflow-y:auto;flex:1;border:1px solid #eee;border-radius:8px">
+      <table class="table table-sm mb-0" style="font-size:.82rem">
+        <thead style="position:sticky;top:0;background:#fff">
+          <tr>
+            <th style="width:32px">
+              <input type="checkbox" id="bulk-guess-select-all" checked onchange="toggleAllBulkGuess(this)">
+            </th>
+            <th>タイトル</th>
+            <th style="width:140px">推測グループ</th>
+          </tr>
+        </thead>
+        <tbody id="bulk-guess-tbody"></tbody>
+      </table>
+    </div>
+    <div id="bulk-guess-empty" class="d-none" style="font-size:.85rem;color:#666;padding:20px 0;text-align:center">
+      推測できる未タグ付け記事はありませんでした。
+    </div>
+    <div id="bulk-guess-result" class="d-none mt-2" style="font-size:.85rem;color:#2e7d32;font-weight:700"></div>
+    <div class="d-flex gap-2 justify-content-end mt-3">
+      <button type="button" class="btn btn-sm btn-outline-secondary" onclick="closeBulkGuessModal()">閉じる</button>
+      <button type="button" id="bulk-guess-apply-btn" class="btn btn-sm btn-success d-none"
+              onclick="applyBulkGuess()">選択した記事に反映</button>
+    </div>
+  </div>
+</div>
 {% endif %}
 
 {% else %}
@@ -719,6 +764,24 @@ function confirmTagModal() {
   }
 }
 
+function _updateGroupBadge(id, groupName, memberName) {
+  var prev = ARTICLE_TAGS[id] || { group: '', member: '' };
+  ARTICLE_TAGS[id] = {
+    group: groupName != null ? groupName : prev.group,
+    member: memberName != null ? memberName : prev.member,
+  };
+  var badge = document.getElementById('group-badge-' + id);
+  if (badge) {
+    if (ARTICLE_TAGS[id].group) {
+      badge.textContent = ARTICLE_TAGS[id].group;
+      badge.classList.remove('d-none');
+    } else {
+      badge.textContent = '';
+      badge.classList.add('d-none');
+    }
+  }
+}
+
 function doSaveTag(id, btn, groupName, memberName) {
   if (btn) { btn.disabled = true; }
   var orig = btn ? btn.innerHTML : null;
@@ -732,22 +795,131 @@ function doSaveTag(id, btn, groupName, memberName) {
   .then(function(d) {
     if (btn) { btn.disabled = false; btn.innerHTML = orig; }
     if (!d.ok) { alert(d.error || 'タグの保存に失敗しました'); return; }
-    ARTICLE_TAGS[id] = { group: d.group_name || '', member: d.member_name || '' };
-    var badge = document.getElementById('group-badge-' + id);
-    if (badge) {
-      if (d.group_name) {
-        badge.textContent = d.group_name;
-        badge.classList.remove('d-none');
-      } else {
-        badge.textContent = '';
-        badge.classList.add('d-none');
-      }
-    }
+    _updateGroupBadge(id, d.group_name, d.member_name);
   })
   .catch(function() {
     if (btn) { btn.disabled = false; btn.innerHTML = orig; }
     alert('通信エラーが発生しました');
   });
+}
+
+// ── 未タグ付け記事の一括推測(投稿済みタブ) ─────────────────────────────────
+var BULK_GUESS_DATA = [];  // [{id, title, guessed_group, ambiguous, candidates}]
+
+function openBulkGuessModal() {
+  var modal = document.getElementById('bulk-guess-modal');
+  modal.classList.remove('d-none');
+  document.getElementById('bulk-guess-loading').classList.remove('d-none');
+  document.getElementById('bulk-guess-list').classList.add('d-none');
+  document.getElementById('bulk-guess-empty').classList.add('d-none');
+  document.getElementById('bulk-guess-result').classList.add('d-none');
+  document.getElementById('bulk-guess-apply-btn').classList.add('d-none');
+  document.getElementById('bulk-guess-summary').textContent = '';
+  document.getElementById('bulk-guess-tbody').innerHTML = '';
+
+  fetch('/api/articles/guess-groups')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      document.getElementById('bulk-guess-loading').classList.add('d-none');
+      if (!d.ok) { alert('推測に失敗しました'); return; }
+      BULK_GUESS_DATA = d.results || [];
+      renderBulkGuessList();
+    })
+    .catch(function() {
+      document.getElementById('bulk-guess-loading').classList.add('d-none');
+      alert('通信エラーが発生しました');
+    });
+}
+
+function closeBulkGuessModal() {
+  document.getElementById('bulk-guess-modal').classList.add('d-none');
+}
+
+function renderBulkGuessList() {
+  var guessed = BULK_GUESS_DATA.filter(function(r) { return r.guessed_group; });
+  var unmatched = BULK_GUESS_DATA.length - guessed.length;
+
+  var summary = guessed.length + '件推測できました';
+  if (unmatched > 0) summary += '（推測できなかった記事: ' + unmatched + '件、不明として対象外）';
+  document.getElementById('bulk-guess-summary').textContent = summary;
+
+  if (guessed.length === 0) {
+    document.getElementById('bulk-guess-empty').classList.remove('d-none');
+    return;
+  }
+
+  document.getElementById('bulk-guess-list').classList.remove('d-none');
+  document.getElementById('bulk-guess-apply-btn').classList.remove('d-none');
+
+  var tbody = document.getElementById('bulk-guess-tbody');
+  tbody.innerHTML = guessed.map(function(r) {
+    var titleShort = escHtmlPending(r.title.length > 60 ? r.title.slice(0, 60) + '…' : r.title);
+    var rowStyle = r.ambiguous ? 'background:#fff8e1' : '';
+    var groupCell = escHtmlPending(r.guessed_group);
+    if (r.ambiguous) {
+      groupCell += ' <span title="複数のグループ名がタイトルに含まれています(候補: ' +
+        escHtmlPending(r.candidates.join('、')) + ')" style="cursor:help">⚠️</span>';
+    }
+    return '<tr data-id="' + r.id + '" style="' + rowStyle + '">' +
+      '<td><input type="checkbox" class="bulk-guess-cb" checked data-id="' + r.id + '"></td>' +
+      '<td>' + titleShort + '</td>' +
+      '<td>' + groupCell + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+function toggleAllBulkGuess(checkbox) {
+  document.querySelectorAll('.bulk-guess-cb').forEach(function(cb) { cb.checked = checkbox.checked; });
+}
+
+function applyBulkGuess() {
+  var checked = Array.prototype.slice.call(document.querySelectorAll('.bulk-guess-cb:checked'));
+  if (checked.length === 0) { alert('選択されている記事がありません'); return; }
+
+  var applyBtn = document.getElementById('bulk-guess-apply-btn');
+  applyBtn.disabled = true;
+  var orig = applyBtn.innerHTML;
+  applyBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 反映中...';
+
+  var byId = {};
+  BULK_GUESS_DATA.forEach(function(r) { byId[r.id] = r; });
+
+  var total = checked.length;
+  var successCount = 0;
+  var i = 0;
+
+  function next() {
+    if (i >= checked.length) {
+      applyBtn.disabled = false;
+      applyBtn.innerHTML = orig;
+      var resultEl = document.getElementById('bulk-guess-result');
+      resultEl.textContent = '処理件数: ' + total + '件 / 成功: ' + successCount + '件';
+      resultEl.classList.remove('d-none');
+      return;
+    }
+    var cb = checked[i];
+    var id = parseInt(cb.dataset.id, 10);
+    var entry = byId[id];
+    i++;
+    if (!entry || !entry.guessed_group) { next(); return; }
+    fetch('/articles/' + id + '/tag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_name: entry.guessed_group, member_name: '' })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        successCount++;
+        _updateGroupBadge(id, d.group_name);
+        var row = document.querySelector('#bulk-guess-tbody tr[data-id="' + id + '"]');
+        if (row) row.style.opacity = '0.4';
+      }
+      next();
+    })
+    .catch(function() { next(); });
+  }
+  next();
 }
 
 function doApprove(id, btn, groupName, memberName) {
