@@ -1949,32 +1949,57 @@ def analytics():
     daily_followers = [d.followers_count for d in daily_rows]
     daily_views = [d.views_count for d in daily_rows]
 
-    group_rows = [
-        dict(row) for row in db.session.execute(text("""
-            SELECT g.name AS name, COUNT(*) AS post_count,
-                   AVG(ps.likes) AS avg_likes, AVG(ps.views) AS avg_views
+    # 記事ごとに「代表とするpost_stats行」を1件だけ選ぶ共通CTE。
+    # is_final=1は必ずday_index>=7を意味する(analytics_tracker.track_post_stats参照)ため、
+    # day_index=7の行が「7日時点ちょうど」の記録。それが無い記事(track_post_statsの
+    # 空白期間・再投稿直後でまだ7日経っていない等)は、代わりに最新のis_final記録
+    # (day_indexが7を超えていても可)を採用する。day_index=7の行がある記事の選択結果は
+    # 従来のday_index<=7フィルタと完全に一致するため、既存データの集計値には影響しない。
+    _RANKED_FINAL_STATS_CTE = """
+        WITH ranked AS (
+            SELECT ps.article_id, ps.likes, ps.views, ps.day_index,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY ps.article_id
+                       ORDER BY (ps.day_index <> 7), ps.fetched_at DESC
+                   ) AS rn
             FROM post_stats ps
-            JOIN articles a ON a.id = ps.article_id
+            WHERE ps.is_final = 1
+        )
+    """
+
+    group_rows = [
+        dict(row) for row in db.session.execute(text(_RANKED_FINAL_STATS_CTE + """
+            SELECT g.name AS name, COUNT(*) AS post_count,
+                   AVG(r.likes) AS avg_likes, AVG(r.views) AS avg_views,
+                   SUM(CASE WHEN r.day_index <> 7 THEN 1 ELSE 0 END) AS fallback_count
+            FROM ranked r
+            JOIN articles a ON a.id = r.article_id
             JOIN groups g ON g.id = a.group_id
-            WHERE ps.is_final = 1 AND ps.day_index <= 7 AND a.account_id = :account_id
+            WHERE r.rn = 1 AND a.account_id = :account_id
             GROUP BY g.id
             ORDER BY avg_likes DESC
         """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
     ]
 
     member_rows = [
-        dict(row) for row in db.session.execute(text("""
+        dict(row) for row in db.session.execute(text(_RANKED_FINAL_STATS_CTE + """
             SELECT g.name AS group_name, m.name AS member_name, COUNT(*) AS post_count,
-                   AVG(ps.likes) AS avg_likes, AVG(ps.views) AS avg_views
-            FROM post_stats ps
-            JOIN articles a ON a.id = ps.article_id
+                   AVG(r.likes) AS avg_likes, AVG(r.views) AS avg_views,
+                   SUM(CASE WHEN r.day_index <> 7 THEN 1 ELSE 0 END) AS fallback_count
+            FROM ranked r
+            JOIN articles a ON a.id = r.article_id
             JOIN members m ON m.id = a.member_id
             JOIN groups g ON g.id = m.group_id
-            WHERE ps.is_final = 1 AND ps.day_index <= 7 AND a.account_id = :account_id AND a.member_id IS NOT NULL
+            WHERE r.rn = 1 AND a.account_id = :account_id AND a.member_id IS NOT NULL
             GROUP BY m.id
             ORDER BY avg_likes DESC
         """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
     ]
+
+    has_fallback_data = (
+        any(row["fallback_count"] for row in group_rows)
+        or any(row["fallback_count"] for row in member_rows)
+    )
 
     hour_rows = [
         dict(row) for row in db.session.execute(text("""
@@ -2019,6 +2044,7 @@ def analytics():
         daily_rows=daily_rows,
         group_rows=group_rows,
         member_rows=member_rows,
+        has_fallback_data=has_fallback_data,
         hour_rows=hour_rows,
         weekday_rows=weekday_rows,
         early_advance_logs=early_advance_logs,

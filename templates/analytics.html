@@ -39,6 +39,12 @@
 </div>
 
 <!-- グループ別・メンバー別 -->
+{% if has_fallback_data %}
+<div class="alert alert-warning py-2 px-3 mb-3" style="font-size:.8rem">
+  <i class="bi bi-info-circle-fill me-1"></i>
+  ※ <span title="track_post_statsの一時的な空白期間・再投稿直後などで7日時点ちょうどの記録が無い投稿は、代わりにその投稿の最新の記録を使用しています">*</span>印のグループ・メンバーは、一部のデータが7日時点ではなく最新の記録を使用しています。
+</div>
+{% endif %}
 <div class="row g-3 mb-4">
   <div class="col-md-6">
     <div class="card p-3 h-100">
@@ -52,7 +58,7 @@
           <tbody>
             {% for row in group_rows %}
             <tr>
-              <td>{{ row.name }}</td>
+              <td>{{ row.name }}{% if row.fallback_count %}<span class="text-warning" title="{{ row.fallback_count }}件は最新記録を代用">*</span>{% endif %}</td>
               <td class="text-end">{{ row.post_count }}</td>
               <td class="text-end">{{ "%.1f"|format(row.avg_likes or 0) }}</td>
               <td class="text-end">{{ "%.1f"|format(row.avg_views or 0) }}</td>
@@ -79,7 +85,7 @@
             {% for row in member_rows %}
             <tr>
               <td>{{ row.group_name }}</td>
-              <td>{{ row.member_name }}</td>
+              <td>{{ row.member_name }}{% if row.fallback_count %}<span class="text-warning" title="{{ row.fallback_count }}件は最新記録を代用">*</span>{% endif %}</td>
               <td class="text-end">{{ row.post_count }}</td>
               <td class="text-end">{{ "%.1f"|format(row.avg_likes or 0) }}</td>
               <td class="text-end">{{ "%.1f"|format(row.avg_views or 0) }}</td>
