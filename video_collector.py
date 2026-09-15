@@ -5,6 +5,7 @@ import shutil
 import tempfile
 from datetime import datetime, timedelta
 
+from config import YOUTUBE_DL_FORMAT
 from database import Article, Setting, db
 
 logger = logging.getLogger(__name__)
@@ -480,7 +481,7 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
 
     # ─── Step 3: ダウンロード（各ターゲット） ────────────────────────────────
     dl_opts_base = {
-        "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]",
+        "format": YOUTUBE_DL_FORMAT,
         "ffmpeg_location": r"C:\Users\mktis\kpopwave-tool\ffmpeg\bin",
         "merge_output_format": "mp4",
         "quiet": False,
@@ -649,7 +650,7 @@ def _collect_channel_shorts(channel_info: dict, tmp_dir: str, existing_urls: set
 
     # ─── Step3: ダウンロード ────────────────────────────────────────────────
     dl_opts_base = {
-        "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]",
+        "format": YOUTUBE_DL_FORMAT,
         "ffmpeg_location": r"C:\Users\mktis\kpopwave-tool\ffmpeg\bin",
         "merge_output_format": "mp4",
         "quiet": False,

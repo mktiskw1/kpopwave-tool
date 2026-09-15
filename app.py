@@ -16,7 +16,7 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, sen
 from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
 
-from config import Config
+from config import Config, YOUTUBE_DL_FORMAT
 from database import (
     Article, BuzzPost, ChapterClip, ChapterJob, Comment, DailyStat, EarlyAdvanceLog, Group, Hook, Member,
     PostStat, Setting, TextPostStock, ThreadsAccount, VideoTrimJob, get_active_account, db,
@@ -2668,7 +2668,7 @@ def requeue_article(article_id):
         os.makedirs(tmp_dir, exist_ok=True)
         ffmpeg_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin")
         dl_opts = {
-            "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]",
+            "format": YOUTUBE_DL_FORMAT,
             "ffmpeg_location": ffmpeg_bin,
             "merge_output_format": "mp4",
             "outtmpl": os.path.join(tmp_dir, f"{vid_id}.%(ext)s"),
@@ -2853,7 +2853,7 @@ def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, 
     ffmpeg_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin")
 
     dl_opts = {
-        "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]",
+        "format": YOUTUBE_DL_FORMAT,
         "ffmpeg_location": ffmpeg_bin,
         "merge_output_format": "mp4",
         "outtmpl": outtmpl,
