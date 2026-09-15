@@ -102,13 +102,21 @@ def set_weekly_schedule(app, schedule_dict: dict, account_id: int = None) -> Non
         Setting.set(schedule_key, json.dumps(schedule_dict))
 
 
-def prioritize_article(app, article_id: int) -> tuple[bool, dict]:
-    """選択したキュー記事を「次に投稿される1件」に割り込ませる。
+def prioritize_article(app, article_id: int, position_index: int = 0) -> tuple[bool, dict]:
+    """選択したキュー記事を、キュー内の指定位置(position_index。0=先頭/次に投稿される1件、
+    1=2番目、…)に割り込ませる。
 
-    現在キューの先頭（次に投稿される予定）の記事と scheduled_at をスワップするだけで、
-    投稿スケジュールの枠（時刻）自体は変更しない。元々先頭だった記事は2番目にずれる。
-    対象は選択記事と同じアカウントのキューに限定し、他アカウントには影響しない。
-    /queue/<id>/prioritize エンドポイント（app.py）と _buzz_requeue_job の共通ロジック。
+    現在その位置にいる記事と scheduled_at をスワップするだけで、投稿スケジュールの枠
+    （時刻）自体は変更しない。対象は選択記事と同じアカウントのキューに限定し、
+    他アカウントには影響しない。
+    /queue/<id>/prioritize エンドポイント（app.py、position_index=0固定）と
+    _buzz_requeue_job（在庫が多い日は複数件をposition_index=0,1,...で順に割り込ませる）
+    の共通ロジック。
+
+    複数件を連続して割り込ませる場合は、position_index=0から昇順に1件ずつ呼ぶこと。
+    そうすることで、それぞれの呼び出し時点の「現在の0番目」「現在の1番目」…と正しく
+    スワップされ、結果的に指定した記事群がキューの先頭からposition_index順に並ぶ
+    (この関数を2回、position_index=0→2番目に呼ぶ、といった直接指定は非対応)。
     """
     with app.app_context():
         article = Article.query.get(article_id)
@@ -129,28 +137,29 @@ def prioritize_article(app, article_id: int) -> tuple[bool, dict]:
                 query = query.filter(Article.account_id == account_id)
         queued = query.order_by(Article.scheduled_at.asc().nullsfirst(), Article.created_at.asc()).all()
 
-        if not queued:
-            return False, {"error": "キューが空です"}
+        if len(queued) <= position_index:
+            return False, {"error": "キューが空です" if not queued else "指定位置がキュー長を超えています"}
 
-        head = queued[0]
-        if head.id == article.id:
-            return True, {"already_head": True}
+        target = queued[position_index]
+        if target.id == article.id:
+            return True, {"already_at_position": True, "already_head": position_index == 0}
 
         # scheduled_at をスワップ（スケジュール枠自体は変えない）
-        head.scheduled_at, article.scheduled_at = article.scheduled_at, head.scheduled_at
+        target.scheduled_at, article.scheduled_at = article.scheduled_at, target.scheduled_at
 
         # 両方 scheduled_at=None など、スワップしても並び順が変わらない場合は
-        # created_at を繰り上げて確実に先頭へ出す
-        if article.scheduled_at == head.scheduled_at:
-            article.created_at = (head.created_at or datetime.utcnow()) - timedelta(seconds=1)
+        # created_at を繰り上げて確実に目的の位置へ出す
+        if article.scheduled_at == target.scheduled_at:
+            article.created_at = (target.created_at or datetime.utcnow()) - timedelta(seconds=position_index + 1)
 
         db.session.commit()
         logger.info(
-            "[prioritize] account_id=%s id=%d を先頭へ（旧先頭 id=%d とスワップ）"
-            " new_head_scheduled=%s old_head_scheduled=%s",
-            account_id, article.id, head.id, article.scheduled_at, head.scheduled_at,
+            "[prioritize] account_id=%s id=%d を%d番目へ（旧%d番目 id=%d とスワップ）"
+            " new_scheduled=%s old_scheduled=%s",
+            account_id, article.id, position_index + 1, position_index + 1, target.id,
+            article.scheduled_at, target.scheduled_at,
         )
-        return True, {"swapped_with": head.id}
+        return True, {"swapped_with": target.id}
 
 
 def next_post_slot(app, account_id: int = None) -> datetime | None:
@@ -614,9 +623,15 @@ def _rollover_overdue_for_account(app, account_id, now_utc, rollover_threshold):
 
 _BUZZ_REQUEUE_ACCOUNT_ID = 1  # KPOPアカウント。他ジョブ(_post_stats_job等)と同じ規約
 
+# 対象在庫(60日以上経過・未処理の件数)がこれを超えたら処理件数を増やす。
+# 機能導入前に貯まった過剰在庫を早く消化するための一時的な調整。
+_BUZZ_REQUEUE_BACKLOG_THRESHOLD = 10
+_BUZZ_REQUEUE_BACKLOG_BATCH_SIZE = 2   # 在庫過多時の1日の処理件数
+_BUZZ_REQUEUE_NORMAL_BATCH_SIZE = 1    # 通常時の1日の処理件数
 
-def _buzz_requeue_candidate(app, account_id: int) -> Article | None:
-    """自動再キュー対象(最終投稿日が最も古いもの)を1件返す。無ければNone。
+
+def _buzz_requeue_candidates(app, account_id: int, limit: int | None = None) -> list:
+    """自動再キュー対象(最終投稿日が古い順)を返す。limit未指定なら全件(在庫件数カウント用)。
 
     「200いいね以上を達成し永久保存されている動画」は、_video_cleanup_job の
     削除ルールを生き延びた status='posted' の動画そのものとして扱う
@@ -626,7 +641,7 @@ def _buzz_requeue_candidate(app, account_id: int) -> Article | None:
     with app.app_context():
         interval_days = int(Setting.get("buzz_requeue_interval_days", "60") or "60")
         cutoff = datetime.utcnow() - timedelta(days=interval_days)
-        return (
+        query = (
             Article.query
             .filter(
                 Article.account_id == account_id,
@@ -637,30 +652,50 @@ def _buzz_requeue_candidate(app, account_id: int) -> Article | None:
                 Article.posted_at <= cutoff,
             )
             .order_by(Article.posted_at.asc())
-            .first()
         )
+        if limit is not None:
+            query = query.limit(limit)
+        return query.all()
 
 
 @_logged_job("buzz_requeue")
 def _buzz_requeue_job(app, account_id: int = _BUZZ_REQUEUE_ACCOUNT_ID) -> None:
     """バズった動画(200いいね達成・永久保存)を自動で再キューする。
 
-    複数対象がある場合も1日1件のみ処理する(ジョブ自体がその日1回しか実行されないため)。
-    キュー追加後、既存の割り込み機能と同じロジックでその日の1番目の投稿枠に割り込ませる。
+    対象在庫が_BUZZ_REQUEUE_BACKLOG_THRESHOLD件を超えている場合は1日
+    _BUZZ_REQUEUE_BACKLOG_BATCH_SIZE件、それ以下なら1日_BUZZ_REQUEUE_NORMAL_BATCH_SIZE件を
+    最終投稿日が古いものから順に処理する。既存の割り込み機能(prioritize_article)を
+    position_index=0,1,...で順に呼ぶことで、その日の1番目・2番目…の投稿枠に順に割り込ませる。
     グループ・メンバーのタグ(group_id/member_id)や動画ファイルは同じArticle行を
     再利用するため自動的に引き継がれる。
     """
-    # candidate/slot の算出はそれぞれ内部で独立した app_context を使う(next_post_slot等)。
+    all_candidates = _buzz_requeue_candidates(app, account_id)
+    total = len(all_candidates)
+    if total == 0:
+        logger.info("[buzz_requeue] account_id=%s 再キュー対象なし", account_id)
+        return
+
+    batch_size = (
+        _BUZZ_REQUEUE_BACKLOG_BATCH_SIZE if total > _BUZZ_REQUEUE_BACKLOG_THRESHOLD
+        else _BUZZ_REQUEUE_NORMAL_BATCH_SIZE
+    )
+    targets = all_candidates[:batch_size]
+    logger.info(
+        "[buzz_requeue] account_id=%s 対象在庫=%d件(閾値%d件) → 今回処理件数=%d件",
+        account_id, total, _BUZZ_REQUEUE_BACKLOG_THRESHOLD, len(targets),
+    )
+
+    for position_index, candidate in enumerate(targets):
+        _process_one_buzz_requeue(app, account_id, candidate.id, position_index)
+
+
+def _process_one_buzz_requeue(app, account_id: int, article_id: int, position_index: int) -> None:
+    """1件を再キューし、キュー内のposition_index番目(0=先頭)に割り込ませる。"""
+    # next_post_slot/prioritize_article はそれぞれ内部で独立した app_context を使う。
     # Flask-SQLAlchemyのセッションはapp_contextインスタンス単位でスコープされるため、
     # ここで取得したオブジェクトをそのまま後段のcommitで書き換えても保存されない。
     # そのため book-keeping (更新・commit) は最後に1つの app_context 内で
     # id から取得し直してから行う。
-    candidate = _buzz_requeue_candidate(app, account_id)
-    if not candidate:
-        logger.info("[buzz_requeue] account_id=%s 再キュー対象なし", account_id)
-        return
-    article_id = candidate.id
-
     slot = next_post_slot(app, account_id)
     if slot is None:
         logger.warning(
@@ -692,13 +727,17 @@ def _buzz_requeue_job(app, account_id: int = _BUZZ_REQUEUE_ACCOUNT_ID) -> None:
             account_id, article_id, new_repost_count, slot,
         )
 
-    success, info = prioritize_article(app, article_id)
+    success, info = prioritize_article(app, article_id, position_index=position_index)
     if not success:
         logger.warning(
-            "[buzz_requeue] account_id=%s id=%d 先頭化失敗: %s", account_id, article_id, info,
+            "[buzz_requeue] account_id=%s id=%d %d番目化失敗: %s",
+            account_id, article_id, position_index + 1, info,
         )
     else:
-        logger.info("[buzz_requeue] account_id=%s id=%d をその日の1番目の投稿枠へ", account_id, article_id)
+        logger.info(
+            "[buzz_requeue] account_id=%s id=%d をその日の%d番目の投稿枠へ",
+            account_id, article_id, position_index + 1,
+        )
 
 
 def _shift_day_and_time(day_key: str, hour: int, minute: int, delta_hours: int) -> tuple[str, int, int]:
