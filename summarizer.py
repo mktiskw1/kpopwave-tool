@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 import anthropic
 import requests
 
-from database import Article, BuzzPost, Hook, Setting, ThreadsAccount, db
+from database import Article, BuzzPost, Group, Hook, Member, Setting, ThreadsAccount, db
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +198,66 @@ def _attach_hook(hook: str | None, body: str, body_max: int) -> str:
     if len(combined) > body_max:
         combined = combined[:body_max - 1] + "…"
     return combined
+
+
+# 動画タイトルの曲名抽出用: KPOPのMVタイトルは曲名を引用符で囲む慣習が強いため、
+# 最初に見つかった引用符内テキストを曲名候補として採用する（優先度順）。
+_SONG_TITLE_QUOTE_PATTERNS = [
+    re.compile(r"'([^']{1,40})'"),
+    re.compile(r'"([^"]{1,40})"'),
+    re.compile(r'「([^」]{1,40})」'),
+    re.compile(r'『([^』]{1,40})』'),
+    re.compile(r'“([^”]{1,40})”'),
+    re.compile(r'‘([^’]{1,40})’'),
+]
+
+
+def _extract_song_title(title: str) -> str:
+    """動画タイトルから曲名らしき部分を抽出する。抽出できなければ空文字を返す
+    (呼び出し側でスキップする)。"""
+    if not title:
+        return ""
+    for pattern in _SONG_TITLE_QUOTE_PATTERNS:
+        m = pattern.search(title)
+        if m:
+            candidate = m.group(1).strip()
+            if candidate:
+                return candidate
+    return ""
+
+
+def _build_video_post_text(
+    group_name: str, member_name: str, song_title: str, hook: str | None, body_max: int,
+) -> str:
+    """動画投稿文を「グループ名→メンバー名→曲名→フック」の順で組み立てる。
+    タグ付けされていない・抽出できない要素はスキップする。
+    文字数オーバー時は 曲名 → メンバー名 の順に削って再構築し、それでも収まらない場合は
+    グループ名+フックを優先して残し、フック自体を末尾から切り詰める(_attach_hookと同じ安全策)。"""
+    hook = hook or ""
+
+    def _compose(use_song: bool, use_member: bool) -> str:
+        tags = [group_name or ""]
+        if use_member:
+            tags.append(member_name or "")
+        if use_song and song_title:
+            tags.append(f"「{song_title}」")
+        tag_text = " ".join(t for t in tags if t)
+        return f"{tag_text} {hook}".strip() if hook else tag_text
+
+    for use_song, use_member in ((True, True), (False, True), (False, False)):
+        combined = _compose(use_song, use_member)
+        if len(combined) <= body_max:
+            return combined
+
+    # ここまで削ってもオーバー: グループ名を残し、フック自体を切り詰める
+    prefix = f"{group_name} " if group_name else ""
+    if hook:
+        remaining = body_max - len(prefix)
+        if remaining >= 2:
+            hook_fit = hook if len(hook) <= remaining else hook[:remaining - 1] + "…"
+            return prefix + hook_fit
+    combined = (prefix + hook).strip() or group_name or hook
+    return combined[:body_max - 1] + "…" if len(combined) > body_max else combined
 
 
 def _detect_group_name(feed_source: str, title: str) -> str:
@@ -462,10 +522,40 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
             acc = db.session.get(ThreadsAccount, article.account_id)
             if acc and acc.content_topic:
                 content_topic = acc.content_topic.strip()
+        tagged_group_name  = ""
+        tagged_member_name = ""
+        if article.group_id:
+            g = db.session.get(Group, article.group_id)
+            if g:
+                tagged_group_name = g.name
+        if article.member_id:
+            m = db.session.get(Member, article.member_id)
+            if m:
+                tagged_member_name = m.name
 
     is_video_post = (content_type == "video")
     body_max = BODY_MAX_VIDEO if is_video_post else BODY_MAX_ARTICLE
     hook = _get_next_hook(app, article_account_id) if article_account_id else None
+
+    # ── 動画投稿: AIを使わず「グループ名→メンバー名→曲名→フック」で決定的に組み立てる ──
+    # (承認モーダルでタグ付けされたgroup_id/member_idと、タイトルから抽出した曲名を使う。
+    # タグ付けされていない・抽出できない要素はスキップし、残りの要素だけで組み立てる)
+    if is_video_post:
+        song_title = _extract_song_title(title)
+        post_text = _build_video_post_text(tagged_group_name, tagged_member_name, song_title, hook, body_max)
+        with app.app_context():
+            art = db.session.get(Article, article_id)
+            if art:
+                art.summary       = post_text
+                art.post_style    = style
+                art.error_message = None
+                db.session.commit()
+        logger.info(
+            "動画投稿テキストを組み立て: article=%d group=%r member=%r song=%r hook=%r (%d文字)",
+            article_id, tagged_group_name or None, tagged_member_name or None,
+            song_title or None, hook, len(post_text),
+        )
+        return True
 
     # ── AI生成フラグ確認（無効ならタイトルそのままで即保存して終了） ──────────
     if not _ai_summary_enabled(app):
@@ -720,32 +810,7 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
         "説明しすぎない。感じたことをそのまま書く。"
     )
 
-    if is_video_post:
-        step1_prompt = (
-            f"{PERSONA}\n"
-            f"この動画を見た瞬間の一言リアクションをそのまま書く。動画の内容説明は絶対にしない。感情だけ。\n\n"
-            f"【動画タイトル】{title}\n\n"
-            f"━━ 出力ルール ━━\n"
-            f"・フック（1行目）＋一言だけ。それ以上は書かない\n"
-            f"・{body_max}文字以内（厳守）\n"
-            f"・絵文字なし・ハッシュタグなし・URLなし\n"
-            f"・日本語のみ（グループ名・曲名はアルファベットOK）\n"
-            f"・動画が主役なので説明不要。短く言い切る\n"
-            f"・例：「待って、これやばい。aespaの新曲。」「何回見ても飽きない。WINTERのビジュアルが本当に。」\n"
-            f"━━ 固有名詞ルール（必須） ━━\n"
-            f"・必ずグループ名またはメンバー名を1つ以上含めること\n"
-            f"・動画タイトルから固有名詞を抽出して使う\n"
-            f"・固有名詞なしの投稿文は生成しないこと\n"
-            f"良い例：「待って、aespaのWINTERって次元が違う。」\n"
-            f"悪い例：「待って、この子って次元が違う。」（固有名詞なし）\n"
-            f"━━ 締めの問いかけルール（必須） ━━\n"
-            f"・文字数に余裕があれば末尾に短い問いかけを入れる（例：「みんなはどう思う？」「推しは誰？」）\n"
-            f"・{body_max}文字以内に収まらない場合は問いかけを省略してもよい\n"
-            f"・出力は投稿文のみ（前置き・説明不要）\n\n"
-            f"{EXPRESSION_PICK_SECTION}"
-        )
-
-    elif is_youtube:
+    if is_youtube:
         step1_prompt = (
             f"{PERSONA}\n"
             f"動画の存在を知って「やばい」と思っている自分として書く。内容を詳しく説明せず、グループ名・動画タイトルと感情表現だけで伝える。\n\n"
@@ -812,26 +877,16 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
         logger.info("Step1生成 (%d文字): article=%d", len(step1_text), article_id)
 
         # Step2: 人間っぽく変換（リトライ付き）
-        if is_video_post:
-            step2_base = (
-                "この文章から余計な説明を全部削って、感情だけ残してください。\n"
-                "一言で言い切る。フック+感情の一言だけ。\n"
-                f"絵文字なし・ハッシュタグなし・URLなし。必ず{body_max}文字以内。\n"
-                "【絶対厳守】グループ名・メンバー名・曲名・動画タイトルのいずれか最低1つを必ず残すこと。固有名詞が一つもない場合は出力禁止。\n"
-                "【厳守】元の文章の末尾に問いかけ（「？」で終わる一文）がある場合は、文字数を削る際も最優先で残すこと。文字数調整で削るのは説明部分からにする。\n"
-                "出力は変換後の文章のみ。\n\n"
-            )
-        else:
-            step2_base = (
-                "この文章を25歳の日本人女性が友達にLINEで送るメッセージに変換してください。\n"
-                "・説明文を感情に変える\n"
-                "・長い文を短く切る\n"
-                "・AIっぽい言い回しを口語に変える\n"
-                f"・絵文字なし・タグなし・URLなし。必ず{body_max}文字以内。\n"
-                "【絶対厳守】グループ名・メンバー名・曲名・動画タイトルのいずれか最低1つを必ず残すこと。固有名詞が一つもない場合は出力禁止。\n"
-                "【厳守】元の文章の末尾にある問いかけ（「？」で終わる一文）は必ず残すこと。文字数を削る場合は本文側を短くし、末尾の問いかけは削らない。\n"
-                "出力は変換後の文章のみ。\n\n"
-            )
+        step2_base = (
+            "この文章を25歳の日本人女性が友達にLINEで送るメッセージに変換してください。\n"
+            "・説明文を感情に変える\n"
+            "・長い文を短く切る\n"
+            "・AIっぽい言い回しを口語に変える\n"
+            f"・絵文字なし・タグなし・URLなし。必ず{body_max}文字以内。\n"
+            "【絶対厳守】グループ名・メンバー名・曲名・動画タイトルのいずれか最低1つを必ず残すこと。固有名詞が一つもない場合は出力禁止。\n"
+            "【厳守】元の文章の末尾にある問いかけ（「？」で終わる一文）は必ず残すこと。文字数を削る場合は本文側を短くし、末尾の問いかけは削らない。\n"
+            "出力は変換後の文章のみ。\n\n"
+        )
 
         for attempt in range(1, BODY_MAX_RETRIES + 1):
             step2_prompt = step2_base + step1_text
