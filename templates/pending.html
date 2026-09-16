@@ -435,13 +435,14 @@
       <label class="form-label" style="font-size:.8rem">グループ名</label>
       <input type="text" id="tag-group-input" class="form-control form-control-sm"
              placeholder="例: IVE" autocomplete="off"
-             oninput="renderGroupSuggestions()" onfocus="renderGroupSuggestions()">
+             oninput="renderGroupSuggestions();syncMemberFieldWithGroupInput()" onfocus="renderGroupSuggestions()">
       <div id="tag-group-suggestions-list" class="d-none"
            style="position:absolute;left:0;right:0;z-index:10;background:#fff;border:1px solid #ccc;
                   border-radius:6px;max-height:180px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.15)"></div>
     </div>
     <div class="mb-3">
       <label class="form-label" style="font-size:.8rem">メンバー名（空欄可）</label>
+      <select id="tag-member-select" class="form-select form-select-sm d-none mb-1" onchange="onMemberSelectChange()"></select>
       <input type="text" id="tag-member-input" class="form-control form-control-sm" placeholder="例: ウォニョン">
     </div>
     <div class="d-flex gap-2 justify-content-end">
@@ -639,12 +640,19 @@ function showUndoToast(message, snapshot) {
 }
 
 // ── グループ名候補(削除ボタン付きカスタムドロップダウン) ────────────────────
+// membersはロースター(そのグループの所属メンバー一覧)。メンバー名プルダウンの選択肢に使う。
 var ALL_GROUPS = [
-  {% for g in all_groups %}{ id: {{ g.id }}, name: {{ g.name | tojson }} }{% if not loop.last %},{% endif %}{% endfor %}
+  {% for g in all_groups %}{
+    id: {{ g.id }}, name: {{ g.name | tojson }},
+    members: [{% for m in members_by_group.get(g.id, []) %}{ id: {{ m.id }}, name: {{ m.name | tojson }} }{% if not loop.last %},{% endif %}{% endfor %}]
+  }{% if not loop.last %},{% endif %}{% endfor %}
 ];
 
 // ── 記事ごとの現在のタグ(推測ではない実際のgroup_id/member_idの名前) ──────────
 var ARTICLE_TAGS = {{ (article_tags or {}) | tojson }};
+
+// ── 承認モーダルの自動プリフィル用: タイトルから推測したグループ・メンバー名 ──────
+var GUESSED_TAGS = {{ (guessed_tags or {}) | tojson }};
 
 function escHtmlPending(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -682,6 +690,79 @@ function selectGroupSuggestion(id) {
   if (!g) return;
   document.getElementById('tag-group-input').value = g.name;
   document.getElementById('tag-group-suggestions-list').classList.add('d-none');
+  syncMemberFieldWithGroupInput();
+}
+
+// ── メンバー名欄: グループのロースターに連動したプルダウン / 自由入力 ────────
+function findGroupByName(name) {
+  var norm = (name || '').trim().toLowerCase();
+  if (!norm) return null;
+  return ALL_GROUPS.find(function(g) { return g.name.trim().toLowerCase() === norm; }) || null;
+}
+
+function getMemberFieldValue() {
+  var select = document.getElementById('tag-member-select');
+  var input = document.getElementById('tag-member-input');
+  if (!select.classList.contains('d-none')) {
+    return select.value === '__other__' ? input.value.trim() : select.value;
+  }
+  return input.value.trim();
+}
+
+// グループ名に応じてメンバー欄をプルダウン(ロースターあり)/自由入力(グループ未選択・ロースター無し)に切り替える。
+// currentMemberValueは可能な限り保持し、ロースターの候補に無ければ「その他(自由入力)」として引き継ぐ。
+function updateMemberFieldForGroup(groupName, currentMemberValue) {
+  var group = findGroupByName(groupName);
+  var select = document.getElementById('tag-member-select');
+  var input = document.getElementById('tag-member-input');
+  currentMemberValue = currentMemberValue || '';
+
+  if (!group || !group.members || group.members.length === 0) {
+    select.classList.add('d-none');
+    select.innerHTML = '';
+    input.classList.remove('d-none');
+    input.value = currentMemberValue;
+    return;
+  }
+
+  var matchedInRoster = false;
+  var options = ['<option value="">（空欄）</option>'];
+  group.members.forEach(function(m) {
+    var isSelected = m.name === currentMemberValue;
+    if (isSelected) matchedInRoster = true;
+    options.push('<option value="' + escHtmlPending(m.name) + '"' + (isSelected ? ' selected' : '') + '>' +
+      escHtmlPending(m.name) + '</option>');
+  });
+  var showOtherSelected = !matchedInRoster && !!currentMemberValue;
+  options.push('<option value="__other__"' + (showOtherSelected ? ' selected' : '') + '>その他（自由入力）</option>');
+  select.innerHTML = options.join('');
+  select.classList.remove('d-none');
+
+  if (showOtherSelected) {
+    input.classList.remove('d-none');
+    input.value = currentMemberValue;
+  } else {
+    input.classList.add('d-none');
+    input.value = '';
+  }
+}
+
+function onMemberSelectChange() {
+  var select = document.getElementById('tag-member-select');
+  var input = document.getElementById('tag-member-input');
+  if (select.value === '__other__') {
+    input.classList.remove('d-none');
+    input.value = '';
+    input.focus();
+  } else {
+    input.classList.add('d-none');
+    input.value = '';
+  }
+}
+
+function syncMemberFieldWithGroupInput() {
+  var groupName = document.getElementById('tag-group-input').value.trim();
+  updateMemberFieldForGroup(groupName, getMemberFieldValue());
 }
 
 function deleteGroupSuggestion(id) {
@@ -721,10 +802,13 @@ function approveArticle(id, btn) {
     tagModalMode = 'approve';
     pendingApproveId = id;
     pendingApproveBtn = btn;
-    document.getElementById('tag-group-input').value = '';
-    document.getElementById('tag-member-input').value = '';
+    // タイトルからの推測結果があれば初期値として入れる(推測できなければ空欄のまま)。
+    // ユーザーが確認・修正してから確定するフローは変わらない。
+    var guess = GUESSED_TAGS[id] || { group: '', member: '' };
+    document.getElementById('tag-group-input').value = guess.group || '';
     document.getElementById('tag-modal-title').textContent = 'グループ・メンバーを入力（任意）';
     document.getElementById('tag-modal-confirm-btn').textContent = '承認してキューへ';
+    updateMemberFieldForGroup(guess.group || '', guess.member || '');
     modal.classList.remove('d-none');
     return;
   }
@@ -739,9 +823,9 @@ function editTag(id, btn) {
   pendingEditBtn = btn;
   var current = ARTICLE_TAGS[id] || { group: '', member: '' };
   document.getElementById('tag-group-input').value = current.group || '';
-  document.getElementById('tag-member-input').value = current.member || '';
   document.getElementById('tag-modal-title').textContent = 'グループ・メンバーを編集';
   document.getElementById('tag-modal-confirm-btn').textContent = '保存';
+  updateMemberFieldForGroup(current.group || '', current.member || '');
   modal.classList.remove('d-none');
 }
 
@@ -755,7 +839,7 @@ function closeTagModal() {
 
 function confirmTagModal() {
   var groupName = document.getElementById('tag-group-input').value.trim();
-  var memberName = document.getElementById('tag-member-input').value.trim();
+  var memberName = getMemberFieldValue();
   document.getElementById('tag-modal').classList.add('d-none');
   if (tagModalMode === 'edit') {
     doSaveTag(pendingEditId, pendingEditBtn, groupName, memberName);

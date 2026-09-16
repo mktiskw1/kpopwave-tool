@@ -67,6 +67,41 @@ _THREADS_SCOPES = (
     "threads_share_to_instagram"
 )
 
+
+def _normalize_tag_name(name: str) -> str:
+    """グループ・メンバー名の表記ゆれ（前後空白・全角/半角・大文字小文字）を吸収する正規化キーを作る。"""
+    return unicodedata.normalize("NFKC", (name or "").strip()).lower()
+
+
+# グループ→所属メンバーのロースター初期データ(承認モーダルのメンバー名自動推測・
+# メンバー名プルダウンに使用)。既存のgroups/membersマスタ(_resolve_group_and_member経由で
+# 自動作成されたもの)と同じテーブルに統合管理する。
+DEFAULT_ROSTER = {
+    "aespa":        ["カリナ", "ウィンター", "ジゼル", "ニンニン"],
+    "IVE":          ["レイ", "ウォニョン"],
+    "ILLIT":        ["MOKA"],
+    "NewJeans":     ["ハニ", "ミンジ"],
+    "BABYMONSTER":  ["アヒョン", "アサ"],
+    "LE SSERAFIM":  ["カズハ", "サクラ", "チェウォン"],
+}
+
+
+def _seed_default_roster():
+    """DEFAULT_ROSTERの内容をgroups/membersマスタに投入する(既存データは上書きしない)。"""
+    for group_name, member_names in DEFAULT_ROSTER.items():
+        norm = _normalize_tag_name(group_name)
+        group = Group.query.filter_by(normalized_name=norm).first()
+        if not group:
+            group = Group(name=group_name, normalized_name=norm)
+            db.session.add(group)
+            db.session.flush()
+        for member_name in member_names:
+            mnorm = _normalize_tag_name(member_name)
+            if not Member.query.filter_by(group_id=group.id, normalized_name=mnorm).first():
+                db.session.add(Member(group_id=group.id, name=member_name, normalized_name=mnorm))
+    db.session.commit()
+
+
 DEFAULT_YOUTUBE_CHANNELS = [
     {"name": "aespa",        "url": "https://www.youtube.com/@aespa"},
     {"name": "NewJeans",     "url": "https://www.youtube.com/@NewJeans_official"},
@@ -104,6 +139,7 @@ def create_app() -> Flask:
         db.create_all()
         _init_default_settings()
         _migrate_db()
+        _seed_default_roster()
 
     # 動画保存用ディレクトリを起動時に作成
     videos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
@@ -676,13 +712,26 @@ def pending():
     group_by_id = {g.id: g for g in all_groups}
     member_ids = {a.member_id for a in articles if a.member_id}
     member_by_id = {m.id: m for m in Member.query.filter(Member.id.in_(member_ids)).all()} if member_ids else {}
+    members_by_group = {}
+    if all_groups:
+        for m in Member.query.filter(Member.group_id.in_(group_by_id.keys())).order_by(Member.name.asc()).all():
+            members_by_group.setdefault(m.group_id, []).append(m)
     group_tag_map = {}
     article_tags = {}
+    # 承認モーダルの自動プリフィル用: グループ・メンバー名をタイトルから推測した結果
+    # (推測できなかった場合はキー自体を作らない=空欄のまま)
+    guessed_tags = {}
     for a in articles:
         if a.group_id and a.group_id in group_by_id:
             group_tag_map[a.id] = group_by_id[a.group_id].name
         else:
-            group_tag_map[a.id] = _guess_group_tag(a.title, all_groups)
+            guessed_group = _guess_group(a.title, all_groups)
+            group_tag_map[a.id] = guessed_group.name if guessed_group else None
+            if guessed_group:
+                guessed_tags[a.id] = {
+                    "group": guessed_group.name,
+                    "member": _guess_member_name(a.title, guessed_group.id) or "",
+                }
         # タグ編集モーダルの初期値用: 推測ではない実際のタグのみを保持する
         article_tags[a.id] = {
             "group": group_by_id[a.group_id].name if a.group_id and a.group_id in group_by_id else "",
@@ -692,8 +741,9 @@ def pending():
     return render_template("pending.html", articles=articles, images_map=images_map,
                            active_tab=tab, counts=counts, now_utc=datetime.utcnow(),
                            active_trim_jobs=active_trim_jobs, active_chapter_jobs=active_chapter_jobs,
-                           all_groups=all_groups, group_tag_map=group_tag_map, article_tags=article_tags,
-                           early_engagement_map=early_engagement_map)
+                           all_groups=all_groups, members_by_group=members_by_group,
+                           group_tag_map=group_tag_map, article_tags=article_tags,
+                           guessed_tags=guessed_tags, early_engagement_map=early_engagement_map)
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
@@ -744,9 +794,83 @@ def delete_all_pending():
     return redirect(url_for("pending", account_id=account_id) if account_id else url_for("pending"))
 
 
-def _normalize_tag_name(name: str) -> str:
-    """グループ・メンバー名の表記ゆれ（前後空白・全角/半角・大文字小文字）を吸収する正規化キーを作る。"""
-    return unicodedata.normalize("NFKC", (name or "").strip()).lower()
+@app.route("/api/groups", methods=["POST"])
+def create_group():
+    """ロースター管理画面からの新規グループ追加。"""
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "グループ名を入力してください"}), 400
+    norm = _normalize_tag_name(name)
+    if Group.query.filter_by(normalized_name=norm).first():
+        return jsonify({"ok": False, "error": "同名のグループが既に存在します"}), 400
+    group = Group(name=name, normalized_name=norm)
+    db.session.add(group)
+    db.session.commit()
+    return jsonify({"ok": True, "id": group.id, "name": group.name})
+
+
+@app.route("/api/groups/<int:id>", methods=["PATCH"])
+def rename_group(id):
+    """ロースター管理画面からのグループ名編集。"""
+    group = Group.query.get_or_404(id)
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "グループ名を入力してください"}), 400
+    norm = _normalize_tag_name(name)
+    if Group.query.filter(Group.normalized_name == norm, Group.id != id).first():
+        return jsonify({"ok": False, "error": "同名のグループが既に存在します"}), 400
+    group.name = name
+    group.normalized_name = norm
+    db.session.commit()
+    return jsonify({"ok": True, "id": group.id, "name": group.name})
+
+
+@app.route("/api/groups/<int:id>/members", methods=["POST"])
+def add_roster_member(id):
+    """ロースター管理画面からのメンバー追加。"""
+    group = Group.query.get_or_404(id)
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "メンバー名を入力してください"}), 400
+    norm = _normalize_tag_name(name)
+    if Member.query.filter_by(group_id=group.id, normalized_name=norm).first():
+        return jsonify({"ok": False, "error": "同名のメンバーが既に存在します"}), 400
+    member = Member(group_id=group.id, name=name, normalized_name=norm)
+    db.session.add(member)
+    db.session.commit()
+    return jsonify({"ok": True, "id": member.id, "name": member.name})
+
+
+@app.route("/api/members/<int:id>", methods=["PATCH"])
+def rename_member(id):
+    """ロースター管理画面からのメンバー名編集。"""
+    member = Member.query.get_or_404(id)
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "メンバー名を入力してください"}), 400
+    norm = _normalize_tag_name(name)
+    if Member.query.filter(Member.group_id == member.group_id, Member.normalized_name == norm,
+                            Member.id != id).first():
+        return jsonify({"ok": False, "error": "同名のメンバーが既に存在します"}), 400
+    member.name = name
+    member.normalized_name = norm
+    db.session.commit()
+    return jsonify({"ok": True, "id": member.id, "name": member.name})
+
+
+@app.route("/api/members/<int:id>", methods=["DELETE"])
+def delete_member(id):
+    """ロースターからメンバーを削除する。このメンバーでタグ付けされている記事がある場合、
+    参照が壊れないよう member_id を NULL に戻してから削除する(グループ削除と同じ方針)。"""
+    member = Member.query.get_or_404(id)
+    Article.query.filter_by(member_id=id).update({"member_id": None})
+    db.session.delete(member)
+    db.session.commit()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/groups/<int:id>", methods=["DELETE"])
@@ -807,14 +931,30 @@ def _resolve_group_and_member(group_name: str, member_name: str) -> tuple:
     return group.id, member.id
 
 
-def _guess_group_tag(title: str, groups: list) -> str | None:
-    """タイトルにgroupsマスタのいずれかのグループ名が単語として含まれていれば、そのグループ名を
-    返す(承認待ち一覧のタグ表示用)。音楽番組検索のグループマッチングと同じロジックを再利用する。"""
+def _guess_group(title: str, groups: list):
+    """タイトルにgroupsマスタのいずれかのグループ名が単語として含まれていれば、そのGroupを
+    返す(承認モーダルの自動プリフィル・承認待ち一覧のタグ表示用)。音楽番組検索のグループ
+    マッチングと同じロジックを再利用する。"""
     from youtube_collector import _matches_target_artist
     for g in groups:
         if _matches_target_artist(title, "", g.name):
-            return g.name
+            return g
     return None
+
+
+def _guess_group_tag(title: str, groups: list) -> str | None:
+    g = _guess_group(title, groups)
+    return g.name if g else None
+
+
+def _guess_member_name(title: str, group_id: int) -> str | None:
+    """タイトルに、指定グループのロースター内メンバー名がちょうど1人だけ含まれていれば、
+    その名前を返す。0人、または複数人(グループショット等)含まれる場合はNoneを返す
+    (無理に1人へ絞らず空欄のままにする)。"""
+    from youtube_collector import _matches_target_artist
+    members = Member.query.filter_by(group_id=group_id).all()
+    matched = [m.name for m in members if _matches_target_artist(title, "", m.name)]
+    return matched[0] if len(matched) == 1 else None
 
 
 def _guess_group_id(chapter_title: str) -> int | None:
@@ -1521,7 +1661,24 @@ def settings():
         "callback_url": base_url + "/auth/threads/callback",
     }
     accounts = ThreadsAccount.query.order_by(ThreadsAccount.id.asc()).all()
-    return render_template("settings.html", settings=current, accounts=accounts)
+
+    roster_groups = Group.query.order_by(Group.name.asc()).all()
+    roster_members_by_group = {}
+    if roster_groups:
+        for m in Member.query.filter(
+            Member.group_id.in_([g.id for g in roster_groups])
+        ).order_by(Member.name.asc()).all():
+            roster_members_by_group.setdefault(m.group_id, []).append(m)
+    roster = [
+        {
+            "id": g.id,
+            "name": g.name,
+            "members": [{"id": m.id, "name": m.name} for m in roster_members_by_group.get(g.id, [])],
+        }
+        for g in roster_groups
+    ]
+
+    return render_template("settings.html", settings=current, accounts=accounts, roster=roster)
 
 
 @app.route("/api/quick-setting", methods=["POST"])

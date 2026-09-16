@@ -387,6 +387,26 @@
 </div>
 </form>
 
+<!-- グループ・メンバー ロースター管理(承認モーダルのグループ・メンバー名自動推測に使用) -->
+<div class="card mt-4">
+  <div class="card-header">
+    <i class="bi bi-people-fill me-2"></i>グループ・メンバー ロースター
+  </div>
+  <div class="card-body">
+    <div class="form-text mb-3" style="font-size:.75rem">
+      承認待ち動画のタグ付けモーダルで、タイトルからのグループ・メンバー名自動推測、および
+      メンバー名プルダウンの候補として使われます。
+    </div>
+    <div class="input-group input-group-sm mb-3" style="max-width:320px">
+      <input type="text" id="roster-new-group-input" class="form-control" placeholder="新しいグループ名（例: IVE）">
+      <button type="button" class="btn btn-outline-success" onclick="rosterAddGroup()">
+        <i class="bi bi-plus-lg"></i> グループ追加
+      </button>
+    </div>
+    <div id="roster-groups-container" class="d-flex flex-column gap-3"></div>
+  </div>
+</div>
+
 <!-- Threads API セットアップ手順 -->
 <div class="card mt-4">
   <div class="card-header" style="font-size:.85rem;color:var(--text-muted)">
@@ -514,5 +534,150 @@ function addChannel() {
   c.appendChild(div);
   div.querySelector('input[name=youtube_channel_name]').focus();
 }
+
+// ── グループ・メンバー ロースター管理 ──────────────────────────────────────
+var ROSTER_DATA = {{ (roster or []) | tojson }};  // [{id, name, members:[{id,name},...]}, ...]
+
+function escHtmlRoster(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function renderRoster() {
+  var container = document.getElementById('roster-groups-container');
+  if (!ROSTER_DATA.length) {
+    container.innerHTML = '<div class="text-muted" style="font-size:.82rem">登録されているグループがありません</div>';
+    return;
+  }
+  container.innerHTML = ROSTER_DATA.map(function(g) {
+    var memberChips = g.members.map(function(m) {
+      return '<span class="badge bg-light text-dark border me-1 mb-1" style="font-size:.78rem;font-weight:400">' +
+        '<span onclick="rosterRenameMember(' + m.id + ',' + g.id + ')" style="cursor:pointer" title="クリックで名称変更">' +
+          escHtmlRoster(m.name) +
+        '</span> ' +
+        '<span onclick="rosterDeleteMember(' + m.id + ',' + g.id + ')" style="color:#c00;cursor:pointer;font-weight:700" title="削除">×</span>' +
+        '</span>';
+    }).join('') || '<span class="text-muted" style="font-size:.78rem">メンバー未登録</span>';
+
+    return '<div class="border rounded p-2" data-group-id="' + g.id + '">' +
+      '<div class="d-flex justify-content-between align-items-center mb-2">' +
+        '<strong style="cursor:pointer" onclick="rosterRenameGroup(' + g.id + ')" title="クリックで名称変更">' +
+          escHtmlRoster(g.name) +
+        '</strong>' +
+        '<button type="button" class="btn btn-outline-danger btn-sm py-0 px-2" ' +
+          'onclick="rosterDeleteGroup(' + g.id + ', ' + JSON.stringify(g.name) + ')">' +
+          '<i class="bi bi-trash3"></i></button>' +
+      '</div>' +
+      '<div class="mb-2">' + memberChips + '</div>' +
+      '<div class="input-group input-group-sm" style="max-width:280px">' +
+        '<input type="text" class="form-control" placeholder="メンバー名を追加" id="roster-add-member-' + g.id + '">' +
+        '<button type="button" class="btn btn-outline-success" onclick="rosterAddMember(' + g.id + ')">' +
+          '<i class="bi bi-plus-lg"></i></button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function rosterAddGroup() {
+  var input = document.getElementById('roster-new-group-input');
+  var name = input.value.trim();
+  if (!name) return;
+  fetch('/api/groups', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name })
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (!d.ok) { alert(d.error || '追加に失敗しました'); return; }
+    ROSTER_DATA.push({ id: d.id, name: d.name, members: [] });
+    input.value = '';
+    renderRoster();
+  })
+  .catch(() => alert('通信エラーが発生しました'));
+}
+
+function rosterRenameGroup(id) {
+  var g = ROSTER_DATA.find(x => x.id === id);
+  if (!g) return;
+  var name = prompt('新しいグループ名', g.name);
+  if (name === null) return;
+  name = name.trim();
+  if (!name || name === g.name) return;
+  fetch('/api/groups/' + id, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name })
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (!d.ok) { alert(d.error || '変更に失敗しました'); return; }
+    g.name = d.name;
+    renderRoster();
+  })
+  .catch(() => alert('通信エラーが発生しました'));
+}
+
+function rosterDeleteGroup(id, name) {
+  if (!confirm('グループ「' + name + '」を削除しますか？\nこのグループでタグ付けされている投稿がある場合、タグは解除されます。')) return;
+  fetch('/api/groups/' + id, { method: 'DELETE' })
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) { alert(d.error || '削除に失敗しました'); return; }
+      ROSTER_DATA = ROSTER_DATA.filter(x => x.id !== id);
+      renderRoster();
+    })
+    .catch(() => alert('通信エラーが発生しました'));
+}
+
+function rosterAddMember(groupId) {
+  var input = document.getElementById('roster-add-member-' + groupId);
+  var name = input.value.trim();
+  if (!name) return;
+  fetch('/api/groups/' + groupId + '/members', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name })
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (!d.ok) { alert(d.error || '追加に失敗しました'); return; }
+    var g = ROSTER_DATA.find(x => x.id === groupId);
+    if (g) g.members.push({ id: d.id, name: d.name });
+    renderRoster();
+  })
+  .catch(() => alert('通信エラーが発生しました'));
+}
+
+function rosterRenameMember(memberId, groupId) {
+  var g = ROSTER_DATA.find(x => x.id === groupId);
+  var m = g && g.members.find(x => x.id === memberId);
+  if (!m) return;
+  var name = prompt('新しいメンバー名', m.name);
+  if (name === null) return;
+  name = name.trim();
+  if (!name || name === m.name) return;
+  fetch('/api/members/' + memberId, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name })
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (!d.ok) { alert(d.error || '変更に失敗しました'); return; }
+    m.name = d.name;
+    renderRoster();
+  })
+  .catch(() => alert('通信エラーが発生しました'));
+}
+
+function rosterDeleteMember(memberId, groupId) {
+  fetch('/api/members/' + memberId, { method: 'DELETE' })
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) { alert(d.error || '削除に失敗しました'); return; }
+      var g = ROSTER_DATA.find(x => x.id === groupId);
+      if (g) g.members = g.members.filter(x => x.id !== memberId);
+      renderRoster();
+    })
+    .catch(() => alert('通信エラーが発生しました'));
+}
+
+renderRoster();
 </script>
 {% endblock %}
