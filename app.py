@@ -1001,7 +1001,19 @@ def approve_article(id):
     else:
         slot_label = ""
 
+    # group_id/member_idを確定させてからでないと、動画投稿文の組み立て
+    # (_build_video_post_text)がタグ無しの状態で実行されてしまうため、先にコミットする。
     db.session.commit()
+
+    # 動画投稿は、承認時点で確定したグループ・メンバー名を反映した投稿文を必ず(再)組み立てる。
+    # 承認前に「要約を生成」済みでも、タグ付け前の内容のまま投稿されてしまわないようにするため、
+    # 承認のたびに組み立て直す(AI呼び出し不要・決定的な組み立てのため無料・高速)。
+    if (article.content_type or "article") == "video":
+        from summarizer import summarize_article
+        summarize_article(app, id, style=article.post_style or "つぶやき型")
+        db.session.expire_all()
+        article = Article.query.get_or_404(id)
+
     if request.headers.get("X-Requested-With") == "fetch":
         return jsonify({"ok": True, "slot_label": slot_label})
     flash(f"キューに追加しました{slot_label}: {article.title[:50]}", "success")
