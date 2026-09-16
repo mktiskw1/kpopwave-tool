@@ -533,10 +533,20 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
             g = db.session.get(Group, article.group_id)
             if g:
                 tagged_group_name = g.name
+            else:
+                logger.warning(
+                    "article=%d: group_id=%d が groups マスタに存在しません(削除済み参照?)。"
+                    "グループ名なしで組み立てます。", article_id, article.group_id,
+                )
         if article.member_id:
             m = db.session.get(Member, article.member_id)
             if m:
                 tagged_member_name = m.name
+            else:
+                logger.warning(
+                    "article=%d: member_id=%d が members マスタに存在しません(削除済み参照?)。"
+                    "メンバー名なしで組み立てます。", article_id, article.member_id,
+                )
 
     is_video_post = (content_type == "video")
     body_max = BODY_MAX_VIDEO if is_video_post else BODY_MAX_ARTICLE
