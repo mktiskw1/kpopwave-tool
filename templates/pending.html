@@ -445,7 +445,13 @@
       <select id="tag-member-select" class="form-select form-select-sm d-none mb-1" onchange="onMemberSelectChange()"></select>
       <input type="text" id="tag-member-input" class="form-control form-control-sm" placeholder="例: ウォニョン">
     </div>
+    <div id="tag-modal-preview" class="d-none mb-2"
+         style="font-size:.85rem;background:#f8f9fa;border-radius:8px;padding:8px;white-space:pre-wrap;color:#000"></div>
     <div class="d-flex gap-2 justify-content-end">
+      <button type="button" id="tag-modal-regenerate-btn" class="btn btn-sm btn-outline-primary me-auto"
+              onclick="regenerateFromModal()" title="今入力中のグループ・メンバー名で投稿文を組み立て直してプレビュー（承認前・保存はタグ以外の要約文のみ）">
+        ✍️ 要約を生成
+      </button>
       <button type="button" class="btn btn-sm btn-outline-secondary" onclick="closeTagModal()">キャンセル</button>
       <button type="button" id="tag-modal-confirm-btn" class="btn btn-sm btn-success" onclick="confirmTagModal()">承認してキューへ</button>
     </div>
@@ -809,6 +815,7 @@ function approveArticle(id, btn) {
     document.getElementById('tag-modal-title').textContent = 'グループ・メンバーを入力（任意）';
     document.getElementById('tag-modal-confirm-btn').textContent = '承認してキューへ';
     updateMemberFieldForGroup(guess.group || '', guess.member || '');
+    resetTagModalPreview();
     modal.classList.remove('d-none');
     return;
   }
@@ -826,7 +833,16 @@ function editTag(id, btn) {
   document.getElementById('tag-modal-title').textContent = 'グループ・メンバーを編集';
   document.getElementById('tag-modal-confirm-btn').textContent = '保存';
   updateMemberFieldForGroup(current.group || '', current.member || '');
+  resetTagModalPreview();
   modal.classList.remove('d-none');
+}
+
+function resetTagModalPreview() {
+  var preview = document.getElementById('tag-modal-preview');
+  if (preview) {
+    preview.classList.add('d-none');
+    preview.textContent = '';
+  }
 }
 
 function closeTagModal() {
@@ -846,6 +862,51 @@ function confirmTagModal() {
   } else {
     doApprove(pendingApproveId, pendingApproveBtn, groupName, memberName);
   }
+}
+
+// 承認モーダルで入力中のグループ・メンバー名を使って投稿文を組み立て直し、モーダル内にプレビュー表示する
+// (承認前の確認用。group_id/member_idはDBに保存しない — タグ確定は「承認してキューへ」時のみ)。
+function regenerateFromModal() {
+  var id = tagModalMode === 'edit' ? pendingEditId : pendingApproveId;
+  if (!id) return;
+  var groupName = document.getElementById('tag-group-input').value.trim();
+  var memberName = getMemberFieldValue();
+  var btn = document.getElementById('tag-modal-regenerate-btn');
+  var preview = document.getElementById('tag-modal-preview');
+  var orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  fetch('/articles/' + id + '/resummary', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: new URLSearchParams({ style: 'つぶやき型', group_name: groupName, member_name: memberName }).toString()
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      btn.disabled = false;
+      btn.innerHTML = orig;
+      preview.classList.remove('d-none');
+      if (d.success) {
+        preview.style.color = '#000';
+        preview.textContent = d.summary;
+        // 裏のカード表示も同じ内容に更新しておく(保存されるのは要約文のみ・タグは未保存)。
+        var disp = document.getElementById('display-' + id);
+        if (disp) disp.textContent = d.summary;
+        var ta = document.getElementById('textarea-' + id);
+        if (ta && typeof getEditInitialValue === 'function') ta.value = getEditInitialValue(id, d.summary);
+        if (typeof updateCount === 'function') updateCount(id);
+      } else {
+        preview.style.color = '#e03030';
+        preview.textContent = '要約生成失敗: ' + (d.error || '');
+      }
+    })
+    .catch(function() {
+      btn.disabled = false;
+      btn.innerHTML = orig;
+      preview.classList.remove('d-none');
+      preview.style.color = '#e03030';
+      preview.textContent = '通信エラー';
+    });
 }
 
 function _updateGroupBadge(id, groupName, memberName) {
@@ -1404,15 +1465,21 @@ function fillViewCounts(btn) {
     });
 }
 
-function resummary(id, btn) {
+function resummary(id, btn, groupName, memberName) {
   const style = 'つぶやき型';
   const orig = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  const params = new URLSearchParams();
+  params.set('style', style);
+  // groupName/memberNameが渡された場合のみ、承認前プレビュー用の一時タグとして送る
+  // (未指定ならこれまで通りDB上のgroup_id/member_idが使われる)。
+  if (groupName !== undefined) params.set('group_name', groupName);
+  if (memberName !== undefined) params.set('member_name', memberName);
   fetch('/articles/' + id + '/resummary', {
     method: 'POST',
     headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-    body: 'style=' + encodeURIComponent(style)
+    body: params.toString()
   })
     .then(r => r.json()).then(d => {
       if (d.success) {

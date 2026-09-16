@@ -1360,8 +1360,19 @@ def resummary_article(id):
 
     style = (request.form.get("style") or "つぶやき型").strip()
     scheduled_at = (request.form.get("scheduled_at") or "").strip() or None
-    logger.info("[resummary] article=%d style=%r scheduled_at=%r", id, style, scheduled_at)
-    success = summarize_article(app, id, style=style, scheduled_at=scheduled_at)
+    # group_name/member_name: 承認モーダル入力中のプレビュー用(任意)。キー自体が無ければ
+    # DBのgroup_id/member_idをこれまで通り使う。キーがあれば(空文字含め)そちらを優先する
+    # ── DBへは保存しない、その場限りの組み立てにのみ使う。
+    preview_group_name = request.form.get("group_name")
+    preview_member_name = request.form.get("member_name")
+    logger.info(
+        "[resummary] article=%d style=%r scheduled_at=%r preview_group=%r preview_member=%r",
+        id, style, scheduled_at, preview_group_name, preview_member_name,
+    )
+    success = summarize_article(
+        app, id, style=style, scheduled_at=scheduled_at,
+        preview_group_name=preview_group_name, preview_member_name=preview_member_name,
+    )
     # summarize_article は内部で別 app_context を開くため、セッションを明示的にリフレッシュ
     db.session.expire_all()
     article = db.session.get(Article, id)

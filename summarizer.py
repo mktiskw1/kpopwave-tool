@@ -451,9 +451,21 @@ def _save_error(app, article_id: int, message: str) -> None:
             db.session.commit()
 
 
-def summarize_article(app, article_id: int, style: str = "つぶやき型", scheduled_at: str | None = None) -> bool:
-    """1 記事の日本語投稿テキストを生成して DB に保存する。成功なら True。"""
-    logger.info("[summarize_article] article=%d style=%r scheduled_at=%r", article_id, style, scheduled_at)
+def summarize_article(
+    app, article_id: int, style: str = "つぶやき型", scheduled_at: str | None = None,
+    preview_group_name: str | None = None, preview_member_name: str | None = None,
+) -> bool:
+    """1 記事の日本語投稿テキストを生成して DB に保存する。成功なら True。
+
+    preview_group_name/preview_member_name: 承認前プレビュー用の一時的なタグ指定
+    (Noneでなければ、article.group_id/member_idの代わりにこちらを使って動画投稿文を
+    組み立てる。DBのgroup_id/member_idは変更しない — 承認モーダル入力中の「要約を生成」
+    プレビュー専用)。
+    """
+    logger.info(
+        "[summarize_article] article=%d style=%r scheduled_at=%r preview_group=%r preview_member=%r",
+        article_id, style, scheduled_at, preview_group_name, preview_member_name,
+    )
     style_conf = _STYLE_PROMPTS.get(style, _STYLE_PROMPTS["つぶやき型"])
     style_tone = style_conf["tone"]
     time_hint  = _get_time_style_hint()
@@ -529,24 +541,29 @@ def summarize_article(app, article_id: int, style: str = "つぶやき型", sche
                 content_topic = acc.content_topic.strip()
         tagged_group_name  = ""
         tagged_member_name = ""
-        if article.group_id:
-            g = db.session.get(Group, article.group_id)
-            if g:
-                tagged_group_name = g.name
-            else:
-                logger.warning(
-                    "article=%d: group_id=%d が groups マスタに存在しません(削除済み参照?)。"
-                    "グループ名なしで組み立てます。", article_id, article.group_id,
-                )
-        if article.member_id:
-            m = db.session.get(Member, article.member_id)
-            if m:
-                tagged_member_name = m.name
-            else:
-                logger.warning(
-                    "article=%d: member_id=%d が members マスタに存在しません(削除済み参照?)。"
-                    "メンバー名なしで組み立てます。", article_id, article.member_id,
-                )
+        if preview_group_name is not None:
+            # 承認モーダル入力中のプレビュー: DBのgroup_id/member_idは参照・変更しない。
+            tagged_group_name = preview_group_name.strip()
+            tagged_member_name = (preview_member_name or "").strip() if tagged_group_name else ""
+        else:
+            if article.group_id:
+                g = db.session.get(Group, article.group_id)
+                if g:
+                    tagged_group_name = g.name
+                else:
+                    logger.warning(
+                        "article=%d: group_id=%d が groups マスタに存在しません(削除済み参照?)。"
+                        "グループ名なしで組み立てます。", article_id, article.group_id,
+                    )
+            if article.member_id:
+                m = db.session.get(Member, article.member_id)
+                if m:
+                    tagged_member_name = m.name
+                else:
+                    logger.warning(
+                        "article=%d: member_id=%d が members マスタに存在しません(削除済み参照?)。"
+                        "メンバー名なしで組み立てます。", article_id, article.member_id,
+                    )
 
     is_video_post = (content_type == "video")
     body_max = BODY_MAX_VIDEO if is_video_post else BODY_MAX_ARTICLE
