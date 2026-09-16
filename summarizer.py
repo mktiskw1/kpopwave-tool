@@ -214,12 +214,83 @@ _SONG_TITLE_QUOTE_PATTERNS = [
     re.compile(r'『([^』]{1,60})』'),
     re.compile(r'“([^”]{1,60})”'),
     re.compile(r'‘([^’]{1,60})’'),
+    # 開き引用符と閉じ引用符の種類が不一致な表記ゆれ対策(例: 'COME OVER’ のように
+    # 半角'で開いて全角’で閉じるケース)。上記の厳密なパターンで抽出できない場合のみ
+    # フォールバックとして試す(誤爆を避けるため優先度は最後)。
+    re.compile(r"['‘’](.{1,60}?)['‘’](?![a-zA-Z])"),
 ]
 
+# ── ハイフン区切りの曲名抽出(グループ名タグ付き記事専用) ──────────────────────
+# DBの実タイトルを分析した結果、引用符なしで「グループ名(+メンバー名/他言語表記)
+# - 曲名」の順にハイフンで区切られるケースが一定数あることが分かった
+# (例: "LE SSERAFIM - HOT | Show! MusicCore..."、
+#      "aespa KARINA (에스파 카리나) – LEMONADE | ...")。
+# 一方でハイフンは撮影日・チャンネル名・「曲名 - グループ名」の逆順など曲名以外にも
+# 多用されるため、以下の条件をすべて満たす場合のみ曲名候補として採用する
+# (満たさない場合は誤検出のリスクを避け、これまで通り抽出しない):
+#   1. 記事に確定したグループ名(タグ付け済み)があること
+#   2. そのグループ名の直後 _GROUP_HYPHEN_WINDOW 文字以内にハイフンが現れること
+#      (メンバー名や他言語での重複表記が間に挟まる程度は許容するが、離れすぎている
+#      ハイフンは無関係な区切りである可能性が高いため対象外とする)
+#   3. ハイフン後の区切り文字(| ( ) [ ] @ 次のハイフン 全角パイプ代用字 など)までを
+#      候補とし、「직캠」「Fancam」等の撮影クレジット語を末尾から除去すること
+#   4. 除去後も _GROUP_HYPHEN_MAX_LEN 文字を超える場合は区切り文字を検出できていない
+#      (曲名ではなく後続の説明文を丸ごと拾っている)とみなし、採用しない
+_GROUP_HYPHEN_WINDOW = 40
+_GROUP_HYPHEN_MAX_LEN = 30
+_GROUP_HYPHEN_STOP_RE = re.compile(r"[|()\[\]@–—\-ㅣ]|\s[lI]\s")
+_GROUP_HYPHEN_NOISE_WORDS = (
+    "fancam", "facecam", "stagecam", "stage cam",
+    "직캠", "얼빡직캠", "페이스캠", "m/v", "mv", "live", "ver.", "ver", "cover", "cam",
+)
 
-def _extract_song_title(title: str) -> str:
+
+def _strip_trailing_noise_words(text: str) -> str:
+    text = text.strip()
+    changed = True
+    while changed:
+        changed = False
+        for word in _GROUP_HYPHEN_NOISE_WORDS:
+            pattern = re.compile(r"\s*\b" + re.escape(word) + r"\b\s*$", re.IGNORECASE)
+            stripped = pattern.sub("", text)
+            if stripped != text:
+                text = stripped.strip()
+                changed = True
+    return text
+
+
+def _extract_song_title_after_group_hyphen(title: str, group_name: str) -> str:
+    """タグ付け済みグループ名の直後(_GROUP_HYPHEN_WINDOW文字以内)に現れるハイフンから、
+    次の区切り文字までを曲名候補として抽出する。条件を満たさなければ空文字を返す。"""
+    if not group_name:
+        return ""
+    idx = title.lower().find(group_name.lower())
+    if idx < 0:
+        return ""
+    search_start = idx + len(group_name)
+    window = title[search_start:search_start + _GROUP_HYPHEN_WINDOW]
+    hyphen_m = re.search(r"[\-–—]", window)
+    if not hyphen_m:
+        return ""
+    hyphen_pos = search_start + hyphen_m.start()
+    rest = title[hyphen_pos + 1:]
+    stop_m = _GROUP_HYPHEN_STOP_RE.search(rest)
+    candidate = rest[:stop_m.start()] if stop_m else rest
+    candidate = _strip_trailing_noise_words(candidate)
+    if not candidate or len(candidate) > _GROUP_HYPHEN_MAX_LEN:
+        return ""
+    return candidate
+
+
+def _extract_song_title(title: str, group_name: str = "") -> str:
     """動画タイトルから曲名らしき部分を抽出する。抽出できなければ空文字を返す
-    (呼び出し側でスキップする)。"""
+    (呼び出し側でスキップする)。
+
+    1. まず引用符（'…'・"…"・「…」等、表記ゆれ含む）で囲まれた部分を最優先で試す。
+    2. 引用符で見つからず、かつタグ付け済みのgroup_nameが分かっている場合のみ、
+       「グループ名の直後のハイフン区切り」パターンを試す（詳細は_GROUP_HYPHEN_*の
+       コメント参照）。group_name未指定時はこれまで通り引用符のみで判定する。
+    """
     if not title:
         return ""
     for pattern in _SONG_TITLE_QUOTE_PATTERNS:
@@ -228,7 +299,7 @@ def _extract_song_title(title: str) -> str:
             candidate = m.group(1).strip()
             if candidate:
                 return candidate
-    return ""
+    return _extract_song_title_after_group_hyphen(title, group_name)
 
 
 def _build_video_post_text(
@@ -573,7 +644,7 @@ def summarize_article(
     # (承認モーダルでタグ付けされたgroup_id/member_idと、タイトルから抽出した曲名を使う。
     # タグ付けされていない・抽出できない要素はスキップし、残りの要素だけで組み立てる)
     if is_video_post:
-        song_title = _extract_song_title(title)
+        song_title = _extract_song_title(title, tagged_group_name)
         post_text = _build_video_post_text(tagged_group_name, tagged_member_name, song_title, hook, body_max)
         with app.app_context():
             art = db.session.get(Article, article_id)
