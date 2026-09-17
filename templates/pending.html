@@ -1127,8 +1127,8 @@ function submitForm(action) {
 
 // ── 要約編集 ──────────────────────────────────────────────────────────────
 function toggleEdit(id) {
-  // display-<id>/edit-<id>は要約未生成の記事({% if a.summary %}の分岐外)では
-  // 存在しない。現状呼び出し元のボタンはすべてその分岐の内側にのみ存在するため
+  // display-<id>/edit-<id>は要約未生成の記事(テンプレート側でa.summaryがある場合の
+  // 分岐外)では存在しない。現状呼び出し元のボタンはすべてその分岐の内側にのみ存在するため
   // 実害は無いはずだが、念のため存在確認してから操作する。
   const disp = document.getElementById('display-' + id);
   const edit = document.getElementById('edit-' + id);
@@ -1154,7 +1154,7 @@ function getEditInitialValue(id, summary) {
 
 function updateCount(id) {
   // textarea-<id>/count-<id>は要約未生成の記事(トリミング直後のクリップ等、a.summaryが
-  // 空のままページが描画された場合)では{% if a.summary %}の分岐によりDOMに存在しない。
+  // 空のままページが描画された場合)ではテンプレート側の分岐によりDOMに存在しない。
   // 未存在時に無条件で.valueへアクセスするとTypeErrorとなり、呼び出し元(fetchの.then内)
   // では通信エラーとして誤表示されてしまうため、存在確認してから処理する。
   const ta = document.getElementById('textarea-' + id);
