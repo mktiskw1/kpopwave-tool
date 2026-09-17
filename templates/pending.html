@@ -1127,8 +1127,13 @@ function submitForm(action) {
 
 // ── 要約編集 ──────────────────────────────────────────────────────────────
 function toggleEdit(id) {
-  document.getElementById('display-' + id).classList.toggle('d-none');
-  document.getElementById('edit-' + id).classList.toggle('d-none');
+  // display-<id>/edit-<id>は要約未生成の記事({% if a.summary %}の分岐外)では
+  // 存在しない。現状呼び出し元のボタンはすべてその分岐の内側にのみ存在するため
+  // 実害は無いはずだが、念のため存在確認してから操作する。
+  const disp = document.getElementById('display-' + id);
+  const edit = document.getElementById('edit-' + id);
+  if (disp) disp.classList.toggle('d-none');
+  if (edit) edit.classList.toggle('d-none');
 }
 
 function enterEditMode(id) {
@@ -1161,14 +1166,17 @@ function updateCount(id) {
 }
 
 function saveSummary(id) {
-  const text = document.getElementById('textarea-' + id).value;
+  const ta = document.getElementById('textarea-' + id);
+  if (!ta) return;
+  const text = ta.value;
   fetch('/articles/' + id + '/edit', {
     method: 'POST',
     headers: {'Content-Type': 'application/x-www-form-urlencoded'},
     body: 'summary=' + encodeURIComponent(text)
   }).then(r => r.json()).then(d => {
     if (d.success) {
-      document.getElementById('display-' + id).textContent = d.summary;
+      const disp = document.getElementById('display-' + id);
+      if (disp) disp.textContent = d.summary;
       toggleEdit(id);
       const cc = document.querySelector('#card-' + id + ' .char-count');
       if (cc) {
