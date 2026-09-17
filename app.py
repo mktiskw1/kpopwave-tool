@@ -1369,18 +1369,34 @@ def resummary_article(id):
         "[resummary] article=%d style=%r scheduled_at=%r preview_group=%r preview_member=%r",
         id, style, scheduled_at, preview_group_name, preview_member_name,
     )
-    success = summarize_article(
-        app, id, style=style, scheduled_at=scheduled_at,
-        preview_group_name=preview_group_name, preview_member_name=preview_member_name,
-    )
-    # summarize_article は内部で別 app_context を開くため、セッションを明示的にリフレッシュ
-    db.session.expire_all()
-    article = db.session.get(Article, id)
-    logger.info("resummary article=%d success=%s error_message=%r", id, success, article.error_message if article else None)
-    if success:
-        return jsonify({"success": True, "summary": article.summary, "length": len(article.summary or "")})
-    error_msg = (article.error_message if article else None) or "要約の生成に失敗しました（サーバーログを確認してください）"
-    return jsonify({"success": False, "error": error_msg})
+    try:
+        success = summarize_article(
+            app, id, style=style, scheduled_at=scheduled_at,
+            preview_group_name=preview_group_name, preview_member_name=preview_member_name,
+        )
+        # summarize_article は内部で別 app_context を開くため、セッションを明示的にリフレッシュ
+        db.session.expire_all()
+        article = db.session.get(Article, id)
+        logger.info(
+            "resummary article=%d success=%s error_message=%r",
+            id, success, article.error_message if article else None,
+        )
+        # article is None のケース: 実行中に他リクエスト(削除操作等、threaded=Trueで並行実行され得る)
+        # によって記事が削除された場合。success=Trueでもここでは記事本体を参照できないため、
+        # article.summary への素通しアクセスで落ちないようにガードする。
+        if success and article is not None:
+            return jsonify({"success": True, "summary": article.summary, "length": len(article.summary or "")})
+        if article is None:
+            error_msg = "対象の記事が見つかりません(処理中に削除された可能性があります)。"
+        else:
+            error_msg = article.error_message or "要約の生成に失敗しました（サーバーログを確認してください）"
+        return jsonify({"success": False, "error": error_msg})
+    except Exception:
+        # ここで確実にトレースバックをログへ残す(想定外の例外はFlaskの既定の500 HTMLページを
+        # 返してしまい、フロント側はJSONパースに失敗して原因不明の「通信エラー」としか
+        # 表示できなくなるため、必ずJSONで理由を返す)。
+        logger.exception("resummary article=%d で予期しない例外が発生しました", id)
+        return jsonify({"success": False, "error": "サーバー内部エラーが発生しました（サーバーログを確認してください）"}), 500
 
 
 # ── 動画配信（ngrokブラウザ警告バイパス） ──────────────────────────────────
