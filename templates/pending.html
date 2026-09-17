@@ -862,6 +862,14 @@ function confirmTagModal() {
   } else {
     doApprove(pendingApproveId, pendingApproveBtn, groupName, memberName);
   }
+  // doApprove/doSaveTagへは値渡し済みなので、ここでグローバル変数をリセットしても
+  // 実行中の処理には影響しない。リセットし忘れると、モーダルを閉じずに終えた場合に
+  // pendingApproveId等が古い記事IDを指したまま残り、次にregenerateFromModal()等が
+  // 誤って古い記事を対象にしてしまう恐れがあるため念のためクリアしておく。
+  pendingApproveId = null;
+  pendingApproveBtn = null;
+  pendingEditId = null;
+  pendingEditBtn = null;
 }
 
 // 承認モーダルで入力中のグループ・メンバー名を使って投稿文を組み立て直し、モーダル内にプレビュー表示する
@@ -1140,8 +1148,14 @@ function getEditInitialValue(id, summary) {
 }
 
 function updateCount(id) {
-  const len = document.getElementById('textarea-' + id).value.length;
+  // textarea-<id>/count-<id>は要約未生成の記事(トリミング直後のクリップ等、a.summaryが
+  // 空のままページが描画された場合)では{% if a.summary %}の分岐によりDOMに存在しない。
+  // 未存在時に無条件で.valueへアクセスするとTypeErrorとなり、呼び出し元(fetchの.then内)
+  // では通信エラーとして誤表示されてしまうため、存在確認してから処理する。
+  const ta = document.getElementById('textarea-' + id);
   const el = document.getElementById('count-' + id);
+  if (!ta || !el) return;
+  const len = ta.value.length;
   el.textContent = len + ' / 500 文字';
   el.className = 'char-count ' + (len > 500 ? 'over' : 'ok');
 }
