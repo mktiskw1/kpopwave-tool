@@ -2135,6 +2135,9 @@ _ANALYTICS_ACCOUNT_ID = 1
 
 @app.route("/analytics")
 def analytics():
+    from scheduler import buzz_requeue_backlog_stats
+    buzz_backlog = buzz_requeue_backlog_stats(app, account_id=_ANALYTICS_ACCOUNT_ID)
+
     daily_rows = (
         DailyStat.query
         .filter_by(account_id=_ANALYTICS_ACCOUNT_ID)
@@ -2234,6 +2237,7 @@ def analytics():
 
     return render_template(
         "analytics.html",
+        buzz_backlog=buzz_backlog,
         daily_labels=daily_labels,
         daily_followers=daily_followers,
         daily_views=daily_views,

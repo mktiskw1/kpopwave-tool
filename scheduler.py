@@ -658,6 +658,55 @@ def _buzz_requeue_candidates(app, account_id: int, limit: int | None = None) -> 
         return query.all()
 
 
+def buzz_requeue_backlog_stats(app, account_id: int = _BUZZ_REQUEUE_ACCOUNT_ID) -> dict:
+    """自動再キュー対象(バックログ)の現況を集計する(表示専用、DBは変更しない)。
+
+    対象条件は _buzz_requeue_candidates と完全に同一(status='posted' が
+    _video_cleanup_job の削除ルールを生き延びた＝200いいね達成/猶予中を意味する)。
+    「直近7日間で新たにバックログ入り」は、posted_at が
+    (interval_days+7)日前〜interval_days日前 の範囲にある記事数で近似する
+    (=ちょうど閾値を越えてバックログに加わったタイミングが直近7日以内)。
+    """
+    with app.app_context():
+        interval_days = int(Setting.get("buzz_requeue_interval_days", "60") or "60")
+        now = datetime.utcnow()
+        cutoff = now - timedelta(days=interval_days)
+        recent_cutoff = cutoff - timedelta(days=7)
+
+        base_filters = (
+            Article.account_id == account_id,
+            Article.status == "posted",
+            Article.content_type == "video",
+            Article.video_file_path.isnot(None),
+            Article.posted_at.isnot(None),
+        )
+
+        backlog = (
+            Article.query
+            .filter(*base_filters, Article.posted_at <= cutoff)
+            .with_entities(Article.buzz_repost_count)
+            .all()
+        )
+
+        by_repost_count: dict = {}
+        for (repost_count,) in backlog:
+            key = repost_count or 1
+            by_repost_count[key] = by_repost_count.get(key, 0) + 1
+
+        new_in_7d = (
+            Article.query
+            .filter(*base_filters, Article.posted_at > recent_cutoff, Article.posted_at <= cutoff)
+            .count()
+        )
+
+        return {
+            "total": len(backlog),
+            "by_repost_count": dict(sorted(by_repost_count.items())),
+            "new_in_7d": new_in_7d,
+            "interval_days": interval_days,
+        }
+
+
 @_logged_job("buzz_requeue")
 def _buzz_requeue_job(app, account_id: int = _BUZZ_REQUEUE_ACCOUNT_ID) -> None:
     """バズった動画(200いいね達成・永久保存)を自動で再キューする。

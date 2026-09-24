@@ -5,6 +5,28 @@
   <h4 class="mb-0 fw-bold">分析</h4>
 </div>
 
+<!-- バズ動画 再投稿バックログ -->
+<div class="card p-3 mb-4">
+  <h6 class="fw-bold mb-2">バズ動画 再投稿バックログ</h6>
+  <div class="d-flex align-items-baseline gap-2 flex-wrap">
+    <span class="fw-bold" style="font-size:1.6rem">{{ buzz_backlog.total }}</span>
+    <span class="text-muted" style="font-size:.85rem">
+      件が再キュー対象（最終投稿日から{{ buzz_backlog.interval_days }}日経過・未処理）
+    </span>
+  </div>
+  {% if buzz_backlog.by_repost_count %}
+  <div class="mt-2" style="font-size:.82rem;color:var(--text-muted)">
+    内訳:
+    {% for repost_count, count in buzz_backlog.by_repost_count.items() %}
+    <span class="badge bg-secondary-subtle text-secondary-emphasis me-1">{{ repost_count }}回目の投稿: {{ count }}件</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <div class="mt-1" style="font-size:.82rem;color:var(--text-muted)">
+    直近7日間で新たにバックログ入り: {{ buzz_backlog.new_in_7d }}件
+  </div>
+</div>
+
 <!-- フォロワー数・閲覧数の推移 -->
 <div class="card p-3 mb-4">
   <h6 class="fw-bold mb-3">フォロワー数・閲覧数の推移</h6>
