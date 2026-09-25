@@ -177,6 +177,7 @@ def _migrate_db():
         ("thread_reply_text", "TEXT"),
         ("thread_reply_url", "VARCHAR(1000)"),
         ("is_comeback", "INTEGER DEFAULT 0"),
+        ("summary_is_manual", "INTEGER DEFAULT 0"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -1019,7 +1020,9 @@ def approve_article(id):
     # 動画投稿は、承認時点で確定したグループ・メンバー名を反映した投稿文を必ず(再)組み立てる。
     # 承認前に「要約を生成」済みでも、タグ付け前の内容のまま投稿されてしまわないようにするため、
     # 承認のたびに組み立て直す(AI呼び出し不要・決定的な組み立てのため無料・高速)。
-    if (article.content_type or "article") == "video":
+    # ただし本文が手動編集済み(summary_is_manual)の場合は、この自動再組み立てで
+    # 手入力した内容を上書きしてしまうため、その場合はスキップして手動編集内容を尊重する。
+    if (article.content_type or "article") == "video" and not article.summary_is_manual:
         from summarizer import summarize_article
         summarize_article(app, id, style=article.post_style or "つぶやき型")
         db.session.expire_all()
@@ -1347,6 +1350,9 @@ def edit_article(id):
     if not summary:
         return jsonify({"success": False, "error": "要約が空です"})
     article.summary = summary
+    # 手動編集済みとしてマークする。承認時の自動再組み立て(_build_video_post_text)は
+    # このフラグを見てスキップされるため、手入力した本文が上書きされなくなる。
+    article.summary_is_manual = True
     db.session.commit()
     return jsonify({"success": True, "summary": summary, "length": len(summary)})
 

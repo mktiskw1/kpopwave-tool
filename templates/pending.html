@@ -378,6 +378,12 @@
           <span class="char-count {% if a.summary|length > 500 %}over{% else %}ok{% endif %}">
             <i class="bi bi-chat-text"></i> {{ a.summary|length }} / 500 文字
           </span>
+          <span id="manual-badge-{{ a.id }}"
+                class="badge bg-secondary-subtle text-secondary-emphasis{% if not a.summary_is_manual %} d-none{% endif %}"
+                style="font-size:.68rem"
+                title="手動編集済み。承認時の自動組み立て(グループ名→メンバー名→曲名→フック)はスキップされ、この本文がそのまま投稿されます。「要約を生成」を押すと自動生成に戻ります">
+            ✏️ 手動編集済み
+          </span>
           <div class="d-flex gap-1 align-items-center">
             <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2"
                     onclick="toggleEdit({{ a.id }})" style="font-size:.78rem">
@@ -1010,6 +1016,9 @@ function regenerateFromModal() {
         var ta = document.getElementById('textarea-' + id);
         if (ta && typeof getEditInitialValue === 'function') ta.value = getEditInitialValue(id, d.summary);
         if (typeof updateCount === 'function') updateCount(id);
+        // 自動生成に戻ったため、手動編集済みバッジは消す(サーバー側でもsummary_is_manual=False)。
+        var badge = document.getElementById('manual-badge-' + id);
+        if (badge) badge.classList.add('d-none');
       } else {
         preview.style.color = '#e03030';
         preview.textContent = '要約生成失敗: ' + (d.error || '');
@@ -1295,6 +1304,9 @@ function saveSummary(id) {
         cc.textContent = d.length + ' / 500 文字';
         cc.className = 'char-count ' + (d.length > 500 ? 'over' : 'ok');
       }
+      // 手動編集済みとして保存されたため、バッジを表示する(承認時の自動組み立てはスキップされる)。
+      const badge = document.getElementById('manual-badge-' + id);
+      if (badge) badge.classList.remove('d-none');
     } else {
       alert('保存失敗: ' + d.error);
     }
@@ -1628,6 +1640,9 @@ function resummary(id, btn, groupName, memberName) {
             cc.textContent = d.length + ' / 500 文字';
             cc.className = 'char-count ' + (d.length > 500 ? 'over' : 'ok');
           }
+          // 自動生成に戻ったため、手動編集済みバッジは消す(サーバー側でもsummary_is_manual=False)。
+          const badge = document.getElementById('manual-badge-' + id);
+          if (badge) badge.classList.add('d-none');
           enterEditMode(id);
           const card = document.getElementById('card-' + id);
           if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });

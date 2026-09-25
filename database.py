@@ -71,6 +71,10 @@ class Article(db.Model):
     thread_reply_url = db.Column(db.String(1000), nullable=True)
     # カムバック曲の手動タグ(自動判定はしない)。アフィリ付け忘れ防止のUIヒント用。
     is_comeback = db.Column(db.Boolean, nullable=False, default=False)
+    # summaryが手動編集されたかどうか。Trueの間は承認時の自動再組み立て(動画投稿文の
+    # グループ名→メンバー名→曲名→フック組み立て)をスキップし、手動編集内容を尊重する。
+    # 「要約を生成」(summarize_article)が成功するたびFalseに戻る(自動生成に戻った扱い)。
+    summary_is_manual = db.Column(db.Boolean, nullable=False, default=False)
 
     def to_dict(self):
         return {

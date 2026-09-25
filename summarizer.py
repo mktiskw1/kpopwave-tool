@@ -652,6 +652,9 @@ def summarize_article(
                 art.summary       = post_text
                 art.post_style    = style
                 art.error_message = None
+                # 自動組み立てで上書きするため、手動編集フラグは解除する
+                # (このパス自体はapprove_article側でsummary_is_manual=Trueなら呼ばれない)。
+                art.summary_is_manual = False
                 db.session.commit()
         logger.info(
             "動画投稿テキストを組み立て: article=%d group=%r member=%r song=%r hook=%r (%d文字)",
@@ -669,6 +672,7 @@ def summarize_article(
                 art.summary       = post_text
                 art.post_style    = style
                 art.error_message = None
+                art.summary_is_manual = False
                 db.session.commit()
         logger.info(
             "AI生成スキップ（固定テンプレート）: article=%d video=%s (%d文字)",
@@ -738,6 +742,7 @@ def summarize_article(
                 art.summary       = post_text
                 art.post_style    = style
                 art.error_message = None
+                art.summary_is_manual = False
                 if article_images:
                     art.image_urls = json.dumps(article_images, ensure_ascii=False)
                 db.session.commit()
@@ -1018,6 +1023,7 @@ def summarize_article(
                 art.summary       = post_text
                 art.post_style    = style
                 art.error_message = None
+                art.summary_is_manual = False
                 if article_images:
                     art.image_urls = json.dumps(article_images, ensure_ascii=False)
                 db.session.commit()
