@@ -61,6 +61,9 @@ def _get_credentials(app, account_id: int = None):
 
 
 def _mark_posted(app, article_id: int, post_id: str):
+    reply_text = ""
+    reply_url = ""
+    account_id = None
     with app.app_context():
         art = Article.query.get(article_id)
         if art:
@@ -68,6 +71,51 @@ def _mark_posted(app, article_id: int, post_id: str):
             art.posted_at = datetime.utcnow()
             art.threads_post_id = post_id
             db.session.commit()
+            reply_text = (art.thread_reply_text or "").strip()
+            reply_url = (art.thread_reply_url or "").strip()
+            account_id = art.account_id
+
+    # ツリー2件目(アフィリエイトリンク等・任意設定)。どちらのアカウントの投稿でも同様に動く。
+    # 1件目は既に投稿成功として確定しているため、ここで失敗してもarticleの状態は変更せず
+    # ログにのみ残す(1件目の投稿結果に影響させない)。
+    if reply_text or reply_url:
+        reply_body = f"{reply_text}\n{reply_url}".strip() if reply_text and reply_url else (reply_text or reply_url)
+        user_id, token = _get_credentials(app, account_id)
+        if not user_id or not token:
+            logger.error("ツリー2件目投稿スキップ article=%d: 認証情報が取得できません", article_id)
+        else:
+            _post_thread_reply(user_id, token, post_id, reply_body, article_id)
+
+
+def _post_thread_reply(user_id: str, token: str, parent_post_id: str, reply_text: str, article_id: int) -> None:
+    """1件目投稿(parent_post_id)へのリプライとして、任意のツリー2件目(コメント文+
+    アフィリエイトリンク等)を投稿する。comments.post_reply と同じ create→publish の
+    2ステップだが、こちらは自分の投稿へのセルフリプライであり_publish()の
+    リトライ機構をそのまま使い回せるためthreads_api内に置く。"""
+    try:
+        res = requests.post(
+            f"{THREADS_API}/{user_id}/threads",
+            data={
+                "media_type": "TEXT",
+                "text": reply_text,
+                "reply_to_id": parent_post_id,
+                "access_token": token,
+            },
+            timeout=30,
+        )
+        data = res.json()
+        logger.info("Container (REPLY): HTTP %d %s", res.status_code, data)
+        if res.status_code != 200 or not data.get("id"):
+            err = data.get("error", {}).get("message", res.text[:200])
+            logger.error("ツリー2件目コンテナ作成失敗 article=%d parent=%s: %s", article_id, parent_post_id, err)
+            return
+        ok, result = _publish(user_id, token, data["id"])
+        if ok:
+            logger.info("ツリー2件目投稿成功 article=%d parent=%s reply_post_id=%s", article_id, parent_post_id, result)
+        else:
+            logger.error("ツリー2件目公開失敗 article=%d parent=%s: %s", article_id, parent_post_id, result)
+    except Exception as exc:
+        logger.error("ツリー2件目投稿で例外 article=%d parent=%s: %s", article_id, parent_post_id, exc)
 
 
 def _mark_failed(app, article_id: int, error: str):
@@ -422,6 +470,7 @@ def post_to_threads(app, article_id: int, test_mode: bool = False, account_id: i
             logger.info("[TEST] video_file_path: %s", video_file_path)
         else:
             logger.info("[TEST] images: %s", images)
+        reply_preview = ""
         with app.app_context():
             art = Article.query.get(article_id)
             if art:
@@ -429,6 +478,12 @@ def post_to_threads(app, article_id: int, test_mode: bool = False, account_id: i
                 art.posted_at = datetime.utcnow()
                 art.threads_post_id = f"test_{article_id}"
                 db.session.commit()
+                reply_text = (art.thread_reply_text or "").strip()
+                reply_url = (art.thread_reply_url or "").strip()
+                if reply_text or reply_url:
+                    reply_preview = f"{reply_text}\n{reply_url}".strip() if reply_text and reply_url else (reply_text or reply_url)
+        if reply_preview:
+            logger.info("[TEST] ツリー2件目 (実際には投稿しません):\n%s", reply_preview)
         mode_label = "VIDEO" if content_type == "video" else f"{len(images)}枚"
         return True, f"テストモード: 投稿シミュレーション成功 ({mode_label})"
 

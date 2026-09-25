@@ -174,6 +174,9 @@ def _migrate_db():
         ("is_favorite", "INTEGER DEFAULT 0"),
         ("buzz_repost_count", "INTEGER DEFAULT 1"),
         ("buzz_low_streak", "INTEGER DEFAULT 0"),
+        ("thread_reply_text", "TEXT"),
+        ("thread_reply_url", "VARCHAR(1000)"),
+        ("is_comeback", "INTEGER DEFAULT 0"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -992,6 +995,14 @@ def approve_article(id):
         group_id, member_id = _resolve_group_and_member(group_name, member_name)
         article.group_id = group_id
         article.member_id = member_id
+
+    # カムバック曲タグ(手動のみ・自動判定はしない)とツリー2件目(アフィリエイト等・任意)。
+    # 両方未設定のままなら従来通り1件のみの投稿となる(post_to_threads側の挙動は変えない)。
+    article.is_comeback = bool(tag_data.get("is_comeback"))
+    reply_text = (tag_data.get("thread_reply_text") or "").strip()
+    reply_url = (tag_data.get("thread_reply_url") or "").strip()
+    article.thread_reply_text = reply_text or None
+    article.thread_reply_url = reply_url or None
 
     slot_utc = next_post_slot(app, account_id=article.account_id)
     if slot_utc:

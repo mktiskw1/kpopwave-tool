@@ -66,6 +66,11 @@ class Article(db.Model):
     buzz_repost_count = db.Column(db.Integer, nullable=False, default=1)
     # 再投稿2・3回目のいいね未達を1回だけ猶予するための直近判定フラグ(scheduler._video_cleanup_job参照)。
     buzz_low_streak = db.Column(db.Boolean, nullable=False, default=False)
+    # ツリー2件目(アフィリエイトリンク等)機能: 任意設定。両方Noneなら従来通り1件のみ投稿する。
+    thread_reply_text = db.Column(db.Text, nullable=True)
+    thread_reply_url = db.Column(db.String(1000), nullable=True)
+    # カムバック曲の手動タグ(自動判定はしない)。アフィリ付け忘れ防止のUIヒント用。
+    is_comeback = db.Column(db.Boolean, nullable=False, default=False)
 
     def to_dict(self):
         return {

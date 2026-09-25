@@ -46,6 +46,12 @@
             🔁 再投稿 {{ a.buzz_repost_count }}回目
           </span>
           {% endif %}
+          {% if a.is_comeback %}
+          <span class="badge bg-danger-subtle text-danger-emphasis ms-1" style="font-size:.7rem" title="カムバック曲としてタグ付け済み">🆕 カムバック</span>
+          {% endif %}
+          {% if a.thread_reply_text or a.thread_reply_url %}
+          <span class="badge bg-warning-subtle text-warning-emphasis ms-1" style="font-size:.7rem" title="ツリー2件目(アフィリエイト等)設定済み">🔗 2件目あり</span>
+          {% endif %}
         </div>
         <div style="font-size:.88rem;font-weight:600">
           {% if (a.content_type or 'article') == 'text' %}

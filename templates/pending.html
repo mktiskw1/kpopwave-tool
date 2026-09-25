@@ -108,6 +108,12 @@
                  onchange="updateSelection()">
           <span class="badge bg-secondary" style="font-size:.72rem">{{ a.feed_source }}</span>
           <span id="group-badge-{{ a.id }}" class="badge bg-info-subtle text-info-emphasis{% if not (group_tag_map and group_tag_map.get(a.id)) %} d-none{% endif %}" style="font-size:.72rem">{{ group_tag_map.get(a.id) if group_tag_map else '' }}</span>
+          {% if a.is_comeback %}
+          <span class="badge bg-danger-subtle text-danger-emphasis" style="font-size:.72rem" title="カムバック曲としてタグ付け済み">🆕 カムバック</span>
+          {% endif %}
+          {% if a.thread_reply_text or a.thread_reply_url %}
+          <span class="badge bg-warning-subtle text-warning-emphasis" style="font-size:.72rem" title="ツリー2件目(アフィリエイト等)設定済み">🔗 2件目あり</span>
+          {% endif %}
           {% if a.published_at %}
           <span style="font-size:.75rem;color:#666">{{ a.published_at.strftime('%Y/%m/%d') }}</span>
           {% endif %}
@@ -421,16 +427,17 @@
   <input type="hidden" name="account_id" value="{{ nav_active_account_id or '' }}">
 </form>
 
-{% if nav_is_kpop_account %}
-<!-- グループ・メンバータグ付けモーダル -->
+<!-- 承認モーダル(グループ・メンバータグ付け[KPOPアカウントのみ]、カムバック曲タグ・
+     ツリー2件目[アフィリエイト等]はアカウント種別を問わず共通で使えるようにする) -->
 <div id="tag-modal" class="d-none"
      style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;"
      onclick="if(event.target===this)closeTagModal()">
-  <div style="background:#fff;border-radius:16px;width:min(400px,94vw);padding:20px;position:relative;"
+  <div style="background:#fff;border-radius:16px;width:min(420px,94vw);max-height:90vh;overflow-y:auto;padding:20px;position:relative;"
        onclick="event.stopPropagation()">
     <button type="button" onclick="closeTagModal()"
             style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:1.3rem;cursor:pointer;color:#888;line-height:1;padding:0">✕</button>
     <h6 id="tag-modal-title" class="fw-bold mb-3" style="color:#000">グループ・メンバーを入力（任意）</h6>
+    {% if nav_is_kpop_account %}
     <div class="mb-2" style="position:relative">
       <label class="form-label" style="font-size:.8rem">グループ名</label>
       <input type="text" id="tag-group-input" class="form-control form-control-sm"
@@ -440,24 +447,53 @@
            style="position:absolute;left:0;right:0;z-index:10;background:#fff;border:1px solid #ccc;
                   border-radius:6px;max-height:180px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.15)"></div>
     </div>
-    <div class="mb-3">
+    <div class="mb-2">
       <label class="form-label" style="font-size:.8rem">メンバー名（空欄可）</label>
       <select id="tag-member-select" class="form-select form-select-sm d-none mb-1" onchange="onMemberSelectChange()"></select>
       <input type="text" id="tag-member-input" class="form-control form-control-sm" placeholder="例: ウォニョン">
     </div>
+    <div class="form-check mb-3" id="tag-comeback-wrap">
+      <input type="checkbox" class="form-check-input" id="tag-comeback-input" onchange="onComebackToggleChange()">
+      <label class="form-check-label" for="tag-comeback-input" style="font-size:.85rem">
+        🆕 カムバック曲（新曲・カムバック関連の投稿）
+      </label>
+    </div>
+    {% endif %}
+    <div class="mb-3" id="tag-reply-wrap">
+      <div class="form-check form-switch">
+        <input type="checkbox" class="form-check-input" id="tag-reply-toggle" onchange="onReplyToggleChange()">
+        <label class="form-check-label" for="tag-reply-toggle" style="font-size:.85rem">
+          🔗 2件目を追加（アフィリエイト等）
+        </label>
+      </div>
+      <div id="tag-reply-fields" class="d-none mt-2">
+        <label class="form-label" style="font-size:.8rem">コメント文（空欄可）</label>
+        <textarea id="tag-reply-text-input" class="form-control form-control-sm mb-2" rows="2"
+                  placeholder="例: 使ってるアイテムはこちら"></textarea>
+        <label class="form-label" style="font-size:.8rem">URL（Amazonアソシエイト・楽天等）</label>
+        <input type="text" id="tag-reply-url-input" class="form-control form-control-sm"
+               placeholder="https://...">
+      </div>
+    </div>
+    <div id="tag-approve-only-note" class="d-none mb-2" style="font-size:.75rem;color:#888">
+      ※カムバック曲・2件目の設定は承認時のみ反映されます（タグ編集では変更できません）
+    </div>
     <div id="tag-modal-preview" class="d-none mb-2"
          style="font-size:.85rem;background:#f8f9fa;border-radius:8px;padding:8px;white-space:pre-wrap;color:#000"></div>
     <div class="d-flex gap-2 justify-content-end">
+      {% if nav_is_kpop_account %}
       <button type="button" id="tag-modal-regenerate-btn" class="btn btn-sm btn-outline-primary me-auto"
               onclick="regenerateFromModal()" title="今入力中のグループ・メンバー名で投稿文を組み立て直してプレビュー（承認前・保存はタグ以外の要約文のみ）">
         ✍️ 要約を生成
       </button>
+      {% endif %}
       <button type="button" class="btn btn-sm btn-outline-secondary" onclick="closeTagModal()">キャンセル</button>
       <button type="button" id="tag-modal-confirm-btn" class="btn btn-sm btn-success" onclick="confirmTagModal()">承認してキューへ</button>
     </div>
   </div>
 </div>
 
+{% if nav_is_kpop_account %}
 <!-- 未タグ付け記事 一括推測モーダル -->
 <div id="bulk-guess-modal" class="d-none"
      style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;"
@@ -709,6 +745,8 @@ function findGroupByName(name) {
 function getMemberFieldValue() {
   var select = document.getElementById('tag-member-select');
   var input = document.getElementById('tag-member-input');
+  // 非KPOPアカウントではメンバー欄自体が描画されないため、その場合は空文字を返す。
+  if (!select || !input) return '';
   if (!select.classList.contains('d-none')) {
     return select.value === '__other__' ? input.value.trim() : select.value;
   }
@@ -802,6 +840,52 @@ let pendingApproveBtn = null;
 let pendingEditId = null;
 let pendingEditBtn = null;
 
+// グループ入力欄はKPOPアカウントのみ描画される。非KPOPアカウントではnullになるため、
+// 呼び出し側は必ずこのヘルパー経由でアクセスする(null直参照によるTypeError防止)。
+function getTagGroupInputEl() {
+  return document.getElementById('tag-group-input');
+}
+
+function setOptionalFieldsVisible(visible) {
+  var comebackWrap = document.getElementById('tag-comeback-wrap');
+  var replyWrap = document.getElementById('tag-reply-wrap');
+  var note = document.getElementById('tag-approve-only-note');
+  if (comebackWrap) comebackWrap.classList.toggle('d-none', !visible);
+  if (replyWrap) replyWrap.classList.toggle('d-none', !visible);
+  if (note) note.classList.toggle('d-none', visible);
+}
+
+function resetOptionalFields() {
+  var comeback = document.getElementById('tag-comeback-input');
+  var replyToggle = document.getElementById('tag-reply-toggle');
+  var replyFields = document.getElementById('tag-reply-fields');
+  var replyText = document.getElementById('tag-reply-text-input');
+  var replyUrl = document.getElementById('tag-reply-url-input');
+  if (comeback) comeback.checked = false;
+  if (replyToggle) replyToggle.checked = false;
+  if (replyFields) replyFields.classList.add('d-none');
+  if (replyText) replyText.value = '';
+  if (replyUrl) replyUrl.value = '';
+}
+
+function onComebackToggleChange() {
+  var comeback = document.getElementById('tag-comeback-input');
+  var replyToggle = document.getElementById('tag-reply-toggle');
+  var replyFields = document.getElementById('tag-reply-fields');
+  // カムバック曲チェック時のみ2件目入力欄を自動で開く(アフィリ付け忘れ防止)。
+  // チェックを外しても2件目側は自動で閉じない(手動で入力済みの内容を消さないため)。
+  if (comeback && comeback.checked && replyToggle && !replyToggle.checked) {
+    replyToggle.checked = true;
+    if (replyFields) replyFields.classList.remove('d-none');
+  }
+}
+
+function onReplyToggleChange() {
+  var replyToggle = document.getElementById('tag-reply-toggle');
+  var replyFields = document.getElementById('tag-reply-fields');
+  if (replyFields) replyFields.classList.toggle('d-none', !(replyToggle && replyToggle.checked));
+}
+
 function approveArticle(id, btn) {
   var modal = document.getElementById('tag-modal');
   if (modal) {
@@ -811,10 +895,16 @@ function approveArticle(id, btn) {
     // タイトルからの推測結果があれば初期値として入れる(推測できなければ空欄のまま)。
     // ユーザーが確認・修正してから確定するフローは変わらない。
     var guess = GUESSED_TAGS[id] || { group: '', member: '' };
-    document.getElementById('tag-group-input').value = guess.group || '';
-    document.getElementById('tag-modal-title').textContent = 'グループ・メンバーを入力（任意）';
+    var groupInput = getTagGroupInputEl();
+    if (groupInput) {
+      groupInput.value = guess.group || '';
+      updateMemberFieldForGroup(guess.group || '', guess.member || '');
+    }
+    document.getElementById('tag-modal-title').textContent = groupInput
+      ? 'グループ・メンバーを入力（任意）' : 'オプション設定（任意）';
     document.getElementById('tag-modal-confirm-btn').textContent = '承認してキューへ';
-    updateMemberFieldForGroup(guess.group || '', guess.member || '');
+    resetOptionalFields();
+    setOptionalFieldsVisible(true);
     resetTagModalPreview();
     modal.classList.remove('d-none');
     return;
@@ -829,10 +919,17 @@ function editTag(id, btn) {
   pendingEditId = id;
   pendingEditBtn = btn;
   var current = ARTICLE_TAGS[id] || { group: '', member: '' };
-  document.getElementById('tag-group-input').value = current.group || '';
+  var groupInput = getTagGroupInputEl();
+  if (groupInput) {
+    groupInput.value = current.group || '';
+    updateMemberFieldForGroup(current.group || '', current.member || '');
+  }
   document.getElementById('tag-modal-title').textContent = 'グループ・メンバーを編集';
   document.getElementById('tag-modal-confirm-btn').textContent = '保存';
-  updateMemberFieldForGroup(current.group || '', current.member || '');
+  // カムバック曲・2件目設定はtag_article(タグ編集のみのエンドポイント)では保存されない
+  // ため、編集モードでは触らせない(入力させたのに保存されない事故を防ぐ)。
+  resetOptionalFields();
+  setOptionalFieldsVisible(false);
   resetTagModalPreview();
   modal.classList.remove('d-none');
 }
@@ -854,13 +951,22 @@ function closeTagModal() {
 }
 
 function confirmTagModal() {
-  var groupName = document.getElementById('tag-group-input').value.trim();
+  var groupInput = getTagGroupInputEl();
+  var groupName = groupInput ? groupInput.value.trim() : '';
   var memberName = getMemberFieldValue();
   document.getElementById('tag-modal').classList.add('d-none');
   if (tagModalMode === 'edit') {
     doSaveTag(pendingEditId, pendingEditBtn, groupName, memberName);
   } else {
-    doApprove(pendingApproveId, pendingApproveBtn, groupName, memberName);
+    var comeback = document.getElementById('tag-comeback-input');
+    var replyToggle = document.getElementById('tag-reply-toggle');
+    var replyTextEl = document.getElementById('tag-reply-text-input');
+    var replyUrlEl = document.getElementById('tag-reply-url-input');
+    var isComeback = !!(comeback && comeback.checked);
+    var replyOn = !!(replyToggle && replyToggle.checked);
+    var replyText = replyOn && replyTextEl ? replyTextEl.value.trim() : '';
+    var replyUrl = replyOn && replyUrlEl ? replyUrlEl.value.trim() : '';
+    doApprove(pendingApproveId, pendingApproveBtn, groupName, memberName, isComeback, replyText, replyUrl);
   }
   // doApprove/doSaveTagへは値渡し済みなので、ここでグローバル変数をリセットしても
   // 実行中の処理には影響しない。リセットし忘れると、モーダルを閉じずに終えた場合に
@@ -877,7 +983,8 @@ function confirmTagModal() {
 function regenerateFromModal() {
   var id = tagModalMode === 'edit' ? pendingEditId : pendingApproveId;
   if (!id) return;
-  var groupName = document.getElementById('tag-group-input').value.trim();
+  var groupInput = getTagGroupInputEl();
+  var groupName = groupInput ? groupInput.value.trim() : '';
   var memberName = getMemberFieldValue();
   var btn = document.getElementById('tag-modal-regenerate-btn');
   var preview = document.getElementById('tag-modal-preview');
@@ -1075,14 +1182,19 @@ function applyBulkGuess() {
   next();
 }
 
-function doApprove(id, btn, groupName, memberName) {
+function doApprove(id, btn, groupName, memberName, isComeback, replyText, replyUrl) {
   btn.disabled = true;
   const orig = btn.innerHTML;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
   fetch('/articles/' + id + '/approve', {
     method: 'POST',
     headers: { 'X-Requested-With': 'fetch', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_name: groupName, member_name: memberName })
+    body: JSON.stringify({
+      group_name: groupName, member_name: memberName,
+      is_comeback: !!isComeback,
+      thread_reply_text: replyText || '',
+      thread_reply_url: replyUrl || '',
+    })
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {
