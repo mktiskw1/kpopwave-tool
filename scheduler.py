@@ -14,6 +14,9 @@ from sqlalchemy import or_, text
 from database import (
     Article, ChapterClip, ChapterJob, EarlyAdvanceLog, PostStat, Setting,
     ThreadsAccount, get_active_account, db,
+    DELETE_REASON_GRACE_EXPIRED, DELETE_REASON_INITIAL_BELOW_THRESHOLD,
+    DELETE_REASON_REPOST_BELOW_THRESHOLD, DELETE_REASON_REPOST_KILL_LINE,
+    record_deleted_post,
 )
 
 logger = logging.getLogger(__name__)
@@ -1032,7 +1035,7 @@ def _video_cleanup_job(app):
             .all()
         )
 
-        targets = []
+        targets = []  # [(article, 削除理由)]。理由はdeleted_post_logに記録する
         dirty = False
         kept_grace = 0
         for article in candidates:
@@ -1058,13 +1061,13 @@ def _video_cleanup_job(app):
             # 再投稿後の急落ルール: 初回投稿は対象外(repost_count>=2のみ)。
             # 2・3回目の猶予判定より先に評価し、該当すれば猶予なしで即削除する。
             if repost_count >= 2 and likes <= repost_kill_likes:
-                targets.append(article)
+                targets.append((article, DELETE_REASON_REPOST_KILL_LINE))
                 continue
 
             if repost_count in (2, 3):
                 if article.buzz_low_streak:
                     # 2回目・3回目 両方ともしきい値未満 → 3回目の判定時点で削除
-                    targets.append(article)
+                    targets.append((article, DELETE_REASON_GRACE_EXPIRED))
                 else:
                     article.buzz_low_streak = True
                     dirty = True
@@ -1072,13 +1075,21 @@ def _video_cleanup_job(app):
                 continue
 
             # 初回投稿、または4回目以降の投稿 → 猶予なし
-            targets.append(article)
+            targets.append((
+                article,
+                DELETE_REASON_INITIAL_BELOW_THRESHOLD if repost_count <= 1
+                else DELETE_REASON_REPOST_BELOW_THRESHOLD,
+            ))
 
         if kept_grace:
             logger.info("[_video_cleanup_job] 猶予により削除を見送り: %d件", kept_grace)
 
         deleted_files = 0
-        for article in targets:
+        for article, reason in targets:
+            # 成績の記録(失敗してもログを残すだけで、以降のファイル・レコード削除は続行する)。
+            # 記事削除と同じトランザクションで確定する。
+            record_deleted_post(article, reason)
+
             base_name = os.path.splitext(os.path.basename(article.video_file_path))[0]
 
             main_path = os.path.join(static_dir, article.video_file_path)

@@ -20,6 +20,7 @@ from config import Config, YOUTUBE_DL_FORMAT
 from database import (
     Article, BuzzPost, ChapterClip, ChapterJob, Comment, DailyStat, EarlyAdvanceLog, Group, Hook, Member,
     PostStat, Setting, TextPostStock, ThreadsAccount, VideoTrimJob, get_active_account, db,
+    DELETE_REASON_MANUAL, DELETE_REASON_MANUAL_BULK, record_deleted_post,
 )
 
 load_dotenv()
@@ -179,6 +180,8 @@ def _migrate_db():
         ("is_comeback", "INTEGER DEFAULT 0"),
         ("summary_is_manual", "INTEGER DEFAULT 0"),
         ("buzz_threshold_confirmed_at", "DATETIME"),
+        ("channel_id", "VARCHAR(64)"),
+        ("channel_name", "VARCHAR(200)"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -255,6 +258,23 @@ def _migrate_db():
                 logger.info("DB migration: articles.account_id を %d 件バックフィル (account_id=%d)",
                             result.rowcount, default_account.id)
 
+    # 既存記事のチャンネル情報を、YouTube動画IDからYouTube Data APIで1回だけ補完する。
+    # 完了フラグを立てるため、API上で見つからなかった記事(削除・非公開動画)があっても毎起動の
+    # 再試行はしない。APIキー未設定やHTTPエラー時はフラグを立てず、次回起動で再試行する。
+    from channel_info import BACKFILL_DONE_SETTING, backfill_article_channels, get_youtube_api_key
+    if Setting.get(BACKFILL_DONE_SETTING, "") != "1":
+        api_key = get_youtube_api_key()
+        if not api_key:
+            logger.warning("DB migration: YouTube APIキー未設定のため articles.channel_id の補完をスキップ")
+        else:
+            try:
+                stats = backfill_article_channels(api_key)
+                Setting.set(BACKFILL_DONE_SETTING, "1")
+                logger.info("DB migration: articles.channel_id 補完 %s", stats)
+            except Exception as exc:
+                db.session.rollback()
+                logger.error("DB migration: articles.channel_id 補完に失敗(次回起動で再試行): %s", exc)
+
     # follow_candidates テーブル
     existing_fc = {c["name"] for c in inspector.get_columns("follow_candidates")}
     fc_cols = [
@@ -284,6 +304,8 @@ def _migrate_db():
     existing_chapter_jobs = {c["name"] for c in inspector.get_columns("chapter_jobs")}
     chapter_job_cols = [
         ("source_local_path", "VARCHAR(500)"),
+        ("channel_id", "VARCHAR(64)"),
+        ("channel_name", "VARCHAR(200)"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in chapter_job_cols:
@@ -794,6 +816,8 @@ def bulk_delete_articles():
             _delete_video_files(a.video_file_path, static_dir)
     target_ids = [a.id for a in targets]
     if target_ids:
+        for a in targets:
+            record_deleted_post(a, DELETE_REASON_MANUAL_BULK)  # 投稿済みのみ記録(失敗しても削除は続行)
         for tid in target_ids:
             _cleanup_article_related_records(tid)
         Article.query.filter(Article.id.in_(target_ids)).delete(synchronize_session=False)
@@ -1138,6 +1162,7 @@ _ARTICLE_RESTORE_FIELDS = [
     "repost_count", "quote_count", "engagement_fetched_at", "post_style",
     "image_urls", "content_type", "video_file_path", "is_fancam", "account_id",
     "group_id", "member_id", "buzz_repost_count", "buzz_low_streak",
+    "channel_id", "channel_name",
 ]
 _ARTICLE_DATETIME_FIELDS = {
     "published_at", "scheduled_at", "posted_at", "created_at", "engagement_fetched_at",
@@ -1197,6 +1222,7 @@ def delete_article(id):
         flash(error, "warning")
         return redirect(request.referrer or url_for("pending"))
     snapshot = _article_snapshot(article) if is_fetch else None
+    record_deleted_post(article, DELETE_REASON_MANUAL)  # 投稿済みのみ記録(失敗しても削除は続行)
     _cleanup_article_related_records(id)
     db.session.delete(article)
     db.session.commit()
@@ -1267,6 +1293,7 @@ def _parse_iso_duration(s: str) -> int:
 
 
 def _fetch_youtube_info(video_id: str) -> tuple:
+    """(title, description, thumbnail, feed_source, channel_id, channel_name) を返す。"""
     db_key = Setting.get("youtube_api_key", "")
     api_key = db_key or os.getenv("YOUTUBE_API_KEY", "")
     if api_key:
@@ -1281,7 +1308,7 @@ def _fetch_youtube_info(video_id: str) -> tuple:
                 sn = items[0]["snippet"]
                 th = sn.get("thumbnails", {})
                 thumbnail = (th.get("maxres") or th.get("high") or th.get("medium") or {}).get("url", "")
-                return sn.get("title", ""), sn.get("description", "")[:5000], thumbnail, f"YouTube: {sn.get('channelTitle', 'YouTube')}"
+                return sn.get("title", ""), sn.get("description", "")[:5000], thumbnail, f"YouTube: {sn.get('channelTitle', 'YouTube')}", sn.get("channelId"), sn.get("channelTitle")
         except Exception as e:
             logger.warning("YouTube API fetch error: %s", e)
     # oEmbed fallback（APIキー不要）
@@ -1291,9 +1318,9 @@ def _fetch_youtube_info(video_id: str) -> tuple:
             timeout=10,
         )
         d = r.json()
-        return d.get("title", ""), "", f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg", f"YouTube: {d.get('author_name', 'YouTube')}"
+        return d.get("title", ""), "", f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg", f"YouTube: {d.get('author_name', 'YouTube')}", None, d.get("author_name")
     except Exception:
-        return "", "", "", "YouTube"
+        return "", "", "", "YouTube", None, None
 
 
 def _fetch_article_info(url: str) -> tuple:
@@ -1347,8 +1374,9 @@ def add_article_from_url():
     if Article.query.filter_by(url=canonical_url).first():
         return jsonify({"ok": False, "error": "このURLはすでに登録済みです"})
 
+    channel_id = channel_name = None
     if yt_id:
-        title, content, thumbnail_url, feed_source = _fetch_youtube_info(yt_id)
+        title, content, thumbnail_url, feed_source, channel_id, channel_name = _fetch_youtube_info(yt_id)
     else:
         title, content, thumbnail_url, feed_source = _fetch_article_info(canonical_url)
 
@@ -1363,6 +1391,8 @@ def add_article_from_url():
         thumbnail_url=thumbnail_url or None,
         status="pending",
         account_id=_explicit_account_id(data),
+        channel_id=channel_id,
+        channel_name=(channel_name or "")[:200] or None,
     )
     db.session.add(article)
     db.session.commit()
@@ -2771,6 +2801,8 @@ def _run_trim_job(app, job_id):
                 video_file_path=clip_rel_path,
                 published_at=article.published_at,
                 account_id=article.account_id,
+                channel_id=article.channel_id,
+                channel_name=article.channel_name,
             )
             db.session.add(new_article)
             db.session.flush()  # new_article.id を確定させる（コミット前は未割当のため）
@@ -3310,6 +3342,8 @@ def add_video_manual():
         video_file_path=f"videos/{dest_filename}",
         view_count=full.get("view_count"),
         account_id=_explicit_account_id(data),
+        channel_id=full.get("channel_id"),
+        channel_name=(full.get("channel") or full.get("uploader") or "")[:200] or None,
     )
     db.session.add(article)
     db.session.commit()
@@ -3582,7 +3616,8 @@ def _run_chapter_job(app, job_id):
 
 
 def _create_chapter_job(yt_url: str, vid_id: str, chapters: list, video_title: str,
-                         thumbnail_url: str | None, account_id, source_local_path: str | None = None) -> "ChapterJob":
+                         thumbnail_url: str | None, account_id, source_local_path: str | None = None,
+                         channel_id: str | None = None, channel_name: str | None = None) -> "ChapterJob":
     """ChapterJob・ChapterClip群を作成しコミットした上でバックグラウンドジョブを起動し、作成したjobを返す。
     呼び出し側はchaptersが空でないことを事前に確認しておくこと。"""
     job = ChapterJob(
@@ -3593,6 +3628,8 @@ def _create_chapter_job(yt_url: str, vid_id: str, chapters: list, video_title: s
         account_id=account_id,
         status="processing",
         source_local_path=source_local_path,
+        channel_id=channel_id,
+        channel_name=(channel_name or "")[:200] or None,
     )
     db.session.add(job)
     db.session.flush()
@@ -3712,7 +3749,9 @@ def start_chapter_job():
     _sweep_stale_chapter_jobs()
     title = (full.get("title") or "YouTube動画")[:500]
     job = _create_chapter_job(yt_url, vid_id, chapters, title, full.get("thumbnail") or None,
-                               _explicit_account_id(data))
+                               _explicit_account_id(data),
+                               channel_id=full.get("channel_id"),
+                               channel_name=full.get("channel") or full.get("uploader"))
 
     return jsonify({"ok": True, "has_chapters": True, "job_id": job.id})
 
@@ -3768,7 +3807,9 @@ def start_chapter_job_from_article():
     title = article.title or (full.get("title") or "YouTube動画")[:500]
     job = _create_chapter_job(yt_url, vid_id, chapters, title,
                                article.thumbnail_url or full.get("thumbnail") or None,
-                               article.account_id, source_local_path=article.video_file_path)
+                               article.account_id, source_local_path=article.video_file_path,
+                               channel_id=article.channel_id or full.get("channel_id"),
+                               channel_name=article.channel_name or full.get("channel") or full.get("uploader"))
 
     return jsonify({"ok": True, "has_chapters": True, "job_id": job.id})
 
@@ -3845,6 +3886,8 @@ def chapter_job_confirm(job_id):
                     video_file_path=clip.video_file_path,
                     group_id=clip.guessed_group_id,
                     account_id=job.account_id,
+                    channel_id=job.channel_id,
+                    channel_name=job.channel_name,
                 )
                 db.session.add(article)
                 added += 1

@@ -81,6 +81,10 @@ class Article(db.Model):
     # グループ名→メンバー名→曲名→フック組み立て)をスキップし、手動編集内容を尊重する。
     # 「要約を生成」(summarize_article)が成功するたびFalseに戻る(自動生成に戻った扱い)。
     summary_is_manual = db.Column(db.Boolean, nullable=False, default=False)
+    # YouTube由来の動画の元チャンネル(取り込み時に保存。X等YouTube以外はNone)。
+    # チャンネル別の成績集計・削除記録(DeletedPostLog)で使う。
+    channel_id = db.Column(db.String(64), nullable=True, index=True)
+    channel_name = db.Column(db.String(200), nullable=True)
 
     def to_dict(self):
         return {
@@ -315,6 +319,9 @@ class ChapterJob(db.Model):
     # 既存のダウンロード済みファイルから開始した場合、static/配下の相対パス(Article.video_file_pathと同形式)。
     # 設定されている場合、_run_chapter_jobは再ダウンロードせずこのファイルを使う(処理後も削除しない)。
     source_local_path = db.Column(db.String(500), nullable=True)
+    # 元動画のチャンネル。確認時に生成するArticleへ引き継ぐ。
+    channel_id = db.Column(db.String(64), nullable=True)
+    channel_name = db.Column(db.String(200), nullable=True)
     status = db.Column(db.String(20), nullable=False, default="processing")  # processing / done / failed
     error_message = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -336,3 +343,111 @@ class ChapterClip(db.Model):
     guessed_group_id = db.Column(db.Integer, db.ForeignKey("groups.id"), nullable=True)
     error_message = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+# 削除理由(DeletedPostLog.delete_reason)。scheduler._video_cleanup_jobの判定分岐と対応する。
+DELETE_REASON_INITIAL_BELOW_THRESHOLD = "initial_below_threshold"      # 初回でバズ判定未満
+DELETE_REASON_REPOST_KILL_LINE = "repost_kill_line"                    # 再投稿で即削除ライン以下
+DELETE_REASON_GRACE_EXPIRED = "grace_expired"                          # 2・3回目とも未達(猶予ルール)
+DELETE_REASON_REPOST_BELOW_THRESHOLD = "repost_below_threshold"        # 4回目以降で未達(猶予なし)
+DELETE_REASON_MANUAL = "manual_delete"                                 # 画面から個別削除
+DELETE_REASON_MANUAL_BULK = "manual_bulk_delete"                       # 画面から一括削除
+
+
+class DeletedPostLog(db.Model):
+    """投稿済み記事を削除する際に残す成績の記録(動画ファイルや記事本体は削除してよい)。
+    チャンネル別の当たり率・放送局チャンネルのブロック率などを後から集計するために使う。
+    記事削除と同じトランザクションで書き込む(record_deleted_post参照)。"""
+    __tablename__ = "deleted_post_log"
+
+    id = db.Column(db.Integer, primary_key=True)
+    article_id = db.Column(db.Integer, nullable=True, index=True)   # 削除済みのため参照制約なし
+    account_id = db.Column(db.Integer, nullable=True)
+    title = db.Column(db.String(500), nullable=True)
+    video_url = db.Column(db.String(1000), nullable=True)
+    youtube_video_id = db.Column(db.String(20), nullable=True)
+    channel_id = db.Column(db.String(64), nullable=True, index=True)
+    channel_name = db.Column(db.String(200), nullable=True)
+    group_name = db.Column(db.String(100), nullable=True)
+    member_name = db.Column(db.String(100), nullable=True)
+    song_title = db.Column(db.String(200), nullable=True)   # タイトルから推測できた場合のみ
+    posted_at = db.Column(db.DateTime, nullable=True)
+    buzz_repost_count = db.Column(db.Integer, nullable=True)  # 通算の投稿回数(初回=1)
+    final_likes = db.Column(db.Integer, nullable=True)
+    final_views = db.Column(db.Integer, nullable=True)
+    deleted_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    delete_reason = db.Column(db.String(40), nullable=False)
+
+
+def _was_posted(article) -> bool:
+    """一度でもThreadsへ投稿された記事か(承認前のpending/rejectedは対象外)。
+    再投稿待ちでqueuedに戻っている記事も、過去の投稿実績があるため対象に含める。"""
+    if article.status == "posted":
+        return True
+    return article.status == "queued" and article.posted_at is not None
+
+
+def record_deleted_post(article, reason: str) -> bool:
+    """articleの成績をdeleted_post_logへ1行書き込む。呼び出し側のセッション内で実行され、
+    記事削除と同じcommitで確定する(commit自体はしない)。
+
+    記録対象外(承認前の記事)ならFalseを返す。書き込みに失敗してもlogにエラーを残して
+    Falseを返すだけで例外は投げない(記録失敗で削除処理を止めないため)。
+    flushを伴わないsession.executeで書くので、失敗してもセッションは使い続けられる。"""
+    try:
+        if not _was_posted(article):
+            return False
+
+        from channel_info import extract_youtube_video_id
+
+        group_name = member_name = None
+        if article.group_id:
+            group = db.session.get(Group, article.group_id)
+            group_name = group.name if group else None
+        if article.member_id:
+            member = db.session.get(Member, article.member_id)
+            member_name = member.name if member else None
+
+        song_title = None
+        try:
+            from summarizer import _extract_song_title
+            song_title = (_extract_song_title(article.title or "", group_name or "") or None)
+        except Exception:
+            pass
+
+        likes, views = article.like_count, article.view_count
+        if likes is None or views is None:
+            latest = (
+                PostStat.query.filter_by(article_id=article.id)
+                .order_by(PostStat.fetched_at.desc()).first()
+            )
+            if latest:
+                likes = latest.likes if likes is None else likes
+                views = latest.views if views is None else views
+
+        db.session.execute(DeletedPostLog.__table__.insert().values(
+            article_id=article.id,
+            account_id=article.account_id,
+            title=(article.title or "")[:500],
+            video_url=(article.url or "")[:1000],
+            youtube_video_id=extract_youtube_video_id(article.url or "") or None,
+            channel_id=article.channel_id,
+            channel_name=article.channel_name,
+            group_name=group_name,
+            member_name=member_name,
+            song_title=(song_title or "")[:200] or None,
+            posted_at=article.posted_at,
+            buzz_repost_count=article.buzz_repost_count or 1,
+            final_likes=likes,
+            final_views=views,
+            deleted_at=datetime.utcnow(),
+            delete_reason=reason,
+        ))
+        return True
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            "deleted_post_log書き込み失敗(削除は続行): article_id=%s reason=%s",
+            getattr(article, "id", None), reason,
+        )
+        return False

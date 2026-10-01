@@ -463,6 +463,7 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
                 "thumbnail":    full.get("thumbnail", ""),
                 "duration":     duration,
                 "channel_name": full.get("uploader") or channel_name,
+                "channel_id":   full.get("channel_id"),
                 "upload_date":  actual_date,
             })
             logger.info("[%s] ダウンロード追加: fancam=%s title=%s", channel_name, fc, full_title[:60])
@@ -637,6 +638,7 @@ def _collect_channel_shorts(channel_info: dict, tmp_dir: str, existing_urls: set
                 "thumbnail":    full.get("thumbnail", ""),
                 "duration":     full.get("duration") or 0,
                 "channel_name": full.get("uploader") or channel_name,
+                "channel_id":   full.get("channel_id"),
                 "upload_date":  actual_date,
             })
         except Exception as exc:
@@ -772,6 +774,8 @@ def collect_youtube_videos(app) -> int:
                     video_file_path=f"videos/{dest_filename}",
                     is_fancam=fancam,
                     view_count=video.get("view_count"),
+                    channel_id=video.get("channel_id"),
+                    channel_name=(video.get("channel_name") or "")[:200] or None,
                 )
                 db.session.add(article)
                 db.session.commit()

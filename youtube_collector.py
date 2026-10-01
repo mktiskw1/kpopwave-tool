@@ -429,6 +429,8 @@ def collect_youtube_videos(app) -> int:
                 raw_content=c["description"][:5000],
                 thumbnail_url=c["thumbnail_url"],
                 status="pending",
+                channel_id=c["channel_id"] or None,
+                channel_name=c["channel_title"][:200] or None,
             )
             db.session.add(article)
             new_count += 1
