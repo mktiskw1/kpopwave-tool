@@ -478,3 +478,32 @@ class WatchedChannel(db.Model):
     memo = db.Column(db.Text, nullable=True)
 
     __table_args__ = (db.UniqueConstraint("account_id", "channel_id", name="uq_watched_channel_account_channel"),)
+
+
+class WatchedCandidate(db.Model):
+    """チャンネル監視で見つけた動画の「候補」。ダウンロードせず情報だけを持ち、ユーザーが選んだものだけを
+    取り込んでArticle(承認待ち)にする。集計・クリーンアップ・再投稿などArticleを対象とする処理に
+    混ざらないよう、Articleとは別テーブルにしている(channel_watcher参照)。
+    status: new(未確認) / imported(取り込み済み) / skipped(見送り) / expired(期限切れ)。"""
+    __tablename__ = "watched_candidate"
+
+    id = db.Column(db.Integer, primary_key=True)
+    account_id = db.Column(db.Integer, nullable=False, index=True)
+    watched_channel_id = db.Column(db.Integer, nullable=True, index=True)
+    # 状態に関わらず1動画1行(見送り・期限切れも残して二度と候補に出さない)
+    video_id = db.Column(db.String(20), nullable=False, unique=True)
+    title = db.Column(db.String(500), nullable=False)
+    description = db.Column(db.Text, nullable=True)       # 取り込み時にArticle.raw_contentへ引き継ぐ
+    channel_id = db.Column(db.String(64), nullable=True)
+    channel_name = db.Column(db.String(200), nullable=True)
+    thumbnail_url = db.Column(db.String(500), nullable=True)
+    published_at = db.Column(db.DateTime, nullable=True)  # YouTube上の公開日時(UTC)
+    duration = db.Column(db.Integer, nullable=True)       # 秒
+    view_count = db.Column(db.Integer, nullable=True)     # YouTube上の再生数(取得時点)
+    guessed_group = db.Column(db.String(200), nullable=True)
+    guessed_group_id = db.Column(db.Integer, nullable=True)  # 一意に決まった場合のみ(取り込み時のタグ付けに使う)
+    status = db.Column(db.String(20), nullable=False, default="new", index=True)
+    found_at = db.Column(db.DateTime, default=datetime.utcnow)
+    status_changed_at = db.Column(db.DateTime, nullable=True)
+    last_error = db.Column(db.Text, nullable=True)        # 直近の取り込み失敗理由(失敗時は未確認のまま残す)
+    imported_article_id = db.Column(db.Integer, nullable=True)

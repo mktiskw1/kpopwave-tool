@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from config import Config, YOUTUBE_DL_FORMAT
 from database import (
     Article, BuzzPost, ChapterClip, ChapterJob, Comment, DailyStat, EarlyAdvanceLog, Group, Hook, Member,
-    PostStat, Setting, TextPostStock, ThreadsAccount, VideoTrimJob, WatchedChannel, get_active_account, db,
+    PostStat, Setting, TextPostStock, ThreadsAccount, VideoTrimJob, WatchedCandidate, WatchedChannel, get_active_account, db,
     DELETE_REASON_MANUAL, DELETE_REASON_MANUAL_BULK, record_deleted_post,
 )
 
@@ -434,6 +434,7 @@ def _init_default_settings():
         "buzz_fasttrack_min_likes": "1000",
         "buzz_threshold_likes": "200",
         "buzz_repost_kill_likes": "50",
+        "watched_candidate_expire_days": "14",
     }
     for key, value in defaults.items():
         if not Setting.query.filter_by(key=key).first():
@@ -703,6 +704,8 @@ def pending():
         "video":  0,
         "clipped": 0,
         "watch":  0,
+        "candidate": _account_query_scope(WatchedCandidate.query.filter_by(status="new"),
+                                          WatchedCandidate, account_id, legacy_id).count(),
         "posted": _scope(Article.query.filter_by(status="posted", content_type="video")).count(),
     }
     for a in all_pending:
@@ -719,6 +722,7 @@ def pending():
             counts["rss"] += 1
 
     early_engagement_map = {}
+    candidate_rows = []
     if tab == "posted":
         articles = (_scope(Article.query.filter_by(status="posted", content_type="video"))
                     .order_by(Article.created_at.desc())
@@ -747,6 +751,23 @@ def pending():
         articles = [a for a in all_pending
                     if (a.content_type or "article") == "video" and a.watched_channel_id]
         images_map = {}
+    elif tab == "candidate":
+        # 監視で見つけた候補(未ダウンロード)。承認待ち記事ではないのでarticlesは空にして別枠で描画する
+        articles = []
+        images_map = {}
+        for c in (_account_query_scope(WatchedCandidate.query.filter_by(status="new"),
+                                       WatchedCandidate, account_id, legacy_id)
+                  .order_by(WatchedCandidate.published_at.desc().nullslast(), WatchedCandidate.id.desc()).all()):
+            published_jst = (c.published_at + timedelta(hours=9)) if c.published_at else None
+            secs = c.duration or 0
+            candidate_rows.append({
+                "id": c.id, "video_id": c.video_id, "title": c.title,
+                "channel_name": c.channel_name or "", "guessed_group": c.guessed_group or "",
+                "published": published_jst.strftime("%Y/%m/%d %H:%M") if published_jst else "",
+                "duration": f"{secs // 60}:{secs % 60:02d}",
+                "views": f"{c.view_count:,}" if c.view_count is not None else "-",
+                "last_error": c.last_error or "",
+            })
     elif tab == "youtube":
         articles = [a for a in all_pending
                     if (a.feed_source or "").startswith("YouTube:")
@@ -821,7 +842,8 @@ def pending():
                            active_trim_jobs=active_trim_jobs, active_chapter_jobs=active_chapter_jobs,
                            all_groups=all_groups, members_by_group=members_by_group,
                            group_tag_map=group_tag_map, article_tags=article_tags,
-                           guessed_tags=guessed_tags, early_engagement_map=early_engagement_map)
+                           guessed_tags=guessed_tags, early_engagement_map=early_engagement_map,
+                           candidate_rows=candidate_rows)
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
@@ -1844,12 +1866,13 @@ def settings():
         for g in roster_groups
     ]
 
-    from channel_watcher import get_run_state, kpop_account_id, serialize_watched_channels
+    from channel_watcher import get_expire_days, get_run_state, kpop_account_id, serialize_watched_channels
     watch_account_id = kpop_account_id()
     return render_template("settings.html", settings=current, accounts=accounts, roster=roster,
                            watch_channels=serialize_watched_channels(watch_account_id),
                            watch_state=get_run_state(),
-                           watch_account_id=watch_account_id)
+                           watch_account_id=watch_account_id,
+                           watch_expire_days=get_expire_days())
 
 
 @app.route("/api/quick-setting", methods=["POST"])
@@ -1909,6 +1932,60 @@ def api_watch_channels_run():
     if not start_background_run(app):
         return jsonify({"ok": False, "error": "取得処理が既に実行中です"}), 409
     return jsonify({"ok": True})
+
+
+@app.route("/api/watch-settings", methods=["POST"])
+def api_watch_settings():
+    """監視チャンネル欄の設定(未確認の候補を残す日数)を保存する。"""
+    data = request.get_json(silent=True) or {}
+    try:
+        days = int(str(data.get("expire_days", "")).strip())
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "日数は1以上の整数で入力してください"}), 400
+    if days < 1 or days > 365:
+        return jsonify({"ok": False, "error": "日数は1〜365の整数で入力してください"}), 400
+    Setting.set("watched_candidate_expire_days", str(days))
+    return jsonify({"ok": True, "expire_days": days})
+
+
+def _candidate_ids_from_request():
+    data = request.get_json(silent=True) or {}
+    ids = []
+    for raw in data.get("ids") or []:
+        try:
+            ids.append(int(raw))
+        except (TypeError, ValueError):
+            pass
+    return ids
+
+
+@app.route("/api/watch-candidates/import", methods=["POST"])
+def api_watch_candidates_import():
+    """選んだ候補をバックグラウンドでダウンロードして承認待ちへ取り込む(進行状況はprogressで確認)。"""
+    from channel_watcher import start_candidate_import
+    ids = _candidate_ids_from_request()
+    valid = [i for (i,) in db.session.query(WatchedCandidate.id).filter(
+        WatchedCandidate.id.in_(ids), WatchedCandidate.status == "new")] if ids else []
+    if not valid:
+        return jsonify({"ok": False, "error": "取り込める候補がありません"}), 400
+    queued = start_candidate_import(app, valid)
+    return jsonify({"ok": True, "queued": queued})
+
+
+@app.route("/api/watch-candidates/skip", methods=["POST"])
+def api_watch_candidates_skip():
+    """選んだ候補を見送りにする(一覧から消え、二度と候補に出さない)。"""
+    from channel_watcher import CANDIDATE_SKIPPED, set_candidates_status
+    ids = _candidate_ids_from_request()
+    if not ids:
+        return jsonify({"ok": False, "error": "候補が選択されていません"}), 400
+    return jsonify({"ok": True, "skipped": set_candidates_status(ids, CANDIDATE_SKIPPED)})
+
+
+@app.route("/api/watch-candidates/progress")
+def api_watch_candidates_progress():
+    from channel_watcher import get_import_progress
+    return jsonify({"ok": True, **get_import_progress()})
 
 
 @app.route("/api/watch-channels/status")

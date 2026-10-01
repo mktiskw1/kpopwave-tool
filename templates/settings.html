@@ -460,10 +460,19 @@
   </div>
   <div class="card-body">
     <div class="form-text mb-3" style="font-size:.75rem">
-      登録したチャンネルの新着を毎朝6:00（JST）に取得し、対象グループに一致する動画を承認待ちに入れます
-      （Shortsは除外。「fancam必須」がONのチャンネルはタイトルにfancam系の語を含む動画のみ）。
+      登録したチャンネルの新着を毎朝6:00（JST）に取得し、対象グループに一致する動画を「候補」として並べます
+      （ダウンロードはしません。承認待ちの「📡 候補」タブで選んだものだけを取り込みます）。
+      Shortsと10分超は除外。「fancam必須」がONのチャンネルはタイトルにfancam系の語を含む動画のみ。
       成績は残っている記事と削除記録の合計です。判定済み＝投稿から7日以上の記事＋自動削除された記録（手動削除は含めない）、
       当たり率＝バズ判定いいね数以上の本数÷判定済み本数。
+    </div>
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap" style="font-size:.82rem">
+      <label for="watch-expire-days" class="mb-0">未確認の候補を残す日数</label>
+      <input type="number" id="watch-expire-days" class="form-control form-control-sm" min="1" max="365"
+             value="{{ watch_expire_days }}" style="width:80px">
+      <span class="text-muted">日（過ぎたものは自動で期限切れ）</span>
+      <button type="button" class="btn btn-sm btn-outline-secondary" onclick="watchSaveExpire()">保存</button>
+      <span id="watch-expire-msg" style="font-size:.78rem"></span>
     </div>
     <div class="input-group input-group-sm mb-3" style="max-width:520px">
       <input type="text" id="watch-new-input" class="form-control"
@@ -481,6 +490,7 @@
             <th class="text-center">fancam必須</th>
             <th>最終取得</th>
             <th class="text-end">承認待ち</th>
+            <th class="text-end" title="未確認 / 取り込み済み / 見送り">候補<br><span style="font-weight:400;font-size:.7rem">未/済/見送</span></th>
             <th class="text-end">投稿</th>
             <th class="text-end">判定済</th>
             <th class="text-end">平均いいね</th>
@@ -789,7 +799,7 @@ function watchFmtTime(iso) {
 function renderWatch() {
   var tbody = document.getElementById('watch-tbody');
   if (!WATCH_DATA.length) {
-    tbody.innerHTML = '<tr><td colspan="12" class="text-muted">監視チャンネルはまだありません</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="text-muted">監視チャンネルはまだありません</td></tr>';
     return;
   }
   tbody.innerHTML = WATCH_DATA.map(function (c) {
@@ -803,6 +813,7 @@ function renderWatch() {
         ' onchange="watchPatch(' + c.id + ', { fancam_required: this.checked })"></td>' +
       '<td>' + watchFmtTime(c.last_fetched_at) + '</td>' +
       '<td class="text-end">' + c.pending + '</td>' +
+      '<td class="text-end" title="期限切れ ' + c.cand_expired + ' 件">' + c.cand_new + ' / ' + c.cand_imported + ' / ' + c.cand_skipped + '</td>' +
       '<td class="text-end">' + c.posts + '</td>' +
       '<td class="text-end">' + c.judged + '</td>' +
       '<td class="text-end">' + avg + '</td>' +
@@ -859,17 +870,32 @@ function watchDelete(id, name) {
     .catch(function () { alert('通信エラーが発生しました'); });
 }
 
+function watchSaveExpire() {
+  var v = document.getElementById('watch-expire-days').value;
+  var msg = document.getElementById('watch-expire-msg');
+  fetch('/api/watch-settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expire_days: v })
+  })
+  .then(function (r) { return r.json(); })
+  .then(function (d) {
+    msg.className = d.ok ? 'text-success' : 'text-danger';
+    msg.textContent = d.ok ? '保存しました' : (d.error || '保存に失敗しました');
+  })
+  .catch(function () { msg.className = 'text-danger'; msg.textContent = '通信エラーが発生しました'; });
+}
+
 function watchShowResult(res) {
   var box = document.getElementById('watch-run-result');
   if (!res) { box.innerHTML = ''; return; }
   if (!res.ok) { box.innerHTML = '<span class="text-danger">' + watchEsc(res.error || '取得に失敗しました') + '</span>'; return; }
   var lines = res.channels.map(function (c) {
     if (c.error) return watchEsc(c.name) + ': <span class="text-danger">' + watchEsc(c.error) + '</span>';
-    return watchEsc(c.name) + ': <b>' + c.imported + '本取り込み</b>（新着' + c.new + '、重複' + c.skip_dup +
+    return watchEsc(c.name) + ': <b>' + c.added + '本を候補に追加</b>（新着' + c.new + '、重複' + c.skip_dup +
       '、fancam以外' + c.skip_fancam + '、グループ外' + c.skip_group + '、Shorts' + c.skip_shorts +
       '、長尺' + c.skip_long + (c.download_failed ? '、DL失敗' + c.download_failed : '') + '）';
   });
-  box.innerHTML = '<div class="fw-bold mb-1">取得結果: 合計' + res.imported_total + '本（APIユニット' + res.api_units + '）</div>' + lines.join('<br>');
+  box.innerHTML = '<div class="fw-bold mb-1">取得結果: 候補に合計' + res.added_total + '本追加（APIユニット' + res.api_units + '）</div>' + lines.join('<br>');
 }
 
 function watchSetRunning(running) {

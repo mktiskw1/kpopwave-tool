@@ -2,11 +2,15 @@
 
 APIクォータ節約のため、新着取得はsearch.list(100ユニット)ではなくアップロード再生リストの
 playlistItems.list(1ユニット)を使い、動画詳細はvideos.listで50件ずつまとめて取得する。
-既存のfancam検索・音楽番組検索の除外ルール(放送局チャンネル除外・MPD직캠等の除外キーワード)は
+既存のfancam検索・音楽番組検索の除外ルール(放送局チャンネル除外・MPD직캠などの除外キーワード)は
 この監視経由の取り込みには適用しない(youtube_collector側の動作は変更しない)。
+
+条件に合った動画はダウンロードせず「候補」(WatchedCandidate)として一覧に並べるだけにする。
+ユーザーが選んだ候補だけを、バックグラウンドでダウンロードして承認待ち(Article)に取り込む。
 """
 import logging
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -14,11 +18,12 @@ from datetime import datetime, timedelta
 
 import requests
 from sqlalchemy import and_, func, or_
+from sqlalchemy.exc import IntegrityError
 
 from config import YOUTUBE_DL_FORMAT
 from channel_info import extract_youtube_video_id, get_youtube_api_key
 from database import (
-    Article, DeletedPostLog, Group, Setting, ThreadsAccount, WatchedChannel, db,
+    Article, DeletedPostLog, Group, Setting, ThreadsAccount, WatchedCandidate, WatchedChannel, db,
 )
 from youtube_collector import (
     YOUTUBE_CHANNELS_URL, YOUTUBE_VIDEOS_URL, _best_thumbnail, _is_fancam_title,
@@ -37,6 +42,14 @@ CURSOR_MARGIN = timedelta(minutes=30)   # 再生リスト反映の遅れ対策�
 WATCH_MAX_DURATION_SEC = 600    # 自動ダウンロードする動画の長さの上限(通常収集のMAX_DURATIONと同じ)
 WATCH_FEED_PREFIX = "YouTube動画: "
 BUZZ_JUDGE_DAYS = 7             # 投稿からこの日数経過したものを成績判定済みとみなす
+
+# 候補の状態
+CANDIDATE_NEW = "new"
+CANDIDATE_IMPORTED = "imported"
+CANDIDATE_SKIPPED = "skipped"
+CANDIDATE_EXPIRED = "expired"
+EXPIRE_DAYS_SETTING = "watched_candidate_expire_days"
+DEFAULT_EXPIRE_DAYS = 14
 
 SEED_SETTING_KEY = "watched_channels_seeded"
 # 初期登録するチャンネル名(channel_idはArticleに保存済みのchannel_idから名前で引き、APIで実在確認する)
@@ -201,8 +214,11 @@ def _download_video(video_id: str) -> str:
 # ── 取得本体 ──────────────────────────────────────────────────────────────
 
 def _known_video_ids() -> set:
-    """既にDBにある動画(ステータス不問)と、削除記録に残っている動画のYouTube動画IDの集合。"""
+    """既にDBにある動画(ステータス不問)・削除記録に残っている動画・候補テーブルにある動画
+    (見送り・期限切れを含む全状態)のYouTube動画IDの集合。"""
     known = set()
+    for (vid,) in db.session.query(WatchedCandidate.video_id):
+        known.add(vid)
     for (url,) in db.session.query(Article.url).filter(
         or_(Article.url.like("%youtube.com%"), Article.url.like("%youtu.be%"))
     ):
@@ -217,12 +233,13 @@ def _known_video_ids() -> set:
 
 
 def run_watch(app, dry_run: bool = False) -> dict:
-    """有効な監視チャンネルの新着を取得して承認待ちへ取り込む(毎朝のジョブと「今すぐ取得」の共通処理)。
-    dry_run=Trueならダウンロード・DB書き込みを行わず、取り込み予定の動画を数えるだけ。
-    戻り値: {"ok", "error", "dry_run", "api_units", "imported_total", "channels": [...]}"""
+    """有効な監視チャンネルの新着を取得し、条件に合う動画を候補テーブルへ追加する(毎朝のジョブと
+    「今すぐ取得」の共通処理。ダウンロードはしない)。
+    dry_run=TrueならDB書き込みを行わず、候補に追加される予定の動画を数えるだけ。
+    戻り値: {"ok", "error", "dry_run", "api_units", "added_total", "channels": [...]}"""
     if not _run_lock.acquire(blocking=False):
         return {"ok": False, "error": "別の取得処理が実行中です", "dry_run": dry_run,
-                "api_units": 0, "imported_total": 0, "channels": []}
+                "api_units": 0, "added_total": 0, "channels": []}
     try:
         return _run_watch(app, dry_run)
     finally:
@@ -232,7 +249,7 @@ def run_watch(app, dry_run: bool = False) -> dict:
 def _run_watch(app, dry_run: bool) -> dict:
     units = [0]
     result = {"ok": True, "error": None, "dry_run": dry_run, "api_units": 0,
-              "imported_total": 0, "channels": []}
+              "added_total": 0, "channels": []}
 
     with app.app_context():
         api_key = get_youtube_api_key()
@@ -248,7 +265,7 @@ def _run_watch(app, dry_run: bool) -> dict:
             "id": r.id, "account_id": r.account_id, "channel_id": r.channel_id, "name": r.channel_name,
             "fancam_required": bool(r.fancam_required), "playlist_id": r.uploads_playlist_id,
             "since": r.cursor_published_at or (run_started - timedelta(days=FIRST_RUN_DAYS)),
-            "stat": {"channel_id": r.channel_id, "name": r.channel_name, "new": 0, "imported": 0,
+            "stat": {"channel_id": r.channel_id, "name": r.channel_name, "new": 0, "added": 0,
                      "skip_group": 0, "skip_fancam": 0, "skip_shorts": 0, "skip_long": 0,
                      "skip_gone": 0, "skip_dup": 0, "download_failed": 0, "error": None,
                      "titles": []},
@@ -328,42 +345,37 @@ def _run_watch(app, dry_run: bool) -> dict:
                     continue
 
                 if dry_run:
-                    stat["imported"] += 1
+                    stat["added"] += 1
                     stat["titles"].append(title[:80])
                 else:
-                    try:
-                        video_path = _download_video(vid)
-                    except Exception as exc:
-                        stat["download_failed"] += 1
-                        logger.error("[channel_watch] %s ダウンロード失敗 %s: %s", c["name"], vid, exc)
-                        continue
-                    from video_collector import _is_fancam
-                    article = Article(
-                        feed_source=f"{WATCH_FEED_PREFIX}{c['name']}",
-                        title=(title or "YouTube動画")[:500],
-                        url=f"https://www.youtube.com/watch?v={vid}",
-                        published_at=d["published_at"] or it["published_at"],
-                        raw_content=d["description"][:5000],
-                        thumbnail_url=d["thumbnail"] or None,
-                        status="pending",
-                        content_type="video",
-                        video_file_path=video_path,
-                        is_fancam=_is_fancam(title),
-                        view_count=d["view_count"],
+                    db.session.add(WatchedCandidate(
                         account_id=c["account_id"],
-                        group_id=matched[0][0] if len(matched) == 1 else None,
+                        watched_channel_id=c["id"],
+                        video_id=vid,
+                        title=(title or "YouTube動画")[:500],
+                        description=d["description"][:5000],
                         channel_id=c["channel_id"],
                         channel_name=c["name"],
-                        watched_channel_id=c["id"],
-                    )
-                    db.session.add(article)
-                    db.session.commit()
+                        thumbnail_url=d["thumbnail"] or None,
+                        published_at=d["published_at"] or it["published_at"],
+                        duration=d["duration"],
+                        view_count=d["view_count"],
+                        guessed_group=" / ".join(gname for _, gname in matched)[:200],
+                        guessed_group_id=matched[0][0] if len(matched) == 1 else None,
+                        status=CANDIDATE_NEW,
+                    ))
+                    try:
+                        db.session.commit()
+                    except IntegrityError:
+                        db.session.rollback()   # 並行して同じ動画が追加された場合
+                        stat["skip_dup"] += 1
+                        continue
                     known.add(vid)
-                    stat["imported"] += 1
+                    stat["added"] += 1
                     stat["titles"].append(title[:80])
-                    logger.info("[channel_watch] 取り込み: %s / %s", c["name"], title[:60])
+                    logger.info("[channel_watch] 候補に追加: %s / %s", c["name"], title[:60])
 
-                if stat["imported"] >= MAX_IMPORT_PER_CHANNEL:
+                if stat["added"] >= MAX_IMPORT_PER_CHANNEL:
                     # 上限で打ち切り: 最後に処理した動画の公開日時までを済みとし、続きは次回に回す
                     new_cursor = it["published_at"]
                     break
@@ -376,15 +388,15 @@ def _run_watch(app, dry_run: bool) -> dict:
                     if c["playlist_id"] and not row.uploads_playlist_id:
                         row.uploads_playlist_id = c["playlist_id"]
                     db.session.commit()
-            result["imported_total"] += stat["imported"]
+            result["added_total"] += stat["added"]
             result["channels"].append(stat)
 
         # 取得自体に失敗したチャンネルも結果に載せる
         result["channels"].extend(c["stat"] for c in chans if c["failed"])
         result["api_units"] = units[0]
-        logger.info("[channel_watch] 完了%s: 取り込み%d本 / APIユニット%d / %s",
-                    "(ドライラン)" if dry_run else "", result["imported_total"], units[0],
-                    ", ".join(f"{s['name']}={s['imported']}" for s in result["channels"]))
+        logger.info("[channel_watch] 完了%s: 候補%d本追加 / APIユニット%d / %s",
+                    "(ドライラン)" if dry_run else "", result["added_total"], units[0],
+                    ", ".join(f"{s['name']}={s['added']}" for s in result["channels"]))
         return result
 
 
@@ -398,7 +410,7 @@ def start_background_run(app) -> bool:
             _state["result"] = run_watch(app)
         except Exception as exc:
             logger.exception("[channel_watch] 手動実行で例外")
-            _state["result"] = {"ok": False, "error": str(exc)[:200], "channels": [], "imported_total": 0,
+            _state["result"] = {"ok": False, "error": str(exc)[:200], "channels": [], "added_total": 0,
                                 "api_units": 0, "dry_run": False}
         finally:
             _state["running"] = False
@@ -410,6 +422,146 @@ def start_background_run(app) -> bool:
 
 def get_run_state() -> dict:
     return dict(_state)
+
+
+# ── 候補の取り込み(バックグラウンド)・見送り・期限切れ ─────────────────────────
+
+_import_lock = threading.Lock()
+_import_state = {"queue": [], "current": None, "worker": False, "results": {}}
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def start_candidate_import(app, ids: list) -> int:
+    """候補をバックグラウンドでダウンロードして承認待ちへ取り込む。順番に1本ずつ処理する。
+    既に待機中・処理中のIDは無視する。戻り値は新たに待機列へ入れた件数。"""
+    with _import_lock:
+        busy = set(_import_state["queue"])
+        if _import_state["current"] is not None:
+            busy.add(_import_state["current"])
+        new_ids = [i for i in dict.fromkeys(ids) if i not in busy]
+        for i in new_ids:
+            _import_state["results"].pop(i, None)
+        _import_state["queue"].extend(new_ids)
+        if new_ids and not _import_state["worker"]:
+            _import_state["worker"] = True
+            threading.Thread(target=_import_worker, args=(app,), name="candidate_import", daemon=True).start()
+    return len(new_ids)
+
+
+def _import_worker(app):
+    while True:
+        with _import_lock:
+            if not _import_state["queue"]:
+                _import_state["current"] = None
+                _import_state["worker"] = False
+                return
+            cand_id = _import_state["queue"].pop(0)
+            _import_state["current"] = cand_id
+        result = _import_one_candidate(app, cand_id)
+        with _import_lock:
+            _import_state["results"][cand_id] = result
+            if len(_import_state["results"]) > 300:
+                for k in list(_import_state["results"])[:100]:
+                    _import_state["results"].pop(k, None)
+
+
+def _import_one_candidate(app, cand_id: int) -> dict:
+    """1件をダウンロードしてArticle(承認待ち)を作る。失敗時は候補を未確認のまま残し、理由を記録する。"""
+    try:
+        with app.app_context():
+            cand = db.session.get(WatchedCandidate, cand_id)
+            if cand is None or cand.status != CANDIDATE_NEW:
+                return {"state": "failed", "error": "候補が見つからないか、処理済みです"}
+            url = f"https://www.youtube.com/watch?v={cand.video_id}"
+            existing = Article.query.filter_by(url=url).first()
+            if existing:   # 他の経路で既に取り込まれていた場合はダウンロードせず取り込み済みにする
+                cand.status = CANDIDATE_IMPORTED
+                cand.imported_article_id = existing.id
+                cand.status_changed_at = datetime.utcnow()
+                cand.last_error = None
+                db.session.commit()
+                return {"state": "done", "article_id": existing.id}
+
+            video_path = _download_video(cand.video_id)
+            from video_collector import _is_fancam
+            article = Article(
+                feed_source=f"{WATCH_FEED_PREFIX}{cand.channel_name}",
+                title=cand.title[:500],
+                url=url,
+                published_at=cand.published_at,
+                raw_content=(cand.description or "")[:5000],
+                thumbnail_url=cand.thumbnail_url,
+                status="pending",
+                content_type="video",
+                video_file_path=video_path,
+                is_fancam=_is_fancam(cand.title),
+                view_count=cand.view_count,
+                account_id=cand.account_id,
+                group_id=cand.guessed_group_id,
+                channel_id=cand.channel_id,
+                channel_name=cand.channel_name,
+                watched_channel_id=cand.watched_channel_id,
+            )
+            db.session.add(article)
+            db.session.flush()
+            cand.status = CANDIDATE_IMPORTED
+            cand.imported_article_id = article.id
+            cand.status_changed_at = datetime.utcnow()
+            cand.last_error = None
+            db.session.commit()
+            logger.info("[channel_watch] 候補を取り込み: %s / %s", cand.channel_name, cand.title[:60])
+            return {"state": "done", "article_id": article.id}
+    except Exception as exc:
+        message = _ANSI_RE.sub("", str(exc)).strip().splitlines()[-1][:250] if str(exc).strip() else "不明なエラー"
+        logger.error("[channel_watch] 候補の取り込み失敗 id=%s: %s", cand_id, exc)
+        try:
+            with app.app_context():
+                db.session.rollback()
+                cand = db.session.get(WatchedCandidate, cand_id)
+                if cand is not None and cand.status == CANDIDATE_NEW:
+                    cand.last_error = message
+                    db.session.commit()
+        except Exception:
+            logger.exception("[channel_watch] 失敗理由の記録に失敗 id=%s", cand_id)
+        return {"state": "failed", "error": message}
+
+
+def get_import_progress() -> dict:
+    """取り込みの進行状況: active={id: queued|downloading}、results={id: {state: done|failed, error}}。"""
+    with _import_lock:
+        active = {i: "queued" for i in _import_state["queue"]}
+        if _import_state["current"] is not None:
+            active[_import_state["current"]] = "downloading"
+        return {"active": active, "results": dict(_import_state["results"])}
+
+
+def set_candidates_status(ids: list, status: str) -> int:
+    """未確認の候補だけ状態を変更する(見送りなど)。戻り値は変更した件数。app context内で呼ぶこと。"""
+    if not ids:
+        return 0
+    n = WatchedCandidate.query.filter(
+        WatchedCandidate.id.in_(ids), WatchedCandidate.status == CANDIDATE_NEW,
+    ).update({"status": status, "status_changed_at": datetime.utcnow()}, synchronize_session=False)
+    db.session.commit()
+    return n
+
+
+def get_expire_days() -> int:
+    try:
+        return max(1, int(Setting.get(EXPIRE_DAYS_SETTING, str(DEFAULT_EXPIRE_DAYS)) or DEFAULT_EXPIRE_DAYS))
+    except (TypeError, ValueError):
+        return DEFAULT_EXPIRE_DAYS
+
+
+def expire_old_candidates() -> int:
+    """見つけてから設定日数を過ぎた未確認の候補を「期限切れ」にする(動画ファイルはないので記録だけ残す)。
+    app context内で呼ぶこと。戻り値は期限切れにした件数。"""
+    cutoff = datetime.utcnow() - timedelta(days=get_expire_days())
+    n = WatchedCandidate.query.filter(
+        WatchedCandidate.status == CANDIDATE_NEW, WatchedCandidate.found_at < cutoff,
+    ).update({"status": CANDIDATE_EXPIRED, "status_changed_at": datetime.utcnow()}, synchronize_session=False)
+    db.session.commit()
+    return n
 
 
 # ── 追加・成績 ────────────────────────────────────────────────────────────
@@ -494,9 +646,16 @@ def serialize_watched_channels(account_id: int = None) -> list:
         .filter(Article.status == "pending", Article.watched_channel_id.isnot(None))
         .group_by(Article.watched_channel_id).all()
     )
+    cand_counts = {}
+    for wid, st, n in (
+        db.session.query(WatchedCandidate.watched_channel_id, WatchedCandidate.status, func.count(WatchedCandidate.id))
+        .group_by(WatchedCandidate.watched_channel_id, WatchedCandidate.status).all()
+    ):
+        cand_counts.setdefault(wid, {})[st] = n
     out = []
     for r in rows:
         s = stats.get(r.channel_id, {})
+        cc = cand_counts.get(r.id, {})
         out.append({
             "id": r.id, "channel_id": r.channel_id, "channel_name": r.channel_name,
             "enabled": bool(r.enabled), "fancam_required": bool(r.fancam_required),
@@ -505,6 +664,8 @@ def serialize_watched_channels(account_id: int = None) -> list:
             "posts": s.get("posts", 0), "judged": s.get("judged", 0),
             "avg_likes": s.get("avg_likes"), "buzz": s.get("buzz", 0),
             "deleted": s.get("deleted", 0), "hit_rate": s.get("hit_rate"),
+            "cand_new": cc.get(CANDIDATE_NEW, 0), "cand_imported": cc.get(CANDIDATE_IMPORTED, 0),
+            "cand_skipped": cc.get(CANDIDATE_SKIPPED, 0), "cand_expired": cc.get(CANDIDATE_EXPIRED, 0),
         })
     return out
 

@@ -16,7 +16,8 @@
     ('youtube', 'YouTube',      counts.youtube, '#e03030'),
     ('video',   '動画',         counts.video,   '#e03030'),
     ('clipped', '切り取り済み', counts.clipped, '#9c27b0'),
-    ('watch',   '📡 監視',      counts.watch,   '#0d6efd'),
+    ('candidate', '📡 候補',    counts.candidate, '#0d6efd'),
+    ('watch',   '📡 監視',      counts.watch,   '#6610f2'),
     ('posted',  '投稿済み動画', counts.posted,  '#2e7d32'),
   ] %}
   {% for key, label, count, badge_color in tabs %}
@@ -69,7 +70,67 @@
 </div>
 {% endif %}
 
-{% if articles %}
+{% if active_tab == 'candidate' %}
+<!-- 監視候補(未ダウンロード): 選んだものだけを取り込んで承認待ちに入れる -->
+<div class="d-flex align-items-center gap-2 mb-3 p-2 rounded flex-wrap" style="background:var(--surface2);border:1.5px solid var(--border);border-radius:14px!important">
+  <input type="checkbox" id="cand-select-all" class="form-check-input mt-0" title="全選択/全解除" onchange="candToggleAll(this)">
+  <label for="cand-select-all" class="text-muted mb-0" style="font-size:.82rem;cursor:pointer">全選択</label>
+  <span id="cand-selected-count" class="text-muted ms-1" style="font-size:.8rem"></span>
+  <span id="cand-progress" class="ms-2" style="font-size:.8rem;color:var(--text-muted)"></span>
+  <div class="ms-auto d-flex gap-2">
+    <button type="button" id="cand-import-btn" class="btn btn-primary btn-sm" disabled onclick="candImport(null)">
+      <i class="bi bi-cloud-download me-1"></i>選択を取り込む
+    </button>
+    <button type="button" id="cand-skip-btn" class="btn btn-outline-secondary btn-sm" disabled onclick="candSkip(null)">
+      <i class="bi bi-x-circle me-1"></i>選択を見送る
+    </button>
+  </div>
+</div>
+
+<div id="cand-empty" class="card p-5 text-center{% if candidate_rows %} d-none{% endif %}" style="color:var(--text-muted)">
+  <i class="bi bi-inbox" style="font-size:2.5rem;display:block;margin-bottom:.5rem"></i>
+  未確認の候補はありません
+</div>
+
+{% for c in candidate_rows %}
+<div class="card mb-2 cand-row" id="cand-{{ c.id }}" data-id="{{ c.id }}">
+  <div class="card-body py-2 d-flex gap-3 align-items-start flex-wrap">
+    <input type="checkbox" class="form-check-input cand-cb mt-1 flex-shrink-0" value="{{ c.id }}" onchange="candUpdateSel()">
+    <div class="cand-thumb flex-shrink-0" data-video-id="{{ c.video_id }}" onclick="candPlay(this)" title="クリックで再生"
+         style="position:relative;width:240px;max-width:100%;aspect-ratio:16/9;background:#000;border-radius:8px;overflow:hidden;cursor:pointer">
+      <img src="https://i.ytimg.com/vi/{{ c.video_id }}/hqdefault.jpg" alt="" loading="lazy"
+           style="width:100%;height:100%;object-fit:cover">
+      <span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:2.4rem;text-shadow:0 0 8px rgba(0,0,0,.7)">
+        <i class="bi bi-play-circle-fill"></i>
+      </span>
+      <span style="position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.75);color:#fff;font-size:.72rem;padding:1px 6px;border-radius:4px">{{ c.duration }}</span>
+    </div>
+    <div class="flex-grow-1" style="min-width:220px">
+      <div class="fw-bold mb-1" style="font-size:.9rem;line-height:1.4">
+        <a href="https://www.youtube.com/watch?v={{ c.video_id }}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">{{ c.title }}</a>
+      </div>
+      <div class="d-flex align-items-center gap-2 flex-wrap mb-1">
+        <span class="badge bg-primary-subtle text-primary-emphasis" style="font-size:.72rem">📡 {{ c.channel_name }}</span>
+        {% if c.guessed_group %}
+        <span class="badge bg-info-subtle text-info-emphasis" style="font-size:.72rem">{{ c.guessed_group }}</span>
+        {% endif %}
+      </div>
+      <div style="font-size:.78rem;color:var(--text-muted)">
+        公開 {{ c.published }} ／ 長さ {{ c.duration }} ／ YouTube再生数 {{ c.views }}
+      </div>
+      <div id="cand-state-{{ c.id }}" style="font-size:.78rem;margin-top:2px">
+        {% if c.last_error %}<span class="text-danger">前回の取り込みに失敗: {{ c.last_error }}</span>{% endif %}
+      </div>
+    </div>
+    <div class="d-flex flex-column gap-1 flex-shrink-0">
+      <button type="button" class="btn btn-primary btn-sm cand-act" onclick="candImport([{{ c.id }}])">取り込む</button>
+      <button type="button" class="btn btn-outline-secondary btn-sm cand-act" onclick="candSkip([{{ c.id }}])">見送る</button>
+    </div>
+  </div>
+</div>
+{% endfor %}
+
+{% elif articles %}
 <!-- 一括操作ツールバー -->
 <form id="bulk-form" action="{{ url_for('bulk_delete_articles') }}" method="post">
   <input type="hidden" name="tab" value="{{ active_tab }}">
@@ -555,6 +616,154 @@
 {% endblock %}
 
 {% block scripts %}
+{% if active_tab == 'candidate' %}
+<script>
+// ── 監視候補の一覧操作 ──
+var candTracked = {};
+var candDone = 0;
+var candFailed = 0;
+var candPollTimer = null;
+
+function candEsc(v) {
+  var d = document.createElement('div');
+  d.textContent = v == null ? '' : String(v);
+  return d.innerHTML;
+}
+
+function candSelectedIds() {
+  return Array.prototype.map.call(document.querySelectorAll('.cand-cb:checked'), function (c) { return parseInt(c.value, 10); });
+}
+
+function candUpdateSel() {
+  var all = document.querySelectorAll('.cand-cb');
+  var n = candSelectedIds().length;
+  document.getElementById('cand-import-btn').disabled = n === 0;
+  document.getElementById('cand-skip-btn').disabled = n === 0;
+  document.getElementById('cand-selected-count').textContent = n > 0 ? n + ' 件選択中' : '';
+  var sa = document.getElementById('cand-select-all');
+  sa.indeterminate = n > 0 && n < all.length;
+  sa.checked = all.length > 0 && n === all.length;
+}
+
+function candToggleAll(el) {
+  document.querySelectorAll('.cand-cb').forEach(function (c) { c.checked = el.checked; });
+  candUpdateSel();
+}
+
+function candRefreshBadge() {
+  var n = document.querySelectorAll('.cand-row').length;
+  var link = document.querySelector('a[href*="tab=candidate"]');
+  var badge = link ? link.querySelector('.badge') : null;
+  if (badge) { if (n > 0) { badge.textContent = n; } else { badge.remove(); } }
+  document.getElementById('cand-empty').classList.toggle('d-none', n > 0);
+  candUpdateSel();
+}
+
+function candPlay(el) {
+  if (el.dataset.playing) return;
+  el.dataset.playing = '1';
+  el.style.width = 'min(100%, 480px)';
+  el.style.cursor = 'default';
+  el.innerHTML = '<iframe src="https://www.youtube.com/embed/' + encodeURIComponent(el.dataset.videoId) +
+    '?autoplay=1&rel=0" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen ' +
+    'style="width:100%;height:100%;border:0"></iframe>';
+}
+
+function candRow(id) { return document.getElementById('cand-' + id); }
+
+function candSetBusy(id, busy, html) {
+  var row = candRow(id);
+  if (!row) return;
+  row.querySelectorAll('.cand-act, .cand-cb').forEach(function (b) { b.disabled = busy; });
+  if (html != null) document.getElementById('cand-state-' + id).innerHTML = html;
+}
+
+function candShowSummary() {
+  var active = Object.keys(candTracked).length;
+  var parts = [];
+  if (active) parts.push('取り込み中 ' + active + ' 件');
+  if (candDone) parts.push('完了 ' + candDone + ' 件');
+  if (candFailed) parts.push('<span class="text-danger">失敗 ' + candFailed + ' 件</span>');
+  document.getElementById('cand-progress').innerHTML = parts.join(' ／ ');
+}
+
+function candImport(ids) {
+  ids = ids || candSelectedIds();
+  if (!ids.length) { alert('候補が選択されていません'); return; }
+  fetch('/api/watch-candidates/import', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: ids })
+  })
+  .then(function (r) { return r.json(); })
+  .then(function (d) {
+    if (!d.ok) { alert(d.error || '取り込みを開始できませんでした'); return; }
+    ids.forEach(function (id) {
+      candTracked[id] = true;
+      candSetBusy(id, true, '<span class="text-primary">待機中…</span>');
+    });
+    candShowSummary();
+    candSchedulePoll(1500);
+  })
+  .catch(function () { alert('通信エラーが発生しました'); });
+}
+
+function candSkip(ids) {
+  ids = ids || candSelectedIds();
+  if (!ids.length) { alert('候補が選択されていません'); return; }
+  if (ids.length > 1 && !confirm('選択した ' + ids.length + ' 件を見送りますか？（二度と候補に表示されません）')) return;
+  fetch('/api/watch-candidates/skip', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: ids })
+  })
+  .then(function (r) { return r.json(); })
+  .then(function (d) {
+    if (!d.ok) { alert(d.error || '見送りに失敗しました'); return; }
+    ids.forEach(function (id) { var row = candRow(id); if (row) row.remove(); });
+    candRefreshBadge();
+  })
+  .catch(function () { alert('通信エラーが発生しました'); });
+}
+
+function candSchedulePoll(ms) {
+  if (candPollTimer) clearTimeout(candPollTimer);
+  candPollTimer = setTimeout(candPoll, ms);
+}
+
+function candPoll() {
+  fetch('/api/watch-candidates/progress')
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      Object.keys(d.active).forEach(function (id) {
+        if (!candRow(id)) return;
+        if (!candTracked[id]) { candTracked[id] = true; candSetBusy(id, true); }
+        var label = d.active[id] === 'downloading' ? 'ダウンロード中…' : '待機中…';
+        document.getElementById('cand-state-' + id).innerHTML = '<span class="text-primary">' + label + '</span>';
+      });
+      Object.keys(candTracked).forEach(function (id) {
+        if (d.active[id]) return;
+        var res = d.results[id];
+        delete candTracked[id];
+        if (res && res.state === 'done') {
+          candDone += 1;
+          var row = candRow(id);
+          if (row) row.remove();
+        } else {
+          candFailed += 1;
+          var msg = res && res.error ? res.error : '状態を確認できませんでした(ページを再読み込みしてください)';
+          candSetBusy(id, false, '<span class="text-danger">取り込みに失敗しました: ' + candEsc(msg) + '（もう一度押せます）</span>');
+        }
+      });
+      candRefreshBadge();
+      candShowSummary();
+      if (Object.keys(candTracked).length) candSchedulePoll(3000);
+    })
+    .catch(function () { candSchedulePoll(8000); });
+}
+
+candUpdateSel();
+candPoll();
+</script>
+{% endif %}
 <script>
 // ── 選択管理 ──────────────────────────────────────────────────────────────
 const selectAll   = document.getElementById('select-all');

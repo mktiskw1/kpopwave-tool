@@ -1000,10 +1000,20 @@ def _channel_watch_job(app):
         logger.warning("[channel_watch] 取得できませんでした: %s", result.get("error"))
         return
     logger.info(
-        "[channel_watch] 取り込み%d本 APIユニット%d: %s",
-        result["imported_total"], result["api_units"],
-        ", ".join(f"{c['name']}={c['imported']}" for c in result["channels"]) or "(対象なし)",
+        "[channel_watch] 候補%d本追加 APIユニット%d: %s",
+        result["added_total"], result["api_units"],
+        ", ".join(f"{c['name']}={c['added']}" for c in result["channels"]) or "(対象なし)",
     )
+
+
+@_logged_job("watched_candidate_expire")
+def _watched_candidate_expire_job(app):
+    """見つけてから設定日数(watched_candidate_expire_days)を過ぎた未確認の候補を期限切れにする(毎朝6:30 JST)。"""
+    from channel_watcher import expire_old_candidates, get_expire_days
+    with app.app_context():
+        days = get_expire_days()
+        n = expire_old_candidates()
+    logger.info("[watched_candidate_expire] %d日経過の未確認候補を期限切れにしました: %d件", days, n)
 
 
 @_logged_job("video_cleanup")
@@ -1385,6 +1395,15 @@ def setup_scheduler(app):
     )
 
     scheduler.add_job(
+        _watched_candidate_expire_job,
+        CronTrigger(hour=6, minute=30, timezone="Asia/Tokyo"),
+        args=[app],
+        id="watched_candidate_expire",
+        replace_existing=True,
+        misfire_grace_time=_DAILY_MISFIRE_GRACE,
+    )
+
+    scheduler.add_job(
         _post_stats_job,
         CronTrigger(hour=2, minute=30, timezone="Asia/Tokyo"),
         args=[app],
@@ -1412,6 +1431,6 @@ def setup_scheduler(app):
     logger.info(
         "Scheduler started (post backup 5min, comments/rollover 30min, early engagement 5min, "
         "engagement 2:00 JST, video cleanup 3:00 JST, orphan video cleanup 4:30 JST, "
-        "token refresh 5:00 JST, channel watch 6:00 JST, post stats 2:30 JST, daily snapshot 3:30 JST)"
+        "token refresh 5:00 JST, channel watch 6:00 JST, candidate expire 6:30 JST, post stats 2:30 JST, daily snapshot 3:30 JST)"
     )
     return scheduler
