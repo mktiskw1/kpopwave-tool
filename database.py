@@ -502,6 +502,8 @@ class WatchedCandidate(db.Model):
     view_count = db.Column(db.Integer, nullable=True)     # YouTube上の再生数(取得時点)
     guessed_group = db.Column(db.String(200), nullable=True)
     guessed_group_id = db.Column(db.Integer, nullable=True)  # 一意に決まった場合のみ(取り込み時のタグ付けに使う)
+    # 動画の向き: landscape(横) / portrait(縦) / unknown(判定できなかった)。NULLは未判定(起動時に補完する)。
+    orientation = db.Column(db.String(10), nullable=True)
     status = db.Column(db.String(20), nullable=False, default="new", index=True)
     found_at = db.Column(db.DateTime, default=datetime.utcnow)
     status_changed_at = db.Column(db.DateTime, nullable=True)

@@ -73,8 +73,13 @@
 {% if active_tab == 'candidate' %}
 <!-- 監視候補(未ダウンロード): 選んだものだけを取り込んで承認待ちに入れる -->
 <div class="d-flex align-items-center gap-2 mb-3 p-2 rounded flex-wrap" style="background:var(--surface2);border:1.5px solid var(--border);border-radius:14px!important">
-  <input type="checkbox" id="cand-select-all" class="form-check-input mt-0" title="全選択/全解除" onchange="candToggleAll(this)">
+  <input type="checkbox" id="cand-select-all" class="form-check-input mt-0" title="表示中の候補を全選択/全解除" onchange="candToggleAll(this)">
   <label for="cand-select-all" class="text-muted mb-0" style="font-size:.82rem;cursor:pointer">全選択</label>
+  <div class="btn-group btn-group-sm ms-2" role="group" aria-label="縦横の絞り込み">
+    <button type="button" class="btn btn-outline-secondary" id="cand-filter-all" onclick="candSetFilter('all')">すべて</button>
+    <button type="button" class="btn btn-outline-secondary" id="cand-filter-landscape" onclick="candSetFilter('landscape')">横のみ</button>
+    <button type="button" class="btn btn-outline-secondary" id="cand-filter-portrait" onclick="candSetFilter('portrait')">縦のみ</button>
+  </div>
   <span id="cand-selected-count" class="text-muted ms-1" style="font-size:.8rem"></span>
   <span id="cand-progress" class="ms-2" style="font-size:.8rem;color:var(--text-muted)"></span>
   <div class="ms-auto d-flex gap-2 align-items-center">
@@ -99,13 +104,17 @@
 
 <div id="cand-fetch-detail" class="mb-3" style="font-size:.8rem" data-build="{{ app_build }}"></div>
 
+<div id="cand-filter-empty" class="card p-4 text-center d-none" style="color:var(--text-muted)">
+  この絞り込みに該当する候補はありません
+</div>
+
 <div id="cand-empty" class="card p-5 text-center{% if candidate_rows %} d-none{% endif %}" style="color:var(--text-muted)">
   <i class="bi bi-inbox" style="font-size:2.5rem;display:block;margin-bottom:.5rem"></i>
   未確認の候補はありません
 </div>
 
 {% for c in candidate_rows %}
-<div class="card mb-2 cand-row" id="cand-{{ c.id }}" data-id="{{ c.id }}">
+<div class="card mb-2 cand-row" id="cand-{{ c.id }}" data-id="{{ c.id }}" data-orientation="{{ c.orientation }}">
   <div class="card-body py-2 d-flex gap-3 align-items-start flex-wrap">
     <input type="checkbox" class="form-check-input cand-cb mt-1 flex-shrink-0" value="{{ c.id }}" onchange="candUpdateSel()">
     <div class="cand-thumb flex-shrink-0" data-video-id="{{ c.video_id }}" onclick="candPlay(this)" title="クリックで再生"
@@ -123,6 +132,13 @@
       </div>
       <div class="d-flex align-items-center gap-2 flex-wrap mb-1">
         <span class="badge bg-primary-subtle text-primary-emphasis" style="font-size:.72rem">📡 {{ c.channel_name }}</span>
+        {% if c.orientation == 'landscape' %}
+        <span class="badge bg-success-subtle text-success-emphasis" style="font-size:.72rem">横</span>
+        {% elif c.orientation == 'portrait' %}
+        <span class="badge bg-warning-subtle text-warning-emphasis" style="font-size:.72rem">縦</span>
+        {% else %}
+        <span class="badge bg-secondary-subtle text-secondary-emphasis" style="font-size:.72rem" title="縦横を判定できませんでした">不明</span>
+        {% endif %}
         {% if c.guessed_group %}
         <span class="badge bg-info-subtle text-info-emphasis" style="font-size:.72rem">{{ c.guessed_group }}</span>
         {% endif %}
@@ -714,12 +730,39 @@ function candEsc(v) {
   return d.innerHTML;
 }
 
+// 一括操作(全選択・選択を取り込む/見送る)は、絞り込みで表示されている候補だけが対象
 function candSelectedIds() {
-  return Array.prototype.map.call(document.querySelectorAll('.cand-cb:checked'), function (c) { return parseInt(c.value, 10); });
+  return Array.prototype.map.call(document.querySelectorAll('.cand-row:not(.d-none) .cand-cb:checked'), function (c) { return parseInt(c.value, 10); });
+}
+
+var CAND_FILTER_KEY = 'candOrientationFilter';
+
+function candSetFilter(mode) {
+  if (mode !== 'landscape' && mode !== 'portrait') mode = 'all';
+  try { localStorage.setItem(CAND_FILTER_KEY, mode); } catch (e) {}
+  var rows = document.querySelectorAll('.cand-row');
+  var shown = 0;
+  Array.prototype.forEach.call(rows, function (row) {
+    var ok = mode === 'all' || row.getAttribute('data-orientation') === mode;
+    row.classList.toggle('d-none', !ok);
+    if (ok) { shown += 1; } else { row.querySelector('.cand-cb').checked = false; }   // 隠れた行の選択は解除
+  });
+  ['all', 'landscape', 'portrait'].forEach(function (m) {
+    var b = document.getElementById('cand-filter-' + m);
+    b.classList.toggle('active', m === mode);
+    var n = m === 'all' ? rows.length : document.querySelectorAll('.cand-row[data-orientation="' + m + '"]').length;
+    b.textContent = (m === 'all' ? 'すべて' : m === 'landscape' ? '横のみ' : '縦のみ') + ' ' + n;
+  });
+  document.getElementById('cand-filter-empty').classList.toggle('d-none', !(rows.length > 0 && shown === 0));
+  candUpdateSel();
+}
+
+function candCurrentFilter() {
+  try { return localStorage.getItem(CAND_FILTER_KEY) || 'all'; } catch (e) { return 'all'; }
 }
 
 function candUpdateSel() {
-  var all = document.querySelectorAll('.cand-cb');
+  var all = document.querySelectorAll('.cand-row:not(.d-none) .cand-cb');
   var n = candSelectedIds().length;
   document.getElementById('cand-import-btn').disabled = n === 0;
   document.getElementById('cand-skip-btn').disabled = n === 0;
@@ -730,7 +773,7 @@ function candUpdateSel() {
 }
 
 function candToggleAll(el) {
-  document.querySelectorAll('.cand-cb').forEach(function (c) { c.checked = el.checked; });
+  document.querySelectorAll('.cand-row:not(.d-none) .cand-cb').forEach(function (c) { c.checked = el.checked; });
   candUpdateSel();
 }
 
@@ -740,7 +783,7 @@ function candRefreshBadge() {
   var badge = link ? link.querySelector('.badge') : null;
   if (badge) { if (n > 0) { badge.textContent = n; } else { badge.remove(); } }
   document.getElementById('cand-empty').classList.toggle('d-none', n > 0);
-  candUpdateSel();
+  candSetFilter(candCurrentFilter());   // フィルタ件数・該当なし表示・選択数を更新
 }
 
 function candPlay(el) {
@@ -922,7 +965,7 @@ function candPoll() {
     .catch(function () { candSchedulePoll(8000); });
 }
 
-candUpdateSel();
+candSetFilter(candCurrentFilter());
 candPoll();
 candFetchResume();
 </script>
@@ -943,7 +986,7 @@ function updateSelection() {
   selectAll.checked = checked.length === total;
 }
 
-selectAll.addEventListener('change', () => {
+if (selectAll) selectAll.addEventListener('change', () => {
   document.querySelectorAll('.article-cb').forEach(c => c.checked = selectAll.checked);
   updateSelection();
 });

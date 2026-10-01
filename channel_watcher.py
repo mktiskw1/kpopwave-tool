@@ -27,7 +27,7 @@ from database import (
 )
 from youtube_collector import (
     YOUTUBE_CHANNELS_URL, YOUTUBE_VIDEOS_URL, _best_thumbnail,
-    _is_program_shorts, _matches_target_artist, _parse_duration_iso8601,
+    _is_program_shorts, _matches_target_artist, _orientation_from_embed, _parse_duration_iso8601,
     _resolve_free_channel_id,
 )
 
@@ -161,8 +161,11 @@ def _fetch_video_details(video_ids: list, api_key: str, units: list) -> dict:
     for i in range(0, len(ids), 50):
         resp = requests.get(
             YOUTUBE_VIDEOS_URL,
-            params={"part": "snippet,contentDetails,statistics", "id": ",".join(ids[i:i + 50]),
-                    "maxResults": 50, "key": api_key},
+            # playerパートを足してもvideos.listのクォータは1ユニット/回のまま。maxHeightを指定すると
+            # player.embedHtmlのwidth/heightが実アスペクト比にスケールされ、縦横を判定できる
+            # (音楽番組検索 youtube_collector._enrich_and_build_videos と同じ方法)。
+            params={"part": "snippet,contentDetails,statistics,player", "id": ",".join(ids[i:i + 50]),
+                    "maxHeight": 8192, "maxResults": 50, "key": api_key},
             timeout=20,
         )
         resp.raise_for_status()
@@ -180,8 +183,38 @@ def _fetch_video_details(video_ids: list, api_key: str, units: list) -> dict:
                 "published_at": _parse_rfc3339(sn.get("publishedAt", "")),
                 "duration": _parse_duration_iso8601(item.get("contentDetails", {}).get("duration", "")),
                 "view_count": views,
+                "orientation": _orientation_from_embed(item.get("player", {}).get("embedHtml", "")) or "unknown",
             }
     return result
+
+
+def backfill_candidate_orientation(api_key: str) -> dict:
+    """orientationが未判定(NULL)の候補を、YouTube動画IDからvideos.list(50件ずつ)でまとめて判定して埋める。
+    動画が削除・非公開などで取得できないものは"unknown"にする(再試行しない)。
+    app context内で呼ぶこと。APIエラー時は例外を投げ、NULLのまま次回起動で再試行する。"""
+    rows = WatchedCandidate.query.filter(WatchedCandidate.orientation.is_(None)).all()
+    if not rows:
+        return {"target": 0}
+    if not api_key:
+        return {"target": len(rows), "skipped": "APIキー未設定"}
+    found = {}
+    ids = [r.video_id for r in rows]
+    for i in range(0, len(ids), 50):
+        resp = requests.get(
+            YOUTUBE_VIDEOS_URL,
+            params={"part": "player", "id": ",".join(ids[i:i + 50]), "maxHeight": 8192,
+                    "maxResults": 50, "key": api_key},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        for item in resp.json().get("items", []):
+            found[item["id"]] = _orientation_from_embed(item.get("player", {}).get("embedHtml", "")) or "unknown"
+    counts = {"landscape": 0, "portrait": 0, "unknown": 0}
+    for r in rows:
+        r.orientation = found.get(r.video_id, "unknown")
+        counts[r.orientation] += 1
+    db.session.commit()
+    return {"target": len(rows), **counts}
 
 
 # ── ダウンロード ──────────────────────────────────────────────────────────
@@ -387,6 +420,7 @@ def _run_watch(app, dry_run: bool, rescan_days: int = None) -> dict:
                         published_at=d["published_at"] or it["published_at"],
                         duration=d["duration"],
                         view_count=d["view_count"],
+                        orientation=d["orientation"],
                         guessed_group=" / ".join(gname for _, gname in matched)[:200],
                         guessed_group_id=matched[0][0] if len(matched) == 1 else None,
                         status=CANDIDATE_NEW,

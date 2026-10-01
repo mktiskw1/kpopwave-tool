@@ -293,6 +293,22 @@ def _migrate_db():
                 db.session.rollback()
                 logger.error("DB migration: 監視チャンネル初期登録に失敗(次回起動で再試行): %s", exc)
 
+    # 監視候補の縦横(orientation)列の追加と、未判定の既存候補の補完(videos.list 50件ずつ)
+    existing_cand_cols = {c["name"] for c in inspector.get_columns("watched_candidate")}
+    if "orientation" not in existing_cand_cols:
+        with db.engine.connect() as conn:
+            conn.execute(text("ALTER TABLE watched_candidate ADD COLUMN orientation VARCHAR(10)"))
+            conn.commit()
+        logger.info("DB migration: watched_candidate.orientation added")
+    from channel_watcher import backfill_candidate_orientation
+    try:
+        ori_stats = backfill_candidate_orientation(get_youtube_api_key())
+        if ori_stats.get("target"):
+            logger.info("DB migration: 候補の縦横を補完 %s", ori_stats)
+    except Exception as exc:
+        db.session.rollback()
+        logger.error("DB migration: 候補の縦横補完に失敗(次回起動で再試行): %s", exc)
+
     # follow_candidates テーブル
     existing_fc = {c["name"] for c in inspector.get_columns("follow_candidates")}
     fc_cols = [
@@ -774,6 +790,7 @@ def pending():
                 "duration": f"{secs // 60}:{secs % 60:02d}",
                 "views": f"{c.view_count:,}" if c.view_count is not None else "-",
                 "last_error": c.last_error or "",
+                "orientation": c.orientation or "unknown",
             })
     elif tab == "youtube":
         articles = [a for a in all_pending
