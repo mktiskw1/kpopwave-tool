@@ -446,6 +446,10 @@ def _init_default_settings():
 
 app = create_app()
 
+# サーバーの起動ごとに変わるID。ページを開いたまま再起動された場合に、古いページ(古いJS)での操作を
+# 検知して再読み込みを促すために使う(画面のdata-build属性とAPIのbuildを比較する)。
+APP_BUILD = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+
 
 @app.template_filter("utc_to_jst")
 def utc_to_jst_filter(dt):
@@ -480,6 +484,7 @@ def inject_globals():
         "nav_accounts": nav_accounts,
         "nav_active_account_id": account_id,
         "nav_is_kpop_account": nav_is_kpop_account,
+        "app_build": APP_BUILD,
     }
 
 
@@ -1948,7 +1953,7 @@ def api_watch_channels_run():
             return jsonify({"ok": False, "error": f"再スキャンの日数は1〜{RESCAN_MAX_DAYS}で入力してください"}), 400
     if not start_background_run(app, rescan_days=rescan_days):
         return jsonify({"ok": False, "error": "取得処理が既に実行中です"}), 409
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "rescan_days": rescan_days, "build": APP_BUILD})
 
 
 @app.route("/api/watch-settings", methods=["POST"])
@@ -2027,7 +2032,7 @@ def api_watch_candidates_progress():
 def api_watch_channels_status():
     from channel_watcher import get_run_state, kpop_account_id, serialize_watched_channels
     state = get_run_state()
-    return jsonify({"ok": True, "running": state["running"], "result": state["result"],
+    return jsonify({"ok": True, "running": state["running"], "result": state["result"], "build": APP_BUILD,
                     "channels": serialize_watched_channels(kpop_account_id())})
 
 

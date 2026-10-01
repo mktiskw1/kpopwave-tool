@@ -290,6 +290,8 @@ def _run_watch(app, dry_run: bool, rescan_days: int = None) -> dict:
                      "skip_gone": 0, "skip_dup": 0, "download_failed": 0, "error": None,
                      "cap_left": 0, "truncated": False, "titles": []},
         } for r in rows]
+        for c in chans:
+            c["stat"]["since"] = c["since"].isoformat() + "Z"   # この日時より後に公開された動画を見る(UTC)
         known = _known_video_ids()
         fancam_keywords = get_fancam_keywords()
 
