@@ -85,6 +85,9 @@ class Article(db.Model):
     # チャンネル別の成績集計・削除記録(DeletedPostLog)で使う。
     channel_id = db.Column(db.String(64), nullable=True, index=True)
     channel_name = db.Column(db.String(200), nullable=True)
+    # チャンネル監視(WatchedChannel)経由で取り込んだ記事の監視チャンネルID。承認待ちの絞り込みと
+    # 「📡 監視」バッジ用。監視チャンネルを削除しても記事側の印は残す(参照制約なし)。
+    watched_channel_id = db.Column(db.Integer, nullable=True, index=True)
 
     def to_dict(self):
         return {
@@ -451,3 +454,27 @@ def record_deleted_post(article, reason: str) -> bool:
             getattr(article, "id", None), reason,
         )
         return False
+
+
+class WatchedChannel(db.Model):
+    """実績のあるYouTubeチャンネルの新着を毎日自動で承認待ちに取り込むための監視対象
+    (channel_watcher.run_watch参照)。"""
+    __tablename__ = "watched_channel"
+
+    id = db.Column(db.Integer, primary_key=True)
+    account_id = db.Column(db.Integer, nullable=False, index=True)
+    channel_id = db.Column(db.String(64), nullable=False)
+    channel_name = db.Column(db.String(200), nullable=False)
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+    # Trueの間はタイトルにfancam系キーワードを含む動画だけを取り込む
+    fancam_required = db.Column(db.Boolean, nullable=False, default=True)
+    added_at = db.Column(db.DateTime, default=datetime.utcnow)
+    last_fetched_at = db.Column(db.DateTime, nullable=True)
+    # アップロード再生リストID(channels.listで取得してキャッシュ。playlistItems.listが1ユニットで済む)
+    uploads_playlist_id = db.Column(db.String(64), nullable=True)
+    # 次回取得の起点(これより後に公開された動画だけを対象にする)。NULLなら初回(直近7日)。
+    # 1回の取り込み上限で打ち切った場合は、最後に処理した動画の公開日時で止めて翌日に続きを処理する。
+    cursor_published_at = db.Column(db.DateTime, nullable=True)
+    memo = db.Column(db.Text, nullable=True)
+
+    __table_args__ = (db.UniqueConstraint("account_id", "channel_id", name="uq_watched_channel_account_channel"),)

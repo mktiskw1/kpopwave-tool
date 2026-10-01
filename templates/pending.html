@@ -16,6 +16,7 @@
     ('youtube', 'YouTube',      counts.youtube, '#e03030'),
     ('video',   '動画',         counts.video,   '#e03030'),
     ('clipped', '切り取り済み', counts.clipped, '#9c27b0'),
+    ('watch',   '📡 監視',      counts.watch,   '#0d6efd'),
     ('posted',  '投稿済み動画', counts.posted,  '#2e7d32'),
   ] %}
   {% for key, label, count, badge_color in tabs %}
@@ -40,7 +41,7 @@
   {% endfor %}
 </ul>
 
-{% if active_tab == 'video' and articles %}
+{% if active_tab in ('video', 'watch') and articles %}
 <!-- 動画ソートバー -->
 <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
   <span style="font-size:.82rem;color:var(--text-muted);flex-shrink:0">並び替え:</span>
@@ -107,6 +108,9 @@
                  class="form-check-input article-cb mt-0 flex-shrink-0"
                  onchange="updateSelection()">
           <span class="badge bg-secondary" style="font-size:.72rem">{{ a.feed_source }}</span>
+          {% if a.watched_channel_id %}
+          <span class="badge bg-primary-subtle text-primary-emphasis" style="font-size:.72rem" title="チャンネル監視で自動取り込みした動画">📡 監視：{{ a.channel_name or '' }}</span>
+          {% endif %}
           <span id="group-badge-{{ a.id }}" class="badge bg-info-subtle text-info-emphasis{% if not (group_tag_map and group_tag_map.get(a.id)) %} d-none{% endif %}" style="font-size:.72rem">{{ group_tag_map.get(a.id) if group_tag_map else '' }}</span>
           {% if a.is_comeback %}
           <span class="badge bg-danger-subtle text-danger-emphasis" style="font-size:.72rem" title="カムバック曲としてタグ付け済み">🆕 カムバック</span>

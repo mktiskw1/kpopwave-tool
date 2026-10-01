@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from config import Config, YOUTUBE_DL_FORMAT
 from database import (
     Article, BuzzPost, ChapterClip, ChapterJob, Comment, DailyStat, EarlyAdvanceLog, Group, Hook, Member,
-    PostStat, Setting, TextPostStock, ThreadsAccount, VideoTrimJob, get_active_account, db,
+    PostStat, Setting, TextPostStock, ThreadsAccount, VideoTrimJob, WatchedChannel, get_active_account, db,
     DELETE_REASON_MANUAL, DELETE_REASON_MANUAL_BULK, record_deleted_post,
 )
 
@@ -182,6 +182,7 @@ def _migrate_db():
         ("buzz_threshold_confirmed_at", "DATETIME"),
         ("channel_id", "VARCHAR(64)"),
         ("channel_name", "VARCHAR(200)"),
+        ("watched_channel_id", "INTEGER"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -274,6 +275,23 @@ def _migrate_db():
             except Exception as exc:
                 db.session.rollback()
                 logger.error("DB migration: articles.channel_id 補完に失敗(次回起動で再試行): %s", exc)
+
+    # 監視チャンネルの初期データ(KPOPアカウント)。channel_idはArticleに保存済みの値をチャンネル名で
+    # 引き、YouTube APIで実在確認してから登録する。フラグにより1回だけ実行する(後で監視対象を
+    # 削除しても再登録されない)。APIキー未設定・通信エラー時はフラグを立てず次回起動で再試行する。
+    from channel_watcher import SEED_SETTING_KEY, seed_default_watched_channels
+    if Setting.get(SEED_SETTING_KEY, "") != "1":
+        api_key = get_youtube_api_key()
+        if not api_key:
+            logger.warning("DB migration: YouTube APIキー未設定のため監視チャンネルの初期登録をスキップ")
+        else:
+            try:
+                seed_stats = seed_default_watched_channels(api_key)
+                Setting.set(SEED_SETTING_KEY, "1")
+                logger.info("DB migration: 監視チャンネル初期登録 %s", seed_stats)
+            except Exception as exc:
+                db.session.rollback()
+                logger.error("DB migration: 監視チャンネル初期登録に失敗(次回起動で再試行): %s", exc)
 
     # follow_candidates テーブル
     existing_fc = {c["name"] for c in inspector.get_columns("follow_candidates")}
@@ -684,6 +702,7 @@ def pending():
         "youtube": 0,
         "video":  0,
         "clipped": 0,
+        "watch":  0,
         "posted": _scope(Article.query.filter_by(status="posted", content_type="video")).count(),
     }
     for a in all_pending:
@@ -692,6 +711,8 @@ def pending():
             counts["video"] += 1
             if _is_manual_trim_clip(a):
                 counts["clipped"] += 1
+            if a.watched_channel_id:
+                counts["watch"] += 1
         elif src.startswith("YouTube:"):
             counts["youtube"] += 1
         else:
@@ -721,6 +742,10 @@ def pending():
     elif tab == "clipped":
         articles = [a for a in all_pending
                     if (a.content_type or "article") == "video" and _is_manual_trim_clip(a)]
+        images_map = {}
+    elif tab == "watch":
+        articles = [a for a in all_pending
+                    if (a.content_type or "article") == "video" and a.watched_channel_id]
         images_map = {}
     elif tab == "youtube":
         articles = [a for a in all_pending
@@ -1162,7 +1187,7 @@ _ARTICLE_RESTORE_FIELDS = [
     "repost_count", "quote_count", "engagement_fetched_at", "post_style",
     "image_urls", "content_type", "video_file_path", "is_fancam", "account_id",
     "group_id", "member_id", "buzz_repost_count", "buzz_low_streak",
-    "channel_id", "channel_name",
+    "channel_id", "channel_name", "watched_channel_id",
 ]
 _ARTICLE_DATETIME_FIELDS = {
     "published_at", "scheduled_at", "posted_at", "created_at", "engagement_fetched_at",
@@ -1819,7 +1844,12 @@ def settings():
         for g in roster_groups
     ]
 
-    return render_template("settings.html", settings=current, accounts=accounts, roster=roster)
+    from channel_watcher import get_run_state, kpop_account_id, serialize_watched_channels
+    watch_account_id = kpop_account_id()
+    return render_template("settings.html", settings=current, accounts=accounts, roster=roster,
+                           watch_channels=serialize_watched_channels(watch_account_id),
+                           watch_state=get_run_state(),
+                           watch_account_id=watch_account_id)
 
 
 @app.route("/api/quick-setting", methods=["POST"])
@@ -1832,6 +1862,61 @@ def quick_setting():
         return jsonify({"ok": False, "error": "invalid key"}), 400
     Setting.set(key, value)
     return jsonify({"ok": True})
+
+
+# ── チャンネル監視 ────────────────────────────────────────────────────────────
+
+
+@app.route("/api/watch-channels", methods=["GET", "POST"])
+def api_watch_channels():
+    from channel_watcher import add_watched_channel, kpop_account_id, serialize_watched_channels
+    account_id = kpop_account_id()
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        raw = (data.get("input") or "").strip()
+        if not raw:
+            return jsonify({"ok": False, "error": "URL・@ハンドル・チャンネルIDのいずれかを入力してください"}), 400
+        row, error = add_watched_channel(app, account_id, raw)
+        if error:
+            return jsonify({"ok": False, "error": error}), 400
+        logger.info("監視チャンネル追加: %s (%s)", row.channel_name, row.channel_id)
+    return jsonify({"ok": True, "channels": serialize_watched_channels(account_id)})
+
+
+@app.route("/api/watch-channels/<int:wid>", methods=["PATCH", "DELETE"])
+def api_watch_channel_item(wid):
+    from channel_watcher import kpop_account_id, serialize_watched_channels
+    row = WatchedChannel.query.get_or_404(wid)
+    if request.method == "DELETE":
+        db.session.delete(row)
+    else:
+        data = request.get_json(silent=True) or {}
+        if "enabled" in data:
+            row.enabled = bool(data["enabled"])
+        if "fancam_required" in data:
+            row.fancam_required = bool(data["fancam_required"])
+        if "memo" in data:
+            row.memo = (str(data["memo"] or "").strip())[:1000] or None
+    db.session.commit()
+    return jsonify({"ok": True, "channels": serialize_watched_channels(kpop_account_id())})
+
+
+@app.route("/api/watch-channels/run", methods=["POST"])
+def api_watch_channels_run():
+    """「今すぐ取得」: 毎朝の自動取得と同じ処理をバックグラウンドで実行する(動画のダウンロードに
+    時間がかかるため、結果は /api/watch-channels/status で確認する)。"""
+    from channel_watcher import start_background_run
+    if not start_background_run(app):
+        return jsonify({"ok": False, "error": "取得処理が既に実行中です"}), 409
+    return jsonify({"ok": True})
+
+
+@app.route("/api/watch-channels/status")
+def api_watch_channels_status():
+    from channel_watcher import get_run_state, kpop_account_id, serialize_watched_channels
+    state = get_run_state()
+    return jsonify({"ok": True, "running": state["running"], "result": state["result"],
+                    "channels": serialize_watched_channels(kpop_account_id())})
 
 
 # ── 週間スケジュール ──────────────────────────────────────────────────────────

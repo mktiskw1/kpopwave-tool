@@ -446,6 +446,57 @@
   </div>
 </div>
 
+
+<!-- チャンネル監視(実績のあるYouTubeチャンネルの新着を毎朝6:00に承認待ちへ自動取り込み) -->
+<div class="card mt-4" id="watch-card">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-broadcast me-2"></i>監視チャンネル</span>
+    <span class="d-flex align-items-center gap-2">
+      <span id="watch-run-status" style="font-size:.78rem;color:var(--text-muted)"></span>
+      <button type="button" class="btn btn-sm btn-outline-primary" id="watch-run-btn" onclick="watchRunNow()">
+        <i class="bi bi-cloud-download me-1"></i>今すぐ取得
+      </button>
+    </span>
+  </div>
+  <div class="card-body">
+    <div class="form-text mb-3" style="font-size:.75rem">
+      登録したチャンネルの新着を毎朝6:00（JST）に取得し、対象グループに一致する動画を承認待ちに入れます
+      （Shortsは除外。「fancam必須」がONのチャンネルはタイトルにfancam系の語を含む動画のみ）。
+      成績は残っている記事と削除記録の合計です。判定済み＝投稿から7日以上の記事＋自動削除された記録（手動削除は含めない）、
+      当たり率＝バズ判定いいね数以上の本数÷判定済み本数。
+    </div>
+    <div class="input-group input-group-sm mb-3" style="max-width:520px">
+      <input type="text" id="watch-new-input" class="form-control"
+             placeholder="チャンネルURL・@ハンドル・チャンネルID" onkeydown="if (event.key === 'Enter') { event.preventDefault(); watchAdd(); }">
+      <button type="button" class="btn btn-outline-success" onclick="watchAdd()">
+        <i class="bi bi-plus-lg"></i> 追加
+      </button>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0" style="font-size:.82rem">
+        <thead>
+          <tr>
+            <th>チャンネル</th>
+            <th class="text-center">有効</th>
+            <th class="text-center">fancam必須</th>
+            <th>最終取得</th>
+            <th class="text-end">承認待ち</th>
+            <th class="text-end">投稿</th>
+            <th class="text-end">判定済</th>
+            <th class="text-end">平均いいね</th>
+            <th class="text-end">バズ</th>
+            <th class="text-end">削除</th>
+            <th class="text-end">当たり率</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="watch-tbody"></tbody>
+      </table>
+    </div>
+    <div id="watch-run-result" class="mt-3" style="font-size:.8rem"></div>
+  </div>
+</div>
+
 <!-- Threads API セットアップ手順 -->
 <div class="card mt-4">
   <div class="card-header" style="font-size:.85rem;color:var(--text-muted)">
@@ -718,5 +769,141 @@ function rosterDeleteMember(memberId, groupId) {
 }
 
 renderRoster();
+
+// ── チャンネル監視 ──
+var WATCH_DATA = {{ watch_channels|tojson }};
+var WATCH_RUNNING = {{ 'true' if watch_state.running else 'false' }};
+var watchPollTimer = null;
+
+function watchEsc(v) {
+  var d = document.createElement('div');
+  d.textContent = v == null ? '' : String(v);
+  return d.innerHTML;
+}
+
+function watchFmtTime(iso) {
+  if (!iso) return '未取得';
+  return new Date(iso).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function renderWatch() {
+  var tbody = document.getElementById('watch-tbody');
+  if (!WATCH_DATA.length) {
+    tbody.innerHTML = '<tr><td colspan="12" class="text-muted">監視チャンネルはまだありません</td></tr>';
+    return;
+  }
+  tbody.innerHTML = WATCH_DATA.map(function (c) {
+    var rate = c.hit_rate == null ? '-' : c.hit_rate + '%';
+    var avg = c.avg_likes == null ? '-' : c.avg_likes.toLocaleString();
+    return '<tr>' +
+      '<td><a href="https://www.youtube.com/channel/' + watchEsc(c.channel_id) + '" target="_blank" rel="noopener">' + watchEsc(c.channel_name) + '</a></td>' +
+      '<td class="text-center"><input type="checkbox" class="form-check-input" ' + (c.enabled ? 'checked' : '') +
+        ' onchange="watchPatch(' + c.id + ', { enabled: this.checked })"></td>' +
+      '<td class="text-center"><input type="checkbox" class="form-check-input" ' + (c.fancam_required ? 'checked' : '') +
+        ' onchange="watchPatch(' + c.id + ', { fancam_required: this.checked })"></td>' +
+      '<td>' + watchFmtTime(c.last_fetched_at) + '</td>' +
+      '<td class="text-end">' + c.pending + '</td>' +
+      '<td class="text-end">' + c.posts + '</td>' +
+      '<td class="text-end">' + c.judged + '</td>' +
+      '<td class="text-end">' + avg + '</td>' +
+      '<td class="text-end">' + c.buzz + '</td>' +
+      '<td class="text-end">' + c.deleted + '</td>' +
+      '<td class="text-end fw-bold">' + rate + '</td>' +
+      '<td class="text-end"><button type="button" class="btn btn-outline-danger btn-sm py-0 px-2" onclick="watchDelete(' +
+        c.id + ', ' + JSON.stringify(c.channel_name).replace(/"/g, '&quot;') + ')"><i class="bi bi-trash3"></i></button></td>' +
+      '</tr>';
+  }).join('');
+}
+
+function watchAdd() {
+  var input = document.getElementById('watch-new-input');
+  var v = input.value.trim();
+  if (!v) return;
+  fetch('/api/watch-channels', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ input: v })
+  })
+  .then(function (r) { return r.json(); })
+  .then(function (d) {
+    if (!d.ok) { alert(d.error || '追加に失敗しました'); return; }
+    input.value = '';
+    WATCH_DATA = d.channels;
+    renderWatch();
+  })
+  .catch(function () { alert('通信エラーが発生しました'); });
+}
+
+function watchPatch(id, body) {
+  fetch('/api/watch-channels/' + id, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  .then(function (r) { return r.json(); })
+  .then(function (d) {
+    if (!d.ok) { alert(d.error || '更新に失敗しました'); return; }
+    WATCH_DATA = d.channels;
+    renderWatch();
+  })
+  .catch(function () { alert('通信エラーが発生しました'); });
+}
+
+function watchDelete(id, name) {
+  if (!confirm('監視チャンネル「' + name + '」を削除しますか？\n取り込み済みの記事は残ります。')) return;
+  fetch('/api/watch-channels/' + id, { method: 'DELETE' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!d.ok) { alert(d.error || '削除に失敗しました'); return; }
+      WATCH_DATA = d.channels;
+      renderWatch();
+    })
+    .catch(function () { alert('通信エラーが発生しました'); });
+}
+
+function watchShowResult(res) {
+  var box = document.getElementById('watch-run-result');
+  if (!res) { box.innerHTML = ''; return; }
+  if (!res.ok) { box.innerHTML = '<span class="text-danger">' + watchEsc(res.error || '取得に失敗しました') + '</span>'; return; }
+  var lines = res.channels.map(function (c) {
+    if (c.error) return watchEsc(c.name) + ': <span class="text-danger">' + watchEsc(c.error) + '</span>';
+    return watchEsc(c.name) + ': <b>' + c.imported + '本取り込み</b>（新着' + c.new + '、重複' + c.skip_dup +
+      '、fancam以外' + c.skip_fancam + '、グループ外' + c.skip_group + '、Shorts' + c.skip_shorts +
+      '、長尺' + c.skip_long + (c.download_failed ? '、DL失敗' + c.download_failed : '') + '）';
+  });
+  box.innerHTML = '<div class="fw-bold mb-1">取得結果: 合計' + res.imported_total + '本（APIユニット' + res.api_units + '）</div>' + lines.join('<br>');
+}
+
+function watchSetRunning(running) {
+  var btn = document.getElementById('watch-run-btn');
+  btn.disabled = running;
+  document.getElementById('watch-run-status').textContent = running ? '取得中…（動画のダウンロードに数分かかることがあります）' : '';
+}
+
+function watchPoll() {
+  fetch('/api/watch-channels/status')
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      WATCH_DATA = d.channels;
+      renderWatch();
+      if (d.running) { watchPollTimer = setTimeout(watchPoll, 4000); return; }
+      watchSetRunning(false);
+      watchShowResult(d.result);
+    })
+    .catch(function () { watchPollTimer = setTimeout(watchPoll, 8000); });
+}
+
+function watchRunNow() {
+  fetch('/api/watch-channels/run', { method: 'POST' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!d.ok) { alert(d.error || '取得を開始できませんでした'); return; }
+      watchSetRunning(true);
+      watchShowResult(null);
+      watchPollTimer = setTimeout(watchPoll, 3000);
+    })
+    .catch(function () { alert('通信エラーが発生しました'); });
+}
+
+renderWatch();
+if (WATCH_RUNNING) { watchSetRunning(true); watchPoll(); }
 </script>
 {% endblock %}

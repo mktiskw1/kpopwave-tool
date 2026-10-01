@@ -991,6 +991,21 @@ def _engagement_job(app):
     )
 
 
+@_logged_job("channel_watch")
+def _channel_watch_job(app):
+    """監視チャンネルの新着(前回取得以降)を取得し、条件に合う動画を承認待ちへ取り込む(毎朝6:00 JST)。"""
+    from channel_watcher import run_watch
+    result = run_watch(app)
+    if not result.get("ok"):
+        logger.warning("[channel_watch] 取得できませんでした: %s", result.get("error"))
+        return
+    logger.info(
+        "[channel_watch] 取り込み%d本 APIユニット%d: %s",
+        result["imported_total"], result["api_units"],
+        ", ".join(f"{c['name']}={c['imported']}" for c in result["channels"]) or "(対象なし)",
+    )
+
+
 @_logged_job("video_cleanup")
 def _video_cleanup_job(app):
     """投稿済み動画のうち7日経過したものを判定し、バズ判定いいね数(buzz_threshold_likes、
@@ -1361,6 +1376,15 @@ def setup_scheduler(app):
     )
 
     scheduler.add_job(
+        _channel_watch_job,
+        CronTrigger(hour=6, minute=0, timezone="Asia/Tokyo"),
+        args=[app],
+        id="channel_watch",
+        replace_existing=True,
+        misfire_grace_time=_DAILY_MISFIRE_GRACE,
+    )
+
+    scheduler.add_job(
         _post_stats_job,
         CronTrigger(hour=2, minute=30, timezone="Asia/Tokyo"),
         args=[app],
@@ -1388,6 +1412,6 @@ def setup_scheduler(app):
     logger.info(
         "Scheduler started (post backup 5min, comments/rollover 30min, early engagement 5min, "
         "engagement 2:00 JST, video cleanup 3:00 JST, orphan video cleanup 4:30 JST, "
-        "token refresh 5:00 JST, post stats 2:30 JST, daily snapshot 3:30 JST)"
+        "token refresh 5:00 JST, channel watch 6:00 JST, post stats 2:30 JST, daily snapshot 3:30 JST)"
     )
     return scheduler
