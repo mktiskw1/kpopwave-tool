@@ -677,9 +677,9 @@ def _buzz_requeue_interval_days_for(final_likes: int, interval_days: int,
 def _buzz_requeue_candidates(app, account_id: int, limit: int | None = None) -> list:
     """自動再キュー対象(最終投稿日が古い順)を返す。limit未指定なら全件(在庫件数カウント用)。
 
-    「200いいね以上を達成し永久保存されている動画」は、_video_cleanup_job の
-    削除ルールを生き延びた status='posted' の動画そのものとして扱う
-    (200未満だった動画は7日後に削除されるため、残っている＝達成済み、または
+    「バズ判定いいね数(buzz_threshold_likes)以上を達成し永久保存されている動画」は、
+    _video_cleanup_job の削除ルールを生き延びた status='posted' の動画そのものとして扱う
+    (しきい値未満だった動画は7日後に削除されるため、残っている＝達成済み、または
     2・3回目の猶予期間中)。
 
     ファストトラック: 直近の投稿サイクルの最終いいね数(post_stats確定値、初速は使わない)が
@@ -733,7 +733,7 @@ def buzz_requeue_backlog_stats(app, account_id: int = _BUZZ_REQUEUE_ACCOUNT_ID) 
     """自動再キュー対象(バックログ)の現況を集計する(表示専用、DBは変更しない)。
 
     対象条件は _buzz_requeue_candidates と完全に同一(status='posted' が
-    _video_cleanup_job の削除ルールを生き延びた＝200いいね達成/猶予中を意味する)。
+    _video_cleanup_job の削除ルールを生き延びた＝バズ判定いいね数達成/猶予中を意味する)。
     各記事はファストトラック該当なら buzz_fasttrack_interval_days、非該当なら
     buzz_requeue_interval_days を自分自身の適用間隔として判定する。
     「直近7日間で新たにバックログ入り」は、posted_at が
@@ -796,7 +796,7 @@ def buzz_requeue_backlog_stats(app, account_id: int = _BUZZ_REQUEUE_ACCOUNT_ID) 
 
 @_logged_job("buzz_requeue")
 def _buzz_requeue_job(app, account_id: int = _BUZZ_REQUEUE_ACCOUNT_ID) -> None:
-    """バズった動画(200いいね達成・永久保存)を自動で再キューする。
+    """バズった動画(バズ判定いいね数達成・永久保存)を自動で再キューする。
 
     対象在庫が_BUZZ_REQUEUE_BACKLOG_THRESHOLD件を超えている場合は1日
     _BUZZ_REQUEUE_BACKLOG_BATCH_SIZE件、それ以下なら1日_BUZZ_REQUEUE_NORMAL_BATCH_SIZE件を
@@ -990,22 +990,27 @@ def _engagement_job(app):
 
 @_logged_job("video_cleanup")
 def _video_cleanup_job(app):
-    """投稿済み動画のうち7日経過したものを判定し、200いいね未満なら削除する（毎日1回）。
+    """投稿済み動画のうち7日経過したものを判定し、バズ判定いいね数(buzz_threshold_likes、
+    既定200)未満なら削除する（毎日1回）。
 
     バズ動画自動再キュー機能により、以下の猶予ルールが適用される
-    (buzz_repost_count は通算の投稿回数。初回投稿=1、1回目の再投稿=2、…):
-    - 初回投稿(buzz_repost_count<=1)で200未満: 従来通り即削除。
-    - 再投稿(2回目以降)でいいねが50以下: 回数・猶予に関わらず即削除する。
-      初回投稿で200以上を獲得していたとしても、再投稿後にここまで落ち込んだ場合は
+    (buzz_repost_count は通算の投稿回数。初回投稿=1、1回目の再投稿=2、…)。
+    以下「しきい値」はbuzz_threshold_likes、「即削除ライン」はbuzz_repost_kill_likesを指す:
+    - 初回投稿(buzz_repost_count<=1)でしきい値未満: 従来通り即削除。
+    - 再投稿(2回目以降)でいいねが即削除ライン以下: 回数・猶予に関わらず即削除する。
+      初回投稿でしきい値以上を獲得していたとしても、再投稿後にここまで落ち込んだ場合は
       「当時のトレンド/新曲タイミングに乗っていただけでコンテンツ自体の持続力はない」
       という強いシグナルとみなし、下記の2・3回目の猶予ルールより優先する
       (既存の猶予ルールとは独立した早期削除条件。いずれかに該当すれば削除)。
-    - 2・3回目の投稿で200未満(上記の50以下即削除には該当しない場合): 即削除せず、
-      次回の再キュー対象として残す。ただし2回目・3回目 両方とも200未満だった場合は
-      3回目の判定時点で削除する(buzz_low_streak で直近判定が猶予付きの200未満だったかを追跡)。
-    - 4回目以降の投稿で200未満: 猶予なしで即削除する。
-    - 200以上を達成した場合は回数に関わらず削除せず保持する
+    - 2・3回目の投稿でしきい値未満(上記の即削除ライン以下には該当しない場合): 即削除せず、
+      次回の再キュー対象として残す。ただし2回目・3回目 両方ともしきい値未満だった場合は
+      3回目の判定時点で削除する(buzz_low_streak で直近判定が猶予付きのしきい値未満だったかを追跡)。
+    - 4回目以降の投稿でしきい値未満: 猶予なしで即削除する。
+    - しきい値以上を達成した場合は回数に関わらず削除せず保持する
       (posted_atが最終投稿日として機能し、再キュー間隔経過後に再び対象になる)。
+      一度しきい値達成と確定した動画はbuzz_threshold_confirmed_atに記録し、以後
+      しきい値が引き上げられても遡って削除対象にしない(このサイクル分のみ有効。
+      再投稿でposted_atが更新されると次サイクルとして再評価される)。
     """
     import os
     cutoff = datetime.utcnow() - timedelta(days=7)
@@ -1013,6 +1018,9 @@ def _video_cleanup_job(app):
     videos_dir = os.path.join(static_dir, "videos")
 
     with app.app_context():
+        threshold_likes = int(Setting.get("buzz_threshold_likes", "200") or "200")
+        repost_kill_likes = int(Setting.get("buzz_repost_kill_likes", "50") or "50")
+
         candidates = (
             Article.query
             .filter(
@@ -1031,21 +1039,31 @@ def _video_cleanup_job(app):
             likes = article.like_count or 0
             repost_count = article.buzz_repost_count or 1
 
-            if likes >= 200:
+            # このサイクルで既にしきい値達成確定済みなら、しきい値が後から変わっても再評価しない
+            # (buzz_threshold_confirmed_atがposted_at以降なら現サイクルでの確定を意味する。
+            # 再投稿でposted_atが更新されていれば古いサイクルの確定とみなし再評価する)。
+            if article.buzz_threshold_confirmed_at and article.buzz_threshold_confirmed_at >= article.posted_at:
                 if article.buzz_low_streak:
                     article.buzz_low_streak = False
                     dirty = True
                 continue
 
+            if likes >= threshold_likes:
+                article.buzz_threshold_confirmed_at = datetime.utcnow()
+                dirty = True
+                if article.buzz_low_streak:
+                    article.buzz_low_streak = False
+                continue
+
             # 再投稿後の急落ルール: 初回投稿は対象外(repost_count>=2のみ)。
             # 2・3回目の猶予判定より先に評価し、該当すれば猶予なしで即削除する。
-            if repost_count >= 2 and likes <= 50:
+            if repost_count >= 2 and likes <= repost_kill_likes:
                 targets.append(article)
                 continue
 
             if repost_count in (2, 3):
                 if article.buzz_low_streak:
-                    # 2回目・3回目 両方とも200未満 → 3回目の判定時点で削除
+                    # 2回目・3回目 両方ともしきい値未満 → 3回目の判定時点で削除
                     targets.append(article)
                 else:
                     article.buzz_low_streak = True

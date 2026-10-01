@@ -66,6 +66,12 @@ class Article(db.Model):
     buzz_repost_count = db.Column(db.Integer, nullable=False, default=1)
     # 再投稿2・3回目のいいね未達を1回だけ猶予するための直近判定フラグ(scheduler._video_cleanup_job参照)。
     buzz_low_streak = db.Column(db.Boolean, nullable=False, default=False)
+    # バズ判定(buzz_threshold_likes)を達成し「永久保存」と確定した日時(そのサイクルのposted_at
+    # 以降の値なら確定済み扱い)。設定のbuzz_threshold_likesを後から引き上げても、既にこの
+    # サイクルで確定済みの動画が遡って削除対象にならないようにするためのスナップショット
+    # (scheduler._video_cleanup_job参照)。再投稿されposted_atが更新されると、この値は
+    # 古いサイクルのものとみなされ再評価の対象に戻る。
+    buzz_threshold_confirmed_at = db.Column(db.DateTime, nullable=True)
     # ツリー2件目(アフィリエイトリンク等)機能: 任意設定。両方Noneなら従来通り1件のみ投稿する。
     thread_reply_text = db.Column(db.Text, nullable=True)
     thread_reply_url = db.Column(db.String(1000), nullable=True)

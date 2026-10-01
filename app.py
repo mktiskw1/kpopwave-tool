@@ -178,6 +178,7 @@ def _migrate_db():
         ("thread_reply_url", "VARCHAR(1000)"),
         ("is_comeback", "INTEGER DEFAULT 0"),
         ("summary_is_manual", "INTEGER DEFAULT 0"),
+        ("buzz_threshold_confirmed_at", "DATETIME"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -185,6 +186,28 @@ def _migrate_db():
                 conn.execute(text(f"ALTER TABLE articles ADD COLUMN {col} {typedef}"))
                 conn.commit()
                 logger.info("DB migration: articles.%s added", col)
+
+    # buzz_threshold_confirmed_at の初期バックフィル: バズ判定いいね数が設定可能になる前は
+    # 200いいねがハードコードされた基準だったため、既にその基準を満たして永久保存されている
+    # 動画を「確定済み」として扱っておく(この1回限りの文言としての200は意図的な固定値であり、
+    # 設定値buzz_threshold_likesとは無関係)。こうしておかないと、設定追加直後にしきい値を
+    # 引き上げた場合、未確定(NULL)のまま次回のvideo_cleanup_jobで再評価され、既に永久保存
+    # 済みだった動画が遡って削除対象になってしまう。
+    # posted_atが7日以上前(_video_cleanup_jobの評価対象になり得る)のものだけに限定する。
+    # ここを絞らないと、投稿直後にたまたま200いいねに達した動画まで「確定済み」と
+    # 早まってマークしてしまい、本来7日時点で再評価されるはずだった猶予ルール判定を
+    # 迂回させてしまう(起動のたびに実行される=毎回新しい記事を巻き込み得るため)。
+    with db.engine.connect() as conn:
+        result = conn.execute(text(
+            "UPDATE articles SET buzz_threshold_confirmed_at = :now "
+            "WHERE buzz_threshold_confirmed_at IS NULL AND status = 'posted' "
+            "AND content_type = 'video' AND COALESCE(like_count, 0) >= 200 "
+            "AND posted_at < :cutoff"
+        ), {"now": datetime.utcnow(), "cutoff": datetime.utcnow() - timedelta(days=7)})
+        conn.commit()
+        if result.rowcount:
+            logger.info("DB migration: 既存の永久保存動画 %d件をbuzz_threshold_confirmed_atで確定済みにマーク",
+                        result.rowcount)
 
     # threads_accounts テーブル: content_topic 列
     existing_accounts_cols = {c["name"] for c in inspector.get_columns("threads_accounts")}
@@ -369,6 +392,8 @@ def _init_default_settings():
         "buzz_requeue_interval_days": "60",
         "buzz_fasttrack_interval_days": "30",
         "buzz_fasttrack_min_likes": "1000",
+        "buzz_threshold_likes": "200",
+        "buzz_repost_kill_likes": "50",
     }
     for key, value in defaults.items():
         if not Setting.query.filter_by(key=key).first():
@@ -1610,13 +1635,36 @@ def prioritize_queue_article(id):
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
     if request.method == "POST":
+        # バズ関連しきい値の入力チェック。いずれも1以上の整数のみ受け付け、
+        # 「再投稿の即削除ライン ＜ バズ判定いいね数 ≦ ファストトラックの基準」を満たさない
+        # 場合は何も保存せずエラーを表示する(値の意味的な整合性が崩れた設定を防ぐため)。
+        try:
+            _threshold_likes = int((request.form.get("buzz_threshold_likes") or "").strip())
+            _kill_likes = int((request.form.get("buzz_repost_kill_likes") or "").strip())
+            _fasttrack_min_likes = int((request.form.get("buzz_fasttrack_min_likes") or "").strip())
+        except (ValueError, TypeError):
+            flash("バズ判定いいね数・再投稿の即削除ライン・ファストトラック基準は"
+                  "いずれも1以上の整数で入力してください", "danger")
+            return redirect(url_for("settings"))
+        if _threshold_likes < 1 or _kill_likes < 1 or _fasttrack_min_likes < 1:
+            flash("バズ判定いいね数・再投稿の即削除ライン・ファストトラック基準は"
+                  "いずれも1以上の整数で入力してください", "danger")
+            return redirect(url_for("settings"))
+        if not (_kill_likes < _threshold_likes):
+            flash("「再投稿の即削除ライン」は「バズ判定いいね数」より小さい値にしてください", "danger")
+            return redirect(url_for("settings"))
+        if not (_threshold_likes <= _fasttrack_min_likes):
+            flash("「バズ判定いいね数」は「ファストトラックの基準いいね数」以下にしてください", "danger")
+            return redirect(url_for("settings"))
+
         for key in ("anthropic_api_key",
                     "collect_interval_hours",
                     "youtube_api_key", "youtube_collect_interval_hours",
                     "youtube_min_view_count", "youtube_max_view_count",
                     "meta_app_id", "meta_app_secret", "app_base_url",
                     "buzz_requeue_interval_days",
-                    "buzz_fasttrack_interval_days", "buzz_fasttrack_min_likes"):
+                    "buzz_fasttrack_interval_days", "buzz_fasttrack_min_likes",
+                    "buzz_threshold_likes", "buzz_repost_kill_likes"):
             Setting.set(key, (request.form.get(key) or "").strip())
 
         # Threads 認証情報は「手動で上書き」欄。空送信では絶対に消さない
@@ -1714,6 +1762,8 @@ def settings():
         "buzz_requeue_interval_days": Setting.get("buzz_requeue_interval_days", "60"),
         "buzz_fasttrack_interval_days": Setting.get("buzz_fasttrack_interval_days", "30"),
         "buzz_fasttrack_min_likes": Setting.get("buzz_fasttrack_min_likes", "1000"),
+        "buzz_threshold_likes": Setting.get("buzz_threshold_likes", "200"),
+        "buzz_repost_kill_likes": Setting.get("buzz_repost_kill_likes", "50"),
         "rss_feeds": json.loads(Setting.get("rss_feeds", "[]") or "[]"),
         "youtube_channels": json.loads(Setting.get("youtube_channels", "[]") or "[]"),
         "meta_app_id": Setting.get("meta_app_id"),

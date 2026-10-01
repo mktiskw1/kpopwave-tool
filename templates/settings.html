@@ -294,11 +294,31 @@
           </label>
         </div>
         <div class="mb-3">
+          <label class="form-label" style="font-size:.85rem">バズ動画 判定基準</label>
+          <div class="d-flex gap-3 flex-wrap align-items-end">
+            <div>
+              <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">対象とする最終いいね数（以上）</label>
+              <input type="number" class="form-control" name="buzz_threshold_likes"
+                     value="{{ settings.buzz_threshold_likes }}" min="1" style="max-width:120px">
+            </div>
+            <div>
+              <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">再投稿の即削除ライン（いいね数以下）</label>
+              <input type="number" class="form-control" name="buzz_repost_kill_likes"
+                     value="{{ settings.buzz_repost_kill_likes }}" min="1" style="max-width:120px">
+            </div>
+          </div>
+          <div class="form-text" style="font-size:.75rem">
+            この値以上のいいねを獲得した動画を「バズった」として永久保存・自動再キュー対象にします
+            （保存・再キュー・再投稿の猶予ルールすべてで共通の基準として使用）。
+            再投稿（2回目以降の投稿）でこの値以下だった動画は、猶予なしで削除します。
+          </div>
+        </div>
+        <div class="mb-3">
           <label class="form-label" style="font-size:.85rem">バズ動画 自動再キュー間隔（日）</label>
           <input type="number" class="form-control" name="buzz_requeue_interval_days"
                  value="{{ settings.buzz_requeue_interval_days }}" min="1" style="max-width:100px">
           <div class="form-text" style="font-size:.75rem">
-            200いいね達成・永久保存された動画を、最終投稿日からこの日数以上経過後に
+            上のバズ判定基準を達成・永久保存された動画を、最終投稿日からこの日数以上経過後に
             その日の1投稿目として自動で再キューします（KPOPアカウント）。
           </div>
         </div>
