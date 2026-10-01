@@ -26,7 +26,7 @@ from database import (
     Article, DeletedPostLog, Group, Setting, ThreadsAccount, WatchedCandidate, WatchedChannel, db,
 )
 from youtube_collector import (
-    YOUTUBE_CHANNELS_URL, YOUTUBE_VIDEOS_URL, _best_thumbnail, _is_fancam_title,
+    YOUTUBE_CHANNELS_URL, YOUTUBE_VIDEOS_URL, _best_thumbnail,
     _is_program_shorts, _matches_target_artist, _parse_duration_iso8601,
     _resolve_free_channel_id,
 )
@@ -50,6 +50,11 @@ CANDIDATE_SKIPPED = "skipped"
 CANDIDATE_EXPIRED = "expired"
 EXPIRE_DAYS_SETTING = "watched_candidate_expire_days"
 DEFAULT_EXPIRE_DAYS = 14
+
+# fancam必須のチャンネルで使うタイトル判定キーワード(カンマ区切り。大文字小文字は区別せず、前後の空白は無視)。
+# 監視専用の設定で、既存のfancam検索・音楽番組検索の判定(youtube_collector側)には影響しない。
+FANCAM_KEYWORDS_SETTING = "watched_fancam_keywords"
+DEFAULT_FANCAM_KEYWORDS = "직캠, fancam, 원테이크, 페이스캠, facecam"
 
 SEED_SETTING_KEY = "watched_channels_seeded"
 # 初期登録するチャンネル名(channel_idはArticleに保存済みのchannel_idから名前で引き、APIで実在確認する)
@@ -271,6 +276,7 @@ def _run_watch(app, dry_run: bool) -> dict:
                      "titles": []},
         } for r in rows]
         known = _known_video_ids()
+        fancam_keywords = get_fancam_keywords()
 
         # フェーズ1: 再生リストIDの確定と、前回以降の新着動画IDの取得(playlistItems.list: 1ユニット)
         missing = [c["channel_id"] for c in chans if not c["playlist_id"]]
@@ -336,7 +342,7 @@ def _run_watch(app, dry_run: bool) -> dict:
                 if d["duration"] > WATCH_MAX_DURATION_SEC:
                     stat["skip_long"] += 1
                     continue
-                if c["fancam_required"] and not _is_fancam_title(title):
+                if c["fancam_required"] and not is_watch_fancam_title(title, fancam_keywords):
                     stat["skip_fancam"] += 1
                     continue
                 matched = [(gid, gname) for gid, gname in groups if _matches_target_artist(title, "", gname)]
@@ -544,6 +550,28 @@ def set_candidates_status(ids: list, status: str) -> int:
     ).update({"status": status, "status_changed_at": datetime.utcnow()}, synchronize_session=False)
     db.session.commit()
     return n
+
+
+def parse_fancam_keywords(raw: str) -> list:
+    """カンマ区切り(半角・全角・読点)の文字列を、前後の空白を除いた小文字のキーワード一覧にする。"""
+    seen = []
+    for part in re.split(r"[,，、]", raw or ""):
+        kw = part.strip().lower()
+        if kw and kw not in seen:
+            seen.append(kw)
+    return seen
+
+
+def get_fancam_keywords() -> list:
+    """設定のキーワード一覧。未設定・空ならデフォルトを使う。app context内で呼ぶこと。"""
+    return (parse_fancam_keywords(Setting.get(FANCAM_KEYWORDS_SETTING, DEFAULT_FANCAM_KEYWORDS))
+            or parse_fancam_keywords(DEFAULT_FANCAM_KEYWORDS))
+
+
+def is_watch_fancam_title(title: str, keywords: list) -> bool:
+    """タイトルにキーワード(小文字化済み)のどれかが含まれるか(大文字小文字は区別しない)。"""
+    t = (title or "").lower()
+    return any(kw in t for kw in keywords)
 
 
 def get_expire_days() -> int:

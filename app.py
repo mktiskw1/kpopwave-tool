@@ -435,6 +435,7 @@ def _init_default_settings():
         "buzz_threshold_likes": "200",
         "buzz_repost_kill_likes": "50",
         "watched_candidate_expire_days": "14",
+        "watched_fancam_keywords": "직캠, fancam, 원테이크, 페이스캠, facecam",
     }
     for key, value in defaults.items():
         if not Setting.query.filter_by(key=key).first():
@@ -1866,13 +1867,18 @@ def settings():
         for g in roster_groups
     ]
 
-    from channel_watcher import get_expire_days, get_run_state, kpop_account_id, serialize_watched_channels
+    from channel_watcher import (
+        DEFAULT_FANCAM_KEYWORDS, FANCAM_KEYWORDS_SETTING, get_expire_days, get_run_state, kpop_account_id,
+        serialize_watched_channels,
+    )
     watch_account_id = kpop_account_id()
     return render_template("settings.html", settings=current, accounts=accounts, roster=roster,
                            watch_channels=serialize_watched_channels(watch_account_id),
                            watch_state=get_run_state(),
                            watch_account_id=watch_account_id,
-                           watch_expire_days=get_expire_days())
+                           watch_expire_days=get_expire_days(),
+                           watch_fancam_keywords=(Setting.get(FANCAM_KEYWORDS_SETTING, DEFAULT_FANCAM_KEYWORDS)
+                                                  or DEFAULT_FANCAM_KEYWORDS))
 
 
 @app.route("/api/quick-setting", methods=["POST"])
@@ -1936,16 +1942,30 @@ def api_watch_channels_run():
 
 @app.route("/api/watch-settings", methods=["POST"])
 def api_watch_settings():
-    """監視チャンネル欄の設定(未確認の候補を残す日数)を保存する。"""
+    """監視チャンネル欄の設定を保存する。expire_days(未確認の候補を残す日数)と
+    fancam_keywords(fancam判定キーワード。カンマ区切り)のうち、送られた項目だけを更新する。"""
+    from channel_watcher import FANCAM_KEYWORDS_SETTING, parse_fancam_keywords
     data = request.get_json(silent=True) or {}
-    try:
-        days = int(str(data.get("expire_days", "")).strip())
-    except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "日数は1以上の整数で入力してください"}), 400
-    if days < 1 or days > 365:
-        return jsonify({"ok": False, "error": "日数は1〜365の整数で入力してください"}), 400
-    Setting.set("watched_candidate_expire_days", str(days))
-    return jsonify({"ok": True, "expire_days": days})
+    out = {"ok": True}
+    if "expire_days" in data:
+        try:
+            days = int(str(data.get("expire_days", "")).strip())
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "日数は1以上の整数で入力してください"}), 400
+        if days < 1 or days > 365:
+            return jsonify({"ok": False, "error": "日数は1〜365の整数で入力してください"}), 400
+        Setting.set("watched_candidate_expire_days", str(days))
+        out["expire_days"] = days
+    if "fancam_keywords" in data:
+        keywords = parse_fancam_keywords(str(data.get("fancam_keywords") or ""))
+        if not keywords:
+            return jsonify({"ok": False, "error": "fancam判定キーワードは1つ以上入力してください"}), 400
+        saved = ", ".join(keywords)
+        Setting.set(FANCAM_KEYWORDS_SETTING, saved)
+        out["fancam_keywords"] = saved
+    if len(out) == 1:
+        return jsonify({"ok": False, "error": "保存する項目がありません"}), 400
+    return jsonify(out)
 
 
 def _candidate_ids_from_request():
