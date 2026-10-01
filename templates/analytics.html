@@ -22,6 +22,13 @@
     {% endfor %}
   </div>
   {% endif %}
+  {% if buzz_backlog.fasttrack_count %}
+  <div class="mt-1" style="font-size:.82rem;color:var(--text-muted)">
+    うち
+    <span class="badge bg-warning-subtle text-warning-emphasis">🚀 ファストトラック対象: {{ buzz_backlog.fasttrack_count }}件</span>
+    （最終いいね{{ buzz_backlog.fasttrack_min_likes }}以上、{{ buzz_backlog.fasttrack_interval_days }}日経過で再キュー）
+  </div>
+  {% endif %}
   <div class="mt-1" style="font-size:.82rem;color:var(--text-muted)">
     直近7日間で新たにバックログ入り: {{ buzz_backlog.new_in_7d }}件
   </div>

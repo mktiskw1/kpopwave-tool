@@ -630,6 +630,50 @@ _BUZZ_REQUEUE_BACKLOG_BATCH_SIZE = 2   # 在庫過多時の1日の処理件数
 _BUZZ_REQUEUE_NORMAL_BATCH_SIZE = 1    # 通常時の1日の処理件数
 
 
+def _buzz_fasttrack_settings() -> tuple[int, int]:
+    """(ファストトラック再投稿間隔[日], ファストトラック対象の最終いいね数しきい値) を設定から読む。"""
+    fasttrack_interval_days = int(Setting.get("buzz_fasttrack_interval_days", "30") or "30")
+    fasttrack_min_likes = int(Setting.get("buzz_fasttrack_min_likes", "1000") or "1000")
+    return fasttrack_interval_days, fasttrack_min_likes
+
+
+def _latest_final_likes_by_article(article_rows: list) -> dict:
+    """[(article_id, posted_at), ...] を受け取り、各記事の「直近の投稿サイクル」が
+    確定させたpost_stats(is_final=True)のlikesを {article_id: likes} で返す
+    (確定値がまだ無ければキーを含めない)。
+
+    「直近サイクル」の判定は analytics_tracker.track_post_stats と同じ基準を使う:
+    is_finalな記録のうちfetched_atが現在のposted_at以降のものだけを現サイクルの
+    確定値とみなす(記事が再投稿されposted_atが更新された場合、古いサイクルの
+    is_final記録を新サイクルの値と誤認しないため)。
+    """
+    article_ids = [aid for aid, _ in article_rows]
+    if not article_ids:
+        return {}
+    posted_at_by_id = dict(article_rows)
+    rows = (
+        db.session.query(PostStat.article_id, PostStat.fetched_at, PostStat.likes)
+        .filter(PostStat.article_id.in_(article_ids), PostStat.is_final.is_(True))
+        .order_by(PostStat.article_id, PostStat.fetched_at.desc())
+        .all()
+    )
+    result: dict = {}
+    for article_id, fetched_at, likes in rows:
+        if article_id in result:
+            continue  # article_id, fetched_at降順なので最初の行が最新のis_final記録
+        posted_at = posted_at_by_id.get(article_id)
+        if posted_at is not None and fetched_at >= posted_at:
+            result[article_id] = likes
+    return result
+
+
+def _buzz_requeue_interval_days_for(final_likes: int, interval_days: int,
+                                     fasttrack_interval_days: int, fasttrack_min_likes: int) -> int:
+    """確定いいね数に応じた適用間隔日数を返す(ファストトラック判定は初速ではなく
+    直近サイクルのpost_stats確定値を使う)。"""
+    return fasttrack_interval_days if final_likes >= fasttrack_min_likes else interval_days
+
+
 def _buzz_requeue_candidates(app, account_id: int, limit: int | None = None) -> list:
     """自動再キュー対象(最終投稿日が古い順)を返す。limit未指定なら全件(在庫件数カウント用)。
 
@@ -637,11 +681,19 @@ def _buzz_requeue_candidates(app, account_id: int, limit: int | None = None) -> 
     削除ルールを生き延びた status='posted' の動画そのものとして扱う
     (200未満だった動画は7日後に削除されるため、残っている＝達成済み、または
     2・3回目の猶予期間中)。
+
+    ファストトラック: 直近の投稿サイクルの最終いいね数(post_stats確定値、初速は使わない)が
+    buzz_fasttrack_min_likes以上の動画は、通常のbuzz_requeue_interval_daysではなく
+    より短いbuzz_fasttrack_interval_daysの経過で対象になる。処理順(posted_atが古い順)・
+    1日の処理件数ロジックはファストトラック対象かどうかに関わらず変更しない
+    (全対象を同じキューに混ぜてposted_at古い順に処理する)。
     """
     with app.app_context():
         interval_days = int(Setting.get("buzz_requeue_interval_days", "60") or "60")
-        cutoff = datetime.utcnow() - timedelta(days=interval_days)
-        query = (
+        fasttrack_interval_days, fasttrack_min_likes = _buzz_fasttrack_settings()
+        now = datetime.utcnow()
+
+        base = (
             Article.query
             .filter(
                 Article.account_id == account_id,
@@ -649,8 +701,27 @@ def _buzz_requeue_candidates(app, account_id: int, limit: int | None = None) -> 
                 Article.content_type == "video",
                 Article.video_file_path.isnot(None),
                 Article.posted_at.isnot(None),
-                Article.posted_at <= cutoff,
             )
+            .with_entities(Article.id, Article.posted_at)
+            .all()
+        )
+        final_likes_by_id = _latest_final_likes_by_article(base)
+
+        eligible_ids = []
+        for article_id, posted_at in base:
+            final_likes = final_likes_by_id.get(article_id, 0)
+            days = _buzz_requeue_interval_days_for(
+                final_likes, interval_days, fasttrack_interval_days, fasttrack_min_likes,
+            )
+            if posted_at <= now - timedelta(days=days):
+                eligible_ids.append(article_id)
+
+        if not eligible_ids:
+            return []
+
+        query = (
+            Article.query
+            .filter(Article.id.in_(eligible_ids))
             .order_by(Article.posted_at.asc())
         )
         if limit is not None:
@@ -663,15 +734,16 @@ def buzz_requeue_backlog_stats(app, account_id: int = _BUZZ_REQUEUE_ACCOUNT_ID) 
 
     対象条件は _buzz_requeue_candidates と完全に同一(status='posted' が
     _video_cleanup_job の削除ルールを生き延びた＝200いいね達成/猶予中を意味する)。
+    各記事はファストトラック該当なら buzz_fasttrack_interval_days、非該当なら
+    buzz_requeue_interval_days を自分自身の適用間隔として判定する。
     「直近7日間で新たにバックログ入り」は、posted_at が
-    (interval_days+7)日前〜interval_days日前 の範囲にある記事数で近似する
+    (適用間隔+7)日前〜適用間隔日前 の範囲にある記事数で近似する
     (=ちょうど閾値を越えてバックログに加わったタイミングが直近7日以内)。
     """
     with app.app_context():
         interval_days = int(Setting.get("buzz_requeue_interval_days", "60") or "60")
+        fasttrack_interval_days, fasttrack_min_likes = _buzz_fasttrack_settings()
         now = datetime.utcnow()
-        cutoff = now - timedelta(days=interval_days)
-        recent_cutoff = cutoff - timedelta(days=7)
 
         base_filters = (
             Article.account_id == account_id,
@@ -681,29 +753,44 @@ def buzz_requeue_backlog_stats(app, account_id: int = _BUZZ_REQUEUE_ACCOUNT_ID) 
             Article.posted_at.isnot(None),
         )
 
-        backlog = (
+        all_posted = (
             Article.query
-            .filter(*base_filters, Article.posted_at <= cutoff)
-            .with_entities(Article.buzz_repost_count)
+            .filter(*base_filters)
+            .with_entities(Article.id, Article.posted_at, Article.buzz_repost_count)
             .all()
+        )
+        final_likes_by_id = _latest_final_likes_by_article(
+            [(aid, posted_at) for aid, posted_at, _repost_count in all_posted]
         )
 
         by_repost_count: dict = {}
-        for (repost_count,) in backlog:
+        total = 0
+        fasttrack_count = 0
+        new_in_7d = 0
+        for article_id, posted_at, repost_count in all_posted:
+            final_likes = final_likes_by_id.get(article_id, 0)
+            is_fasttrack = final_likes >= fasttrack_min_likes
+            days = fasttrack_interval_days if is_fasttrack else interval_days
+            cutoff = now - timedelta(days=days)
+            if posted_at > cutoff:
+                continue
+            total += 1
+            if is_fasttrack:
+                fasttrack_count += 1
             key = repost_count or 1
             by_repost_count[key] = by_repost_count.get(key, 0) + 1
-
-        new_in_7d = (
-            Article.query
-            .filter(*base_filters, Article.posted_at > recent_cutoff, Article.posted_at <= cutoff)
-            .count()
-        )
+            recent_cutoff = cutoff - timedelta(days=7)
+            if posted_at > recent_cutoff:
+                new_in_7d += 1
 
         return {
-            "total": len(backlog),
+            "total": total,
             "by_repost_count": dict(sorted(by_repost_count.items())),
             "new_in_7d": new_in_7d,
             "interval_days": interval_days,
+            "fasttrack_count": fasttrack_count,
+            "fasttrack_interval_days": fasttrack_interval_days,
+            "fasttrack_min_likes": fasttrack_min_likes,
         }
 
 

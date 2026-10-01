@@ -367,6 +367,8 @@ def _init_default_settings():
         "app_base_url": os.getenv("APP_BASE_URL", "http://localhost:5000"),
         "youtube_channels": json.dumps(DEFAULT_YOUTUBE_CHANNELS),
         "buzz_requeue_interval_days": "60",
+        "buzz_fasttrack_interval_days": "30",
+        "buzz_fasttrack_min_likes": "1000",
     }
     for key, value in defaults.items():
         if not Setting.query.filter_by(key=key).first():
@@ -1613,7 +1615,8 @@ def settings():
                     "youtube_api_key", "youtube_collect_interval_hours",
                     "youtube_min_view_count", "youtube_max_view_count",
                     "meta_app_id", "meta_app_secret", "app_base_url",
-                    "buzz_requeue_interval_days"):
+                    "buzz_requeue_interval_days",
+                    "buzz_fasttrack_interval_days", "buzz_fasttrack_min_likes"):
             Setting.set(key, (request.form.get(key) or "").strip())
 
         # Threads 認証情報は「手動で上書き」欄。空送信では絶対に消さない
@@ -1709,6 +1712,8 @@ def settings():
         "test_mode": Setting.get("test_mode", "true") == "true",
         "early_advance_enabled": Setting.get("early_advance_enabled", "true") == "true",
         "buzz_requeue_interval_days": Setting.get("buzz_requeue_interval_days", "60"),
+        "buzz_fasttrack_interval_days": Setting.get("buzz_fasttrack_interval_days", "30"),
+        "buzz_fasttrack_min_likes": Setting.get("buzz_fasttrack_min_likes", "1000"),
         "rss_feeds": json.loads(Setting.get("rss_feeds", "[]") or "[]"),
         "youtube_channels": json.loads(Setting.get("youtube_channels", "[]") or "[]"),
         "meta_app_id": Setting.get("meta_app_id"),
