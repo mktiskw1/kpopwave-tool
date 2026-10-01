@@ -466,6 +466,14 @@
       成績は残っている記事と削除記録の合計です。判定済み＝投稿から7日以上の記事＋自動削除された記録（手動削除は含めない）、
       当たり率＝バズ判定いいね数以上の本数÷判定済み本数。
     </div>
+    <div class="form-check mb-3" style="font-size:.85rem">
+      <input type="checkbox" class="form-check-input" id="watch-auto-fetch" {% if watch_auto_fetch %}checked{% endif %}
+             onchange="watchSaveAutoFetch(this)">
+      <label class="form-check-label" for="watch-auto-fetch">
+        毎朝6:00の自動取得を有効にする（OFFでも「今すぐ取得」は使えます。候補の期限切れ処理は動き続けます）
+      </label>
+      <span id="watch-auto-msg" style="font-size:.78rem;margin-left:6px"></span>
+    </div>
     <div class="d-flex align-items-center gap-2 mb-3 flex-wrap" style="font-size:.82rem">
       <label for="watch-expire-days" class="mb-0">未確認の候補を残す日数</label>
       <input type="number" id="watch-expire-days" class="form-control form-control-sm" min="1" max="365"
@@ -892,6 +900,20 @@ function watchSaveExpire() {
     msg.textContent = d.ok ? '保存しました' : (d.error || '保存に失敗しました');
   })
   .catch(function () { msg.className = 'text-danger'; msg.textContent = '通信エラーが発生しました'; });
+}
+
+function watchSaveAutoFetch(box) {
+  var msg = document.getElementById('watch-auto-msg');
+  fetch('/api/watch-settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ auto_fetch_enabled: box.checked })
+  })
+  .then(function (r) { return r.json(); })
+  .then(function (d) {
+    if (!d.ok) { box.checked = !box.checked; msg.className = 'text-danger'; msg.textContent = d.error || '保存に失敗しました'; return; }
+    msg.className = 'text-success'; msg.textContent = '保存しました';
+  })
+  .catch(function () { box.checked = !box.checked; msg.className = 'text-danger'; msg.textContent = '通信エラーが発生しました'; });
 }
 
 function watchSaveKeywords() {

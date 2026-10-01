@@ -53,6 +53,7 @@ DEFAULT_EXPIRE_DAYS = 14
 
 # fancam必須のチャンネルで使うタイトル判定キーワード(カンマ区切り。大文字小文字は区別せず、前後の空白は無視)。
 # 監視専用の設定で、既存のfancam検索・音楽番組検索の判定(youtube_collector側)には影響しない。
+AUTO_FETCH_SETTING = "watched_auto_fetch_enabled"   # OFFなら毎朝6:00の自動取得をスキップ(手動取得・期限切れ処理は動く)
 FANCAM_KEYWORDS_SETTING = "watched_fancam_keywords"
 DEFAULT_FANCAM_KEYWORDS = "직캠, fancam, 원테이크, 페이스캠, facecam"
 
@@ -572,6 +573,11 @@ def is_watch_fancam_title(title: str, keywords: list) -> bool:
     """タイトルにキーワード(小文字化済み)のどれかが含まれるか(大文字小文字は区別しない)。"""
     t = (title or "").lower()
     return any(kw in t for kw in keywords)
+
+
+def is_auto_fetch_enabled() -> bool:
+    """毎朝の自動取得が有効か(未設定はON)。app context内で呼ぶこと。"""
+    return (Setting.get(AUTO_FETCH_SETTING, "true") or "true").strip().lower() != "false"
 
 
 def get_expire_days() -> int:

@@ -994,7 +994,12 @@ def _engagement_job(app):
 @_logged_job("channel_watch")
 def _channel_watch_job(app):
     """監視チャンネルの新着(前回取得以降)を取得し、条件に合う動画を承認待ちへ取り込む(毎朝6:00 JST)。"""
-    from channel_watcher import run_watch
+    from channel_watcher import is_auto_fetch_enabled, run_watch
+    with app.app_context():
+        enabled = is_auto_fetch_enabled()
+    if not enabled:
+        logger.info("[channel_watch] 自動取得がOFFのためスキップ(手動の「今すぐ取得」は利用可能)")
+        return
     result = run_watch(app)
     if not result.get("ok"):
         logger.warning("[channel_watch] 取得できませんでした: %s", result.get("error"))

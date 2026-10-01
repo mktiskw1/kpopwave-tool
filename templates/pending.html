@@ -77,7 +77,11 @@
   <label for="cand-select-all" class="text-muted mb-0" style="font-size:.82rem;cursor:pointer">全選択</label>
   <span id="cand-selected-count" class="text-muted ms-1" style="font-size:.8rem"></span>
   <span id="cand-progress" class="ms-2" style="font-size:.8rem;color:var(--text-muted)"></span>
-  <div class="ms-auto d-flex gap-2">
+  <div class="ms-auto d-flex gap-2 align-items-center">
+    <span id="cand-fetch-msg" style="font-size:.8rem"></span>
+    <button type="button" id="cand-fetch-btn" class="btn btn-outline-primary btn-sm" onclick="candFetchNow()">
+      <i class="bi bi-arrow-repeat me-1"></i>今すぐ取得
+    </button>
     <button type="button" id="cand-import-btn" class="btn btn-primary btn-sm" disabled onclick="candImport(null)">
       <i class="bi bi-cloud-download me-1"></i>選択を取り込む
     </button>
@@ -724,6 +728,59 @@ function candSkip(ids) {
   .catch(function () { alert('通信エラーが発生しました'); });
 }
 
+// ── 今すぐ取得(設定画面と同じ処理。実行中なら二重起動せず、終わるまで待つ) ──
+var candFetchTimer = null;
+
+function candFetchMsg(html) {
+  document.getElementById('cand-fetch-msg').innerHTML = html;
+}
+
+function candFetchSetRunning(running) {
+  document.getElementById('cand-fetch-btn').disabled = running;
+  if (running) candFetchMsg('<span class="text-primary">新着を取得中…</span>');
+}
+
+function candFetchNow() {
+  candFetchSetRunning(true);
+  fetch('/api/watch-channels/run', { method: 'POST' })
+    .then(function (r) { return r.json().then(function (d) { return { status: r.status, d: d }; }); })
+    .then(function (x) {
+      // 409は既に実行中(設定画面や朝のジョブ)。そのまま終了を待つ
+      if (!x.d.ok && x.status !== 409) { candFetchSetRunning(false); candFetchMsg('<span class="text-danger">' + candEsc(x.d.error || '取得を開始できませんでした') + '</span>'); return; }
+      candFetchTimer = setTimeout(candFetchPoll, 2000);
+    })
+    .catch(function () { candFetchSetRunning(false); candFetchMsg('<span class="text-danger">通信エラーが発生しました</span>'); });
+}
+
+function candFetchPoll() {
+  fetch('/api/watch-channels/status')
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d.running) { candFetchTimer = setTimeout(candFetchPoll, 3000); return; }
+      candFetchSetRunning(false);
+      var res = d.result;
+      if (!res || !res.ok) { candFetchMsg('<span class="text-danger">' + candEsc(res && res.error ? res.error : '取得に失敗しました') + '</span>'); return; }
+      var n = res.added_total;
+      if (n > 0) {
+        try { sessionStorage.setItem('candFetchMsg', n + '本の新しい候補'); } catch (e) {}
+        location.reload();   // 一覧を最新にする(取り込み中の行は読み込み後に進行状況から復元される)
+      } else {
+        candFetchMsg('<span class="text-muted">新しい候補はありません</span>');
+      }
+    })
+    .catch(function () { candFetchTimer = setTimeout(candFetchPoll, 8000); });
+}
+
+function candFetchResume() {
+  var saved = null;
+  try { saved = sessionStorage.getItem('candFetchMsg'); sessionStorage.removeItem('candFetchMsg'); } catch (e) {}
+  if (saved) candFetchMsg('<span class="text-success fw-bold">' + candEsc(saved) + '</span>');
+  fetch('/api/watch-channels/status')
+    .then(function (r) { return r.json(); })
+    .then(function (d) { if (d.running) { candFetchSetRunning(true); candFetchTimer = setTimeout(candFetchPoll, 3000); } })
+    .catch(function () {});
+}
+
 function candSchedulePoll(ms) {
   if (candPollTimer) clearTimeout(candPollTimer);
   candPollTimer = setTimeout(candPoll, ms);
@@ -762,6 +819,7 @@ function candPoll() {
 
 candUpdateSel();
 candPoll();
+candFetchResume();
 </script>
 {% endif %}
 <script>

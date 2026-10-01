@@ -436,6 +436,7 @@ def _init_default_settings():
         "buzz_repost_kill_likes": "50",
         "watched_candidate_expire_days": "14",
         "watched_fancam_keywords": "직캠, fancam, 원테이크, 페이스캠, facecam",
+        "watched_auto_fetch_enabled": "true",
     }
     for key, value in defaults.items():
         if not Setting.query.filter_by(key=key).first():
@@ -1868,8 +1869,8 @@ def settings():
     ]
 
     from channel_watcher import (
-        DEFAULT_FANCAM_KEYWORDS, FANCAM_KEYWORDS_SETTING, get_expire_days, get_run_state, kpop_account_id,
-        serialize_watched_channels,
+        DEFAULT_FANCAM_KEYWORDS, FANCAM_KEYWORDS_SETTING, get_expire_days, get_run_state, is_auto_fetch_enabled,
+        kpop_account_id, serialize_watched_channels,
     )
     watch_account_id = kpop_account_id()
     return render_template("settings.html", settings=current, accounts=accounts, roster=roster,
@@ -1877,6 +1878,7 @@ def settings():
                            watch_state=get_run_state(),
                            watch_account_id=watch_account_id,
                            watch_expire_days=get_expire_days(),
+                           watch_auto_fetch=is_auto_fetch_enabled(),
                            watch_fancam_keywords=(Setting.get(FANCAM_KEYWORDS_SETTING, DEFAULT_FANCAM_KEYWORDS)
                                                   or DEFAULT_FANCAM_KEYWORDS))
 
@@ -1963,6 +1965,10 @@ def api_watch_settings():
         saved = ", ".join(keywords)
         Setting.set(FANCAM_KEYWORDS_SETTING, saved)
         out["fancam_keywords"] = saved
+    if "auto_fetch_enabled" in data:
+        enabled = bool(data.get("auto_fetch_enabled"))
+        Setting.set("watched_auto_fetch_enabled", "true" if enabled else "false")
+        out["auto_fetch_enabled"] = enabled
     if len(out) == 1:
         return jsonify({"ok": False, "error": "保存する項目がありません"}), 400
     return jsonify(out)
