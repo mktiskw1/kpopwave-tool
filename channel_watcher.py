@@ -39,8 +39,8 @@ FIRST_RUN_DAYS = 7              # 初回(cursor未設定)は直近N日分
 MAX_IMPORT_PER_CHANNEL = 20     # 1チャンネルあたり1回の取り込み上限
 MAX_PLAYLIST_PAGES = 4          # 1チャンネルあたりplaylistItems.listの最大ページ数(50件/ページ)
 RESCAN_DEFAULT_DAYS = 7         # 再スキャンの日数(既定/最大)
-RESCAN_MAX_DAYS = 30
-RESCAN_MAX_ITEMS = 200          # 再スキャン時の1チャンネルあたりの打ち切り本数(= MAX_PLAYLIST_PAGES × 50件)
+RESCAN_MAX_DAYS = 90
+RESCAN_MAX_ITEMS = 1000         # 再スキャン時の1チャンネルあたりの打ち切り本数(playlistItems.listを最大20ページ=1,000件)
 CURSOR_MARGIN = timedelta(minutes=30)   # 再生リスト反映の遅れ対策。重複はDB・削除記録で弾く
 WATCH_MAX_DURATION_SEC = 600    # 自動ダウンロードする動画の長さの上限(通常収集のMAX_DURATIONと同じ)
 WATCH_FEED_PREFIX = "YouTube動画: "
@@ -119,7 +119,8 @@ def _parse_rfc3339(value: str):
         return None
 
 
-def _fetch_new_playlist_items(playlist_id: str, since: datetime, api_key: str, units: list) -> tuple:
+def _fetch_new_playlist_items(playlist_id: str, since: datetime, api_key: str, units: list,
+                              max_pages: int = MAX_PLAYLIST_PAGES) -> tuple:
     """アップロード再生リスト(新しい順)から since より後に公開された動画を取得し、
     (公開日時の古い順の [{"video_id", "published_at"}], 打ち切りフラグ) を返す。
     打ち切りフラグは、ページ数の上限に達して since までさかのぼれなかった場合にTrue。
@@ -127,7 +128,7 @@ def _fetch_new_playlist_items(playlist_id: str, since: datetime, api_key: str, u
     items = []
     page_token = None
     truncated = False
-    for _ in range(MAX_PLAYLIST_PAGES):
+    for _ in range(max_pages):
         params = {"part": "contentDetails", "playlistId": playlist_id, "maxResults": 50, "key": api_key}
         if page_token:
             params["pageToken"] = page_token
@@ -260,11 +261,20 @@ def _download_video(video_id: str) -> str:
 
 # ── 取得本体 ──────────────────────────────────────────────────────────────
 
+def _expired_candidate_ids() -> set:
+    """期限切れの候補のYouTube動画ID。重複防止の対象外で、再スキャンで再び見つかったときは
+    新しい行を作らず同じ行を未確認に戻す(run_watchのフェーズ3)。"""
+    return {vid for (vid,) in db.session.query(WatchedCandidate.video_id).filter(
+        WatchedCandidate.status == CANDIDATE_EXPIRED)}
+
+
 def _known_video_ids() -> set:
-    """既にDBにある動画(ステータス不問)・削除記録に残っている動画・候補テーブルにある動画
-    (見送り・期限切れを含む全状態)のYouTube動画IDの集合。"""
+    """重複として扱う動画のYouTube動画IDの集合: 既にDBにある記事(ステータス不問)・削除記録に残っている動画・
+    候補テーブルの未確認/取り込み済み/見送り。期限切れの候補は含めない(再スキャンで復活させるため)。"""
     known = set()
-    for (vid,) in db.session.query(WatchedCandidate.video_id):
+    for (vid,) in db.session.query(WatchedCandidate.video_id).filter(
+        WatchedCandidate.status != CANDIDATE_EXPIRED
+    ):
         known.add(vid)
     for (url,) in db.session.query(Article.url).filter(
         or_(Article.url.like("%youtube.com%"), Article.url.like("%youtu.be%"))
@@ -321,11 +331,12 @@ def _run_watch(app, dry_run: bool, rescan_days: int = None) -> dict:
             "stat": {"channel_id": r.channel_id, "name": r.channel_name, "new": 0, "added": 0,
                      "skip_group": 0, "skip_fancam": 0, "skip_shorts": 0, "skip_long": 0,
                      "skip_gone": 0, "skip_dup": 0, "download_failed": 0, "error": None,
-                     "cap_left": 0, "truncated": False, "titles": []},
+                     "cap_left": 0, "truncated": False, "revived": 0, "titles": []},
         } for r in rows]
         for c in chans:
             c["stat"]["since"] = c["since"].isoformat() + "Z"   # この日時より後に公開された動画を見る(UTC)
         known = _known_video_ids()
+        expired_ids = _expired_candidate_ids() - known   # 期限切れ(他の重複条件に当たるものは除く)
         fancam_keywords = get_fancam_keywords()
 
         # フェーズ1: 再生リストIDの確定と、前回以降の新着動画IDの取得(playlistItems.list: 1ユニット)
@@ -347,7 +358,9 @@ def _run_watch(app, dry_run: bool, rescan_days: int = None) -> dict:
                 c["stat"]["error"] = "アップロード再生リストを取得できませんでした"
                 continue
             try:
-                items, truncated = _fetch_new_playlist_items(c["playlist_id"], c["since"], api_key, units)
+                items, truncated = _fetch_new_playlist_items(
+                    c["playlist_id"], c["since"], api_key, units,
+                    max_pages=(RESCAN_MAX_ITEMS // 50) if rescan_days else MAX_PLAYLIST_PAGES)
             except Exception as exc:
                 c["failed"] = True
                 c["stat"]["error"] = f"新着取得エラー: {str(exc)[:120]}"
@@ -404,9 +417,37 @@ def _run_watch(app, dry_run: bool, rescan_days: int = None) -> dict:
                     stat["skip_group"] += 1
                     continue
 
+                revive = vid in expired_ids   # 期限切れの候補が再び見つかった: 同じ行を未確認に戻す
                 if dry_run:
-                    stat["added"] += 1
+                    stat["revived" if revive else "added"] += 1
                     stat["titles"].append(title[:80])
+                elif revive:
+                    cand = WatchedCandidate.query.filter_by(video_id=vid).first()
+                    if cand is None or cand.status != CANDIDATE_EXPIRED:
+                        stat["skip_dup"] += 1   # 並行して状態が変わった
+                        continue
+                    now = datetime.utcnow()
+                    cand.status = CANDIDATE_NEW
+                    cand.found_at = now            # また設定日数のあいだ一覧に出る
+                    cand.status_changed_at = now
+                    cand.last_error = None
+                    cand.account_id = c["account_id"]
+                    cand.watched_channel_id = c["id"]
+                    cand.title = (title or "YouTube動画")[:500]
+                    cand.description = d["description"][:5000]
+                    cand.thumbnail_url = d["thumbnail"] or None
+                    cand.published_at = d["published_at"] or it["published_at"]
+                    cand.duration = d["duration"]
+                    cand.view_count = d["view_count"]
+                    cand.orientation = d["orientation"]
+                    cand.guessed_group = " / ".join(gname for _, gname in matched)[:200]
+                    cand.guessed_group_id = matched[0][0] if len(matched) == 1 else None
+                    db.session.commit()
+                    expired_ids.discard(vid)
+                    known.add(vid)
+                    stat["revived"] += 1
+                    stat["titles"].append(title[:80])
+                    logger.info("[channel_watch] 期限切れの候補を戻しました: %s / %s", c["name"], title[:60])
                 else:
                     db.session.add(WatchedCandidate(
                         account_id=c["account_id"],
@@ -436,7 +477,7 @@ def _run_watch(app, dry_run: bool, rescan_days: int = None) -> dict:
                     stat["titles"].append(title[:80])
                     logger.info("[channel_watch] 候補に追加: %s / %s", c["name"], title[:60])
 
-                if not rescan_days and stat["added"] >= MAX_IMPORT_PER_CHANNEL:
+                if not rescan_days and stat["added"] + stat["revived"] >= MAX_IMPORT_PER_CHANNEL:
                     # 上限で打ち切り: 最後に処理した動画の公開日時までを済みとし、続きは次回に回す
                     new_cursor = it["published_at"]
                     stat["cap_left"] = len(c["items"]) - idx - 1
@@ -450,7 +491,7 @@ def _run_watch(app, dry_run: bool, rescan_days: int = None) -> dict:
                     if c["playlist_id"] and not row.uploads_playlist_id:
                         row.uploads_playlist_id = c["playlist_id"]
                     db.session.commit()
-            result["added_total"] += stat["added"]
+            result["added_total"] += stat["added"] + stat["revived"]   # 一覧に出る本数(新規+期限切れから戻した分)
             result["channels"].append(stat)
 
         # 取得自体に失敗したチャンネルも結果に載せる
@@ -458,7 +499,7 @@ def _run_watch(app, dry_run: bool, rescan_days: int = None) -> dict:
         result["api_units"] = units[0]
         logger.info("[channel_watch] 完了%s: 候補%d本追加 / APIユニット%d / %s",
                     "(ドライラン)" if dry_run else "", result["added_total"], units[0],
-                    ", ".join(f"{s['name']}={s['added']}" for s in result["channels"]))
+                    ", ".join(f"{s['name']}={s['added'] + s['revived']}" for s in result["channels"] if not s.get("error")))
         return result
 
 
@@ -643,7 +684,9 @@ def get_expire_days() -> int:
 
 
 def expire_old_candidates() -> int:
-    """見つけてから設定日数を過ぎた未確認の候補を「期限切れ」にする(動画ファイルはないので記録だけ残す)。
+    """見つけてから設定日数を過ぎた未確認の候補を「期限切れ」にして一覧から外す(動画ファイルはないので
+    記録だけ残す)。期限切れは重複防止の対象外なので、「過去n日分を再スキャン」で再び見つかれば
+    同じ行が未確認に戻って候補に出る(見送りは戻らない)。
     app context内で呼ぶこと。戻り値は期限切れにした件数。"""
     cutoff = datetime.utcnow() - timedelta(days=get_expire_days())
     n = WatchedCandidate.query.filter(

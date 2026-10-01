@@ -484,7 +484,8 @@ class WatchedCandidate(db.Model):
     """チャンネル監視で見つけた動画の「候補」。ダウンロードせず情報だけを持ち、ユーザーが選んだものだけを
     取り込んでArticle(承認待ち)にする。集計・クリーンアップ・再投稿などArticleを対象とする処理に
     混ざらないよう、Articleとは別テーブルにしている(channel_watcher参照)。
-    status: new(未確認) / imported(取り込み済み) / skipped(見送り) / expired(期限切れ)。"""
+    status: new(未確認) / imported(取り込み済み) / skipped(見送り) / expired(期限切れ)。
+    expiredは重複防止の対象外で、再スキャンで再び見つかるとnewに戻る(skippedは戻らない)。"""
     __tablename__ = "watched_candidate"
 
     id = db.Column(db.Integer, primary_key=True)

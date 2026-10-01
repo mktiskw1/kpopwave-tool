@@ -1007,18 +1007,21 @@ def _channel_watch_job(app):
     logger.info(
         "[channel_watch] 候補%d本追加 APIユニット%d: %s",
         result["added_total"], result["api_units"],
-        ", ".join(f"{c['name']}={c['added']}" for c in result["channels"]) or "(対象なし)",
+        ", ".join(f"{c['name']}={c['added'] + c['revived']}" for c in result["channels"] if not c.get("error"))
+        or "(対象なし)",
     )
 
 
 @_logged_job("watched_candidate_expire")
 def _watched_candidate_expire_job(app):
-    """見つけてから設定日数(watched_candidate_expire_days)を過ぎた未確認の候補を期限切れにする(毎朝6:30 JST)。"""
+    """見つけてから設定日数(watched_candidate_expire_days)を過ぎた未確認の候補を期限切れにして一覧から外す
+    (毎朝6:30 JST)。期限切れの候補は「過去n日分を再スキャン」で再び見つかれば候補に戻る(見送りは戻らない)。"""
     from channel_watcher import expire_old_candidates, get_expire_days
     with app.app_context():
         days = get_expire_days()
         n = expire_old_candidates()
-    logger.info("[watched_candidate_expire] %d日経過の未確認候補を期限切れにしました: %d件", days, n)
+    logger.info("[watched_candidate_expire] %d日経過の未確認候補を期限切れにして一覧から外しました: %d件"
+                "(再スキャンすれば再び候補に出ます)", days, n)
 
 
 @_logged_job("video_cleanup")
