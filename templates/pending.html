@@ -79,9 +79,15 @@
   <span id="cand-progress" class="ms-2" style="font-size:.8rem;color:var(--text-muted)"></span>
   <div class="ms-auto d-flex gap-2 align-items-center">
     <span id="cand-fetch-msg" style="font-size:.8rem"></span>
-    <button type="button" id="cand-fetch-btn" class="btn btn-outline-primary btn-sm" onclick="candFetchNow()">
+    <button type="button" id="cand-fetch-btn" class="btn btn-outline-primary btn-sm" onclick="candFetchNow(null)">
       <i class="bi bi-arrow-repeat me-1"></i>今すぐ取得
     </button>
+    <div class="input-group input-group-sm" style="width:auto" title="カーソルをn日前に戻して取得し直します(重複は出ません)">
+      <span class="input-group-text">過去</span>
+      <input type="number" id="cand-rescan-days" class="form-control" value="7" min="1" max="30" style="max-width:64px">
+      <span class="input-group-text">日分</span>
+      <button type="button" id="cand-rescan-btn" class="btn btn-outline-primary" onclick="candRescan()">再スキャン</button>
+    </div>
     <button type="button" id="cand-import-btn" class="btn btn-primary btn-sm" disabled onclick="candImport(null)">
       <i class="bi bi-cloud-download me-1"></i>選択を取り込む
     </button>
@@ -90,6 +96,8 @@
     </button>
   </div>
 </div>
+
+<div id="cand-fetch-detail" class="mb-3" style="font-size:.8rem"></div>
 
 <div id="cand-empty" class="card p-5 text-center{% if candidate_rows %} d-none{% endif %}" style="color:var(--text-muted)">
   <i class="bi bi-inbox" style="font-size:2.5rem;display:block;margin-bottom:.5rem"></i>
@@ -623,6 +631,55 @@
 {% if active_tab == 'candidate' %}
 <script>
 // ── 監視候補の一覧操作 ──
+
+function wbEsc(v) {
+  var d = document.createElement('div');
+  d.textContent = v == null ? '' : String(v);
+  return d.innerHTML;
+}
+
+// 取得結果(今すぐ取得/再スキャン)のチャンネル別内訳。0本のときも理由が分かるよう全チャンネルを表示する。
+// 外れた理由は、Shorts → 10分超 → fancamキーワードなし → 名簿外グループ の順に最初に該当したもので集計。
+function wbBreakdownHtml(res) {
+  if (!res) return '';
+  if (!res.ok) return '<span class="text-danger">' + wbEsc(res.error || '取得に失敗しました') + '</span>';
+  var title = (res.rescan_days ? '過去' + res.rescan_days + '日分の再スキャン' : '今すぐ取得') +
+    ': 候補に ' + res.added_total + '本 追加（APIユニット' + res.api_units + '）';
+  var tot = { n: 0, a: 0, sh: 0, lg: 0, gr: 0, fc: 0, dp: 0 };
+  var rows = res.channels.map(function (c) {
+    if (c.error) {
+      return '<tr><td>' + wbEsc(c.name) + '</td><td colspan="8" class="text-danger">' + wbEsc(c.error) + '</td></tr>';
+    }
+    var notes = [];
+    if (c.skip_gone) notes.push('削除済み・非公開 ' + c.skip_gone);
+    if (c.cap_left) notes.push('上限(20本)で未処理 ' + c.cap_left + '（次回に持ち越し）');
+    if (c.truncated) notes.push('取得上限を超える古い分は対象外');
+    var out = c.skip_shorts + c.skip_long + c.skip_group + c.skip_fancam + c.skip_dup + c.skip_gone;
+    tot.n += c.new; tot.a += c.added; tot.sh += c.skip_shorts; tot.lg += c.skip_long;
+    tot.gr += c.skip_group; tot.fc += c.skip_fancam; tot.dp += c.skip_dup;
+    return '<tr><td>' + wbEsc(c.name) + '</td>' +
+      '<td class="text-end">' + c.new + '</td>' +
+      '<td class="text-end fw-bold">' + c.added + '</td>' +
+      '<td class="text-end">' + out + '</td>' +
+      '<td class="text-end">' + c.skip_shorts + '</td>' +
+      '<td class="text-end">' + c.skip_long + '</td>' +
+      '<td class="text-end">' + c.skip_fancam + '</td>' +
+      '<td class="text-end">' + c.skip_group + '</td>' +
+      '<td class="text-end">' + c.skip_dup + '</td>' +
+      '<td class="text-muted">' + notes.join(' ／ ') + '</td></tr>';
+  }).join('');
+  var totalRow = '<tr class="fw-bold"><td>合計</td><td class="text-end">' + tot.n + '</td><td class="text-end">' + tot.a +
+    '</td><td class="text-end">' + (tot.sh + tot.lg + tot.fc + tot.gr + tot.dp) + '</td><td class="text-end">' + tot.sh +
+    '</td><td class="text-end">' + tot.lg + '</td><td class="text-end">' + tot.fc + '</td><td class="text-end">' + tot.gr +
+    '</td><td class="text-end">' + tot.dp + '</td><td></td></tr>';
+  return '<div class="fw-bold mb-1">' + wbEsc(title) + '</div>' +
+    '<div class="table-responsive"><table class="table table-sm align-middle mb-0" style="font-size:.78rem">' +
+    '<thead><tr><th>チャンネル</th><th class="text-end">見た本数</th><th class="text-end">候補に追加</th>' +
+    '<th class="text-end">外れた本数</th><th class="text-end">Shorts</th><th class="text-end">10分超</th>' +
+    '<th class="text-end">fancamキーワードなし</th><th class="text-end">名簿外グループ</th><th class="text-end">重複</th><th>備考</th></tr></thead>' +
+    '<tbody>' + rows + totalRow + '</tbody></table></div>';
+}
+
 var candTracked = {};
 var candDone = 0;
 var candFailed = 0;
@@ -737,12 +794,23 @@ function candFetchMsg(html) {
 
 function candFetchSetRunning(running) {
   document.getElementById('cand-fetch-btn').disabled = running;
+  document.getElementById('cand-rescan-btn').disabled = running;
   if (running) candFetchMsg('<span class="text-primary">新着を取得中…</span>');
 }
 
-function candFetchNow() {
+function candRescan() {
+  var days = parseInt(document.getElementById('cand-rescan-days').value, 10);
+  if (!(days >= 1 && days <= 30)) { alert('日数は1〜30で入力してください'); return; }
+  candFetchNow(days);
+}
+
+function candFetchNow(rescanDays) {
   candFetchSetRunning(true);
-  fetch('/api/watch-channels/run', { method: 'POST' })
+  document.getElementById('cand-fetch-detail').innerHTML = '';
+  fetch('/api/watch-channels/run', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(rescanDays ? { rescan_days: rescanDays } : {})
+  })
     .then(function (r) { return r.json().then(function (d) { return { status: r.status, d: d }; }); })
     .then(function (x) {
       // 409は既に実行中(設定画面や朝のジョブ)。そのまま終了を待つ
@@ -761,8 +829,12 @@ function candFetchPoll() {
       var res = d.result;
       if (!res || !res.ok) { candFetchMsg('<span class="text-danger">' + candEsc(res && res.error ? res.error : '取得に失敗しました') + '</span>'); return; }
       var n = res.added_total;
+      document.getElementById('cand-fetch-detail').innerHTML = wbBreakdownHtml(res);
       if (n > 0) {
-        try { sessionStorage.setItem('candFetchMsg', n + '本の新しい候補'); } catch (e) {}
+        try {
+          sessionStorage.setItem('candFetchMsg', n + '本の新しい候補');
+          sessionStorage.setItem('candFetchResult', JSON.stringify(res));
+        } catch (e) {}
         location.reload();   // 一覧を最新にする(取り込み中の行は読み込み後に進行状況から復元される)
       } else {
         candFetchMsg('<span class="text-muted">新しい候補はありません</span>');
@@ -773,8 +845,15 @@ function candFetchPoll() {
 
 function candFetchResume() {
   var saved = null;
-  try { saved = sessionStorage.getItem('candFetchMsg'); sessionStorage.removeItem('candFetchMsg'); } catch (e) {}
+  var savedRes = null;
+  try {
+    saved = sessionStorage.getItem('candFetchMsg'); sessionStorage.removeItem('candFetchMsg');
+    savedRes = sessionStorage.getItem('candFetchResult'); sessionStorage.removeItem('candFetchResult');
+  } catch (e) {}
   if (saved) candFetchMsg('<span class="text-success fw-bold">' + candEsc(saved) + '</span>');
+  if (savedRes) {
+    try { document.getElementById('cand-fetch-detail').innerHTML = wbBreakdownHtml(JSON.parse(savedRes)); } catch (e) {}
+  }
   fetch('/api/watch-channels/status')
     .then(function (r) { return r.json(); })
     .then(function (d) { if (d.running) { candFetchSetRunning(true); candFetchTimer = setTimeout(candFetchPoll, 3000); } })

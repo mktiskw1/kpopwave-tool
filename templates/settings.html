@@ -453,9 +453,15 @@
     <span><i class="bi bi-broadcast me-2"></i>監視チャンネル</span>
     <span class="d-flex align-items-center gap-2">
       <span id="watch-run-status" style="font-size:.78rem;color:var(--text-muted)"></span>
-      <button type="button" class="btn btn-sm btn-outline-primary" id="watch-run-btn" onclick="watchRunNow()">
+      <button type="button" class="btn btn-sm btn-outline-primary" id="watch-run-btn" onclick="watchRunNow(null)">
         <i class="bi bi-cloud-download me-1"></i>今すぐ取得
       </button>
+      <span class="input-group input-group-sm" style="width:auto" title="カーソルをn日前に戻して取得し直します(重複は出ません)">
+        <span class="input-group-text">過去</span>
+        <input type="number" id="watch-rescan-days" class="form-control" value="7" min="1" max="30" style="max-width:64px">
+        <span class="input-group-text">日分</span>
+        <button type="button" id="watch-rescan-btn" class="btn btn-outline-primary" onclick="watchRescan()">再スキャン</button>
+      </span>
     </span>
   </div>
   <div class="card-body">
@@ -802,6 +808,54 @@ var WATCH_DATA = {{ watch_channels|tojson }};
 var WATCH_RUNNING = {{ 'true' if watch_state.running else 'false' }};
 var watchPollTimer = null;
 
+function wbEsc(v) {
+  var d = document.createElement('div');
+  d.textContent = v == null ? '' : String(v);
+  return d.innerHTML;
+}
+
+// 取得結果(今すぐ取得/再スキャン)のチャンネル別内訳。0本のときも理由が分かるよう全チャンネルを表示する。
+// 外れた理由は、Shorts → 10分超 → fancamキーワードなし → 名簿外グループ の順に最初に該当したもので集計。
+function wbBreakdownHtml(res) {
+  if (!res) return '';
+  if (!res.ok) return '<span class="text-danger">' + wbEsc(res.error || '取得に失敗しました') + '</span>';
+  var title = (res.rescan_days ? '過去' + res.rescan_days + '日分の再スキャン' : '今すぐ取得') +
+    ': 候補に ' + res.added_total + '本 追加（APIユニット' + res.api_units + '）';
+  var tot = { n: 0, a: 0, sh: 0, lg: 0, gr: 0, fc: 0, dp: 0 };
+  var rows = res.channels.map(function (c) {
+    if (c.error) {
+      return '<tr><td>' + wbEsc(c.name) + '</td><td colspan="8" class="text-danger">' + wbEsc(c.error) + '</td></tr>';
+    }
+    var notes = [];
+    if (c.skip_gone) notes.push('削除済み・非公開 ' + c.skip_gone);
+    if (c.cap_left) notes.push('上限(20本)で未処理 ' + c.cap_left + '（次回に持ち越し）');
+    if (c.truncated) notes.push('取得上限を超える古い分は対象外');
+    var out = c.skip_shorts + c.skip_long + c.skip_group + c.skip_fancam + c.skip_dup + c.skip_gone;
+    tot.n += c.new; tot.a += c.added; tot.sh += c.skip_shorts; tot.lg += c.skip_long;
+    tot.gr += c.skip_group; tot.fc += c.skip_fancam; tot.dp += c.skip_dup;
+    return '<tr><td>' + wbEsc(c.name) + '</td>' +
+      '<td class="text-end">' + c.new + '</td>' +
+      '<td class="text-end fw-bold">' + c.added + '</td>' +
+      '<td class="text-end">' + out + '</td>' +
+      '<td class="text-end">' + c.skip_shorts + '</td>' +
+      '<td class="text-end">' + c.skip_long + '</td>' +
+      '<td class="text-end">' + c.skip_fancam + '</td>' +
+      '<td class="text-end">' + c.skip_group + '</td>' +
+      '<td class="text-end">' + c.skip_dup + '</td>' +
+      '<td class="text-muted">' + notes.join(' ／ ') + '</td></tr>';
+  }).join('');
+  var totalRow = '<tr class="fw-bold"><td>合計</td><td class="text-end">' + tot.n + '</td><td class="text-end">' + tot.a +
+    '</td><td class="text-end">' + (tot.sh + tot.lg + tot.fc + tot.gr + tot.dp) + '</td><td class="text-end">' + tot.sh +
+    '</td><td class="text-end">' + tot.lg + '</td><td class="text-end">' + tot.fc + '</td><td class="text-end">' + tot.gr +
+    '</td><td class="text-end">' + tot.dp + '</td><td></td></tr>';
+  return '<div class="fw-bold mb-1">' + wbEsc(title) + '</div>' +
+    '<div class="table-responsive"><table class="table table-sm align-middle mb-0" style="font-size:.78rem">' +
+    '<thead><tr><th>チャンネル</th><th class="text-end">見た本数</th><th class="text-end">候補に追加</th>' +
+    '<th class="text-end">外れた本数</th><th class="text-end">Shorts</th><th class="text-end">10分超</th>' +
+    '<th class="text-end">fancamキーワードなし</th><th class="text-end">名簿外グループ</th><th class="text-end">重複</th><th>備考</th></tr></thead>' +
+    '<tbody>' + rows + totalRow + '</tbody></table></div>';
+}
+
 function watchEsc(v) {
   var d = document.createElement('div');
   d.textContent = v == null ? '' : String(v);
@@ -933,21 +987,13 @@ function watchSaveKeywords() {
 }
 
 function watchShowResult(res) {
-  var box = document.getElementById('watch-run-result');
-  if (!res) { box.innerHTML = ''; return; }
-  if (!res.ok) { box.innerHTML = '<span class="text-danger">' + watchEsc(res.error || '取得に失敗しました') + '</span>'; return; }
-  var lines = res.channels.map(function (c) {
-    if (c.error) return watchEsc(c.name) + ': <span class="text-danger">' + watchEsc(c.error) + '</span>';
-    return watchEsc(c.name) + ': <b>' + c.added + '本を候補に追加</b>（新着' + c.new + '、重複' + c.skip_dup +
-      '、fancam以外' + c.skip_fancam + '、グループ外' + c.skip_group + '、Shorts' + c.skip_shorts +
-      '、長尺' + c.skip_long + (c.download_failed ? '、DL失敗' + c.download_failed : '') + '）';
-  });
-  box.innerHTML = '<div class="fw-bold mb-1">取得結果: 候補に合計' + res.added_total + '本追加（APIユニット' + res.api_units + '）</div>' + lines.join('<br>');
+  document.getElementById('watch-run-result').innerHTML = wbBreakdownHtml(res);
 }
 
 function watchSetRunning(running) {
   var btn = document.getElementById('watch-run-btn');
   btn.disabled = running;
+  document.getElementById('watch-rescan-btn').disabled = running;
   document.getElementById('watch-run-status').textContent = running ? '取得中…（動画のダウンロードに数分かかることがあります）' : '';
 }
 
@@ -964,8 +1010,17 @@ function watchPoll() {
     .catch(function () { watchPollTimer = setTimeout(watchPoll, 8000); });
 }
 
-function watchRunNow() {
-  fetch('/api/watch-channels/run', { method: 'POST' })
+function watchRescan() {
+  var days = parseInt(document.getElementById('watch-rescan-days').value, 10);
+  if (!(days >= 1 && days <= 30)) { alert('日数は1〜30で入力してください'); return; }
+  watchRunNow(days);
+}
+
+function watchRunNow(rescanDays) {
+  fetch('/api/watch-channels/run', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(rescanDays ? { rescan_days: rescanDays } : {})
+  })
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (!d.ok) { alert(d.error || '取得を開始できませんでした'); return; }

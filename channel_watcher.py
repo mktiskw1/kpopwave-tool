@@ -38,6 +38,9 @@ YOUTUBE_PLAYLIST_ITEMS_URL = "https://www.googleapis.com/youtube/v3/playlistItem
 FIRST_RUN_DAYS = 7              # 初回(cursor未設定)は直近N日分
 MAX_IMPORT_PER_CHANNEL = 20     # 1チャンネルあたり1回の取り込み上限
 MAX_PLAYLIST_PAGES = 4          # 1チャンネルあたりplaylistItems.listの最大ページ数(50件/ページ)
+RESCAN_DEFAULT_DAYS = 7         # 再スキャンの日数(既定/最大)
+RESCAN_MAX_DAYS = 30
+RESCAN_MAX_ITEMS = 200          # 再スキャン時の1チャンネルあたりの打ち切り本数(= MAX_PLAYLIST_PAGES × 50件)
 CURSOR_MARGIN = timedelta(minutes=30)   # 再生リスト反映の遅れ対策。重複はDB・削除記録で弾く
 WATCH_MAX_DURATION_SEC = 600    # 自動ダウンロードする動画の長さの上限(通常収集のMAX_DURATIONと同じ)
 WATCH_FEED_PREFIX = "YouTube動画: "
@@ -116,11 +119,14 @@ def _parse_rfc3339(value: str):
         return None
 
 
-def _fetch_new_playlist_items(playlist_id: str, since: datetime, api_key: str, units: list) -> list:
+def _fetch_new_playlist_items(playlist_id: str, since: datetime, api_key: str, units: list) -> tuple:
     """アップロード再生リスト(新しい順)から since より後に公開された動画を取得し、
-    公開日時の古い順の [{"video_id", "published_at"}] で返す。playlistItems.listは1ユニット/ページ。"""
+    (公開日時の古い順の [{"video_id", "published_at"}], 打ち切りフラグ) を返す。
+    打ち切りフラグは、ページ数の上限に達して since までさかのぼれなかった場合にTrue。
+    playlistItems.listは1ユニット/ページ。"""
     items = []
     page_token = None
+    truncated = False
     for _ in range(MAX_PLAYLIST_PAGES):
         params = {"part": "contentDetails", "playlistId": playlist_id, "maxResults": 50, "key": api_key}
         if page_token:
@@ -141,9 +147,11 @@ def _fetch_new_playlist_items(playlist_id: str, since: datetime, api_key: str, u
             items.append({"video_id": cd["videoId"], "published_at": published})
         page_token = data.get("nextPageToken")
         if reached_old or not page_token:
+            truncated = False
             break
+        truncated = True   # まだ次のページがある。ループを抜けた時点でTrueのままなら上限で打ち切り
     items.sort(key=lambda x: x["published_at"])
-    return items
+    return items, truncated
 
 
 def _fetch_video_details(video_ids: list, api_key: str, units: list) -> dict:
@@ -238,24 +246,27 @@ def _known_video_ids() -> set:
     return known
 
 
-def run_watch(app, dry_run: bool = False) -> dict:
+def run_watch(app, dry_run: bool = False, rescan_days: int = None) -> dict:
     """有効な監視チャンネルの新着を取得し、条件に合う動画を候補テーブルへ追加する(毎朝のジョブと
     「今すぐ取得」の共通処理。ダウンロードはしない)。
     dry_run=TrueならDB書き込みを行わず、候補に追加される予定の動画を数えるだけ。
+    rescan_days を指定すると「過去n日分の再スキャン」になる: 各チャンネルの取得起点を(今より前の)n日前まで
+    戻し(既にそれより古い起点なら動かさない)、1チャンネル20本の上限は適用せず期間内を全て処理する
+    (安全のためRESCAN_MAX_ITEMS本で打ち切り)。重複防止は通常と同じ。
     戻り値: {"ok", "error", "dry_run", "api_units", "added_total", "channels": [...]}"""
     if not _run_lock.acquire(blocking=False):
         return {"ok": False, "error": "別の取得処理が実行中です", "dry_run": dry_run,
-                "api_units": 0, "added_total": 0, "channels": []}
+                "api_units": 0, "added_total": 0, "channels": [], "rescan_days": rescan_days}
     try:
-        return _run_watch(app, dry_run)
+        return _run_watch(app, dry_run, rescan_days)
     finally:
         _run_lock.release()
 
 
-def _run_watch(app, dry_run: bool) -> dict:
+def _run_watch(app, dry_run: bool, rescan_days: int = None) -> dict:
     units = [0]
     result = {"ok": True, "error": None, "dry_run": dry_run, "api_units": 0,
-              "added_total": 0, "channels": []}
+              "added_total": 0, "channels": [], "rescan_days": rescan_days}
 
     with app.app_context():
         api_key = get_youtube_api_key()
@@ -264,17 +275,20 @@ def _run_watch(app, dry_run: bool) -> dict:
             return result
 
         run_started = datetime.utcnow()
+        rescan_since = (run_started - timedelta(days=rescan_days)) if rescan_days else None
         rows = WatchedChannel.query.filter_by(enabled=True).order_by(WatchedChannel.id.asc()).all()
         # 「その他」はタグ用の受け皿グループで、タイトルに現れる名前ではないので照合対象外
         groups = [(g.id, g.name) for g in Group.query.all() if g.name != "その他"]
         chans = [{
             "id": r.id, "account_id": r.account_id, "channel_id": r.channel_id, "name": r.channel_name,
             "fancam_required": bool(r.fancam_required), "playlist_id": r.uploads_playlist_id,
-            "since": r.cursor_published_at or (run_started - timedelta(days=FIRST_RUN_DAYS)),
+            "since": (min(r.cursor_published_at, rescan_since) if (rescan_since and r.cursor_published_at)
+                      else rescan_since or r.cursor_published_at
+                      or (run_started - timedelta(days=FIRST_RUN_DAYS))),
             "stat": {"channel_id": r.channel_id, "name": r.channel_name, "new": 0, "added": 0,
                      "skip_group": 0, "skip_fancam": 0, "skip_shorts": 0, "skip_long": 0,
                      "skip_gone": 0, "skip_dup": 0, "download_failed": 0, "error": None,
-                     "titles": []},
+                     "cap_left": 0, "truncated": False, "titles": []},
         } for r in rows]
         known = _known_video_ids()
         fancam_keywords = get_fancam_keywords()
@@ -298,12 +312,16 @@ def _run_watch(app, dry_run: bool) -> dict:
                 c["stat"]["error"] = "アップロード再生リストを取得できませんでした"
                 continue
             try:
-                items = _fetch_new_playlist_items(c["playlist_id"], c["since"], api_key, units)
+                items, truncated = _fetch_new_playlist_items(c["playlist_id"], c["since"], api_key, units)
             except Exception as exc:
                 c["failed"] = True
                 c["stat"]["error"] = f"新着取得エラー: {str(exc)[:120]}"
                 logger.error("[channel_watch] %s playlistItems失敗: %s", c["name"], exc)
                 continue
+            if rescan_days and len(items) > RESCAN_MAX_ITEMS:
+                items = items[-RESCAN_MAX_ITEMS:]      # 新しい側のRESCAN_MAX_ITEMS本に絞る
+                truncated = True
+            c["stat"]["truncated"] = truncated
             c["stat"]["new"] = len(items)
             fresh = []
             for it in items:
@@ -330,7 +348,7 @@ def _run_watch(app, dry_run: bool) -> dict:
             if c["failed"]:
                 continue
             new_cursor = run_started - CURSOR_MARGIN
-            for it in c["items"]:
+            for idx, it in enumerate(c["items"]):
                 vid = it["video_id"]
                 d = video_details.get(vid)
                 if d is None:
@@ -382,9 +400,10 @@ def _run_watch(app, dry_run: bool) -> dict:
                     stat["titles"].append(title[:80])
                     logger.info("[channel_watch] 候補に追加: %s / %s", c["name"], title[:60])
 
-                if stat["added"] >= MAX_IMPORT_PER_CHANNEL:
+                if not rescan_days and stat["added"] >= MAX_IMPORT_PER_CHANNEL:
                     # 上限で打ち切り: 最後に処理した動画の公開日時までを済みとし、続きは次回に回す
                     new_cursor = it["published_at"]
+                    stat["cap_left"] = len(c["items"]) - idx - 1
                     break
 
             if not dry_run:
@@ -407,18 +426,18 @@ def _run_watch(app, dry_run: bool) -> dict:
         return result
 
 
-def start_background_run(app) -> bool:
-    """「今すぐ取得」用。別スレッドで実行して即座に戻る。実行中ならFalse。"""
+def start_background_run(app, rescan_days: int = None) -> bool:
+    """「今すぐ取得」「過去n日分を再スキャン」用。別スレッドで実行して即座に戻る。実行中ならFalse。"""
     if _state["running"]:
         return False
 
     def _target():
         try:
-            _state["result"] = run_watch(app)
+            _state["result"] = run_watch(app, rescan_days=rescan_days)
         except Exception as exc:
             logger.exception("[channel_watch] 手動実行で例外")
             _state["result"] = {"ok": False, "error": str(exc)[:200], "channels": [], "added_total": 0,
-                                "api_units": 0, "dry_run": False}
+                                "api_units": 0, "dry_run": False, "rescan_days": rescan_days}
         finally:
             _state["running"] = False
 

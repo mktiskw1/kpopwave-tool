@@ -1936,8 +1936,17 @@ def api_watch_channel_item(wid):
 def api_watch_channels_run():
     """「今すぐ取得」: 毎朝の自動取得と同じ処理をバックグラウンドで実行する(動画のダウンロードに
     時間がかかるため、結果は /api/watch-channels/status で確認する)。"""
-    from channel_watcher import start_background_run
-    if not start_background_run(app):
+    from channel_watcher import RESCAN_MAX_DAYS, start_background_run
+    data = request.get_json(silent=True) or {}
+    rescan_days = None
+    if data.get("rescan_days") is not None:
+        try:
+            rescan_days = int(str(data["rescan_days"]).strip())
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "再スキャンの日数は整数で入力してください"}), 400
+        if rescan_days < 1 or rescan_days > RESCAN_MAX_DAYS:
+            return jsonify({"ok": False, "error": f"再スキャンの日数は1〜{RESCAN_MAX_DAYS}で入力してください"}), 400
+    if not start_background_run(app, rescan_days=rescan_days):
         return jsonify({"ok": False, "error": "取得処理が既に実行中です"}), 409
     return jsonify({"ok": True})
 
