@@ -38,7 +38,13 @@
 <div class="card p-3 mb-4">
   <h6 class="fw-bold mb-3">フォロワー数・閲覧数の推移</h6>
   {% if daily_rows %}
-  <canvas id="daily-chart" height="90"></canvas>
+  <!-- 高さを固定した親要素に入れる(flex縦並びのcardに直接canvasを置くと、高さがつぶれる) -->
+  <div style="position:relative;height:300px">
+    <canvas id="daily-chart"></canvas>
+  </div>
+  <div class="mt-2" style="font-size:.75rem;color:var(--text-muted)">
+    閲覧数はThreadsの日別集計値（米国太平洋時間の1日ごと）です。直近1〜2日分は集計が確定してから反映されます。
+  </div>
   {% else %}
   <p class="text-muted mb-0">データがありません。下のフォームから過去分を投入するか、日次スナップショットの実行を待ってください。</p>
   {% endif %}
@@ -234,6 +240,7 @@ new Chart(document.getElementById('daily-chart'), {
         backgroundColor: 'rgba(201,105,159,.15)',
         yAxisID: 'y',
         tension: .25,
+        spanGaps: true,
       },
       {
         label: '閲覧数',
@@ -242,15 +249,21 @@ new Chart(document.getElementById('daily-chart'), {
         backgroundColor: 'rgba(123,147,207,.15)',
         yAxisID: 'y1',
         tension: .25,
+        spanGaps: true,
       },
     ],
   },
   options: {
     responsive: true,
+    maintainAspectRatio: false,
     interaction: { mode: 'index', intersect: false },
     scales: {
-      y:  { type: 'linear', position: 'left', title: { display: true, text: 'フォロワー数' } },
-      y1: { type: 'linear', position: 'right', title: { display: true, text: '閲覧数' }, grid: { drawOnChartArea: false } },
+      // フォロワー数(左軸)と閲覧数(右軸)は桁が違うので、それぞれの値の範囲に合わせた目盛りにする
+      y:  { type: 'linear', position: 'left', title: { display: true, text: 'フォロワー数' }, grace: '5%',
+            ticks: { precision: 0, callback: function (v) { return Number(v).toLocaleString(); } } },
+      y1: { type: 'linear', position: 'right', title: { display: true, text: '閲覧数' }, beginAtZero: true, grace: '5%',
+            grid: { drawOnChartArea: false },
+            ticks: { callback: function (v) { return Number(v).toLocaleString(); } } },
     },
   },
 });

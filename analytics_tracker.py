@@ -1,6 +1,6 @@
 import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
@@ -233,54 +233,134 @@ def _parse_account_insights(data: dict) -> tuple:
     return followers_count, views_count
 
 
+# Threads User Insightsの日別views(period=day)は、米国太平洋時間の1日(07:00 UTC区切り)ごとのバケットで返る。
+# 各値のend_timeは「そのバケットの開始時刻」(例: 2026-10-01T07:00:00+0000 = 太平洋時間10/01の1日分)で、
+# 開始から24時間たつまでは集計途中の値。daily_statsの日付には、このバケットの日付(end_timeのUTC日付)を使う。
+_VIEWS_BUCKET_HOURS = 24
+_VIEWS_REQUEST_DAYS = 28   # 1回のリクエストで取得する期間(長期間は分割して取得)
+SNAPSHOT_LOOKBACK_DAYS = 7  # 日次ジョブで確定済みの日別viewsを取り直す日数(取得漏れの自己修復を兼ねる)
+
+
+def fetch_daily_view_buckets(user_id: str, token: str, since: datetime, until: datetime) -> dict:
+    """since〜until(UTCのaware datetime)の日別viewsバケットを取得して
+    {バケット日付(date): (値, 確定済みか)} を返す。確定済み=開始から24時間経過。エラー時は例外。"""
+    buckets = {}
+    now = datetime.now(timezone.utc)
+    cur = since
+    while cur < until:
+        nxt = min(cur + timedelta(days=_VIEWS_REQUEST_DAYS), until)
+        resp = requests.get(
+            f"{THREADS_API}/{user_id}/threads_insights",
+            params={"metric": "views", "since": int(cur.timestamp()), "until": int(nxt.timestamp()),
+                    "access_token": token},
+            timeout=30,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+        for item in resp.json().get("data", []):
+            if item.get("name") != "views":
+                continue
+            for v in item.get("values", []):
+                try:
+                    start = datetime.strptime(v["end_time"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+                except (KeyError, ValueError):
+                    continue
+                complete = start + timedelta(hours=_VIEWS_BUCKET_HOURS) <= now
+                buckets[start.date()] = (v.get("value", 0), complete)
+        cur = nxt
+    return buckets
+
+
+def sync_daily_views(app, account_id: int, since_date: date, user_id: str, token: str) -> dict:
+    """since_date以降の日別viewsを、確定済みバケットの値でdaily_statsに反映する(冪等)。
+    - 既存のsource="api"の行はviews_countを確定値で上書きする。source="manual"の行は触らない。
+    - 行が無い日は、既存の最古の日付以降に限り新規作成する(followers_countはNone)。
+    - 集計途中・取得できない日のviewsはNoneにする(過去に「取得時点までの途中値」を保存していた行の補正を含む)。"""
+    since_dt = datetime(since_date.year, since_date.month, since_date.day, tzinfo=timezone.utc) - timedelta(days=1)
+    buckets = fetch_daily_view_buckets(user_id, token, since_dt, datetime.now(timezone.utc))
+
+    stats = {"updated": 0, "created": 0, "nulled": 0, "skipped_manual": 0}
+    with app.app_context():
+        earliest = db.session.query(func.min(DailyStat.stat_date)).filter(DailyStat.account_id == account_id).scalar()
+        rows = {r.stat_date: r for r in DailyStat.query.filter(
+            DailyStat.account_id == account_id, DailyStat.stat_date >= since_date).all()}
+        for d, (value, complete) in sorted(buckets.items()):
+            if d < since_date or not complete:
+                continue
+            row = rows.get(d)
+            if row is None:
+                if earliest is not None and d >= earliest:
+                    db.session.add(DailyStat(account_id=account_id, stat_date=d, followers_count=None,
+                                             views_count=value, source="api"))
+                    stats["created"] += 1
+                continue
+            if row.source == "manual":
+                stats["skipped_manual"] += 1
+                continue
+            if row.views_count != value:
+                row.views_count = value
+                stats["updated"] += 1
+        for d, row in rows.items():
+            bucket = buckets.get(d)
+            if (bucket is None or not bucket[1]) and row.source != "manual" and row.views_count is not None:
+                row.views_count = None
+                stats["nulled"] += 1
+        db.session.commit()
+    return stats
+
+
 def snapshot_daily_stats(app, account_id: int = 1) -> dict:
-    """account_id の User Insights から本日（JST）分の followers_count・views を取得し
-    daily_stats に反映する。source="manual" の既存行は上書きしない。"""
+    """account_id の User Insights から、本日（JST）のfollowers_count(その時点の値)を記録し、
+    直近SNAPSHOT_LOOKBACK_DAYS日分の日別views(集計が確定したバケットのみ)を反映する。
+    source="manual" の既存行は上書きしない。
+
+    以前は「本日00:00〜24:00(JST)」の1リクエストでviewsも取得していたが、ジョブの実行は毎朝3:30のため、
+    取得できるのは太平洋時間の1日が約半分過ぎた時点の途中値になり、日別の値が実際より大幅に小さく
+    (かつ日によって割合がばらばらに)記録されていた。"""
     user_id, token = _get_credentials(app, account_id)
     if not token:
         return {"ok": False, "error": "Threadsアクセストークン未設定"}
 
-    now_jst = datetime.now(_JST)
-    today = now_jst.date()
-    since_dt = datetime(today.year, today.month, today.day, 0, 0, tzinfo=_JST)
-    until_dt = since_dt + timedelta(days=1)
+    today = datetime.now(_JST).date()
+    result = {"ok": True}
 
+    # フォロワー数: lifetime指標なので期間指定なしで現在値を取得する
+    followers_count = None
     try:
         resp = requests.get(
             f"{THREADS_API}/{user_id}/threads_insights",
-            params={
-                "metric": "followers_count,views",
-                "since": int(since_dt.timestamp()),
-                "until": int(until_dt.timestamp()),
-                "access_token": token,
-            },
+            params={"metric": "followers_count", "access_token": token},
             timeout=15,
         )
-    except Exception as exc:
-        logger.error("Account insights fetch error: %s", exc)
-        return {"ok": False, "error": str(exc)}
-
-    if not resp.ok:
-        logger.warning("Account insights HTTP %d: %s", resp.status_code, resp.text[:200])
-        return {"ok": False, "error": resp.text[:200]}
-
-    followers_count, views_count = _parse_account_insights(resp.json())
-
-    with app.app_context():
-        row = DailyStat.query.filter_by(account_id=account_id, stat_date=today).first()
-        if row and row.source == "manual":
-            logger.info("daily_stats %s は手動入力済みのためAPI値で上書きしない", today)
-            return {"ok": True, "skipped": "manual_exists"}
-        if row:
-            row.followers_count = followers_count
-            row.views_count = views_count
+        if resp.ok:
+            followers_count, _ = _parse_account_insights(resp.json())
         else:
-            db.session.add(DailyStat(
-                account_id=account_id, stat_date=today,
-                followers_count=followers_count, views_count=views_count, source="api",
-            ))
-        db.session.commit()
+            logger.warning("Account insights(followers) HTTP %d: %s", resp.status_code, resp.text[:200])
+            result.update(ok=False, error=resp.text[:200])
+    except Exception as exc:
+        logger.error("Account insights(followers) fetch error: %s", exc)
+        result.update(ok=False, error=str(exc))
 
-    result = {"ok": True, "followers_count": followers_count, "views_count": views_count}
+    if followers_count is not None:
+        with app.app_context():
+            row = DailyStat.query.filter_by(account_id=account_id, stat_date=today).first()
+            if row and row.source == "manual":
+                logger.info("daily_stats %s は手動入力済みのためAPI値で上書きしない", today)
+            elif row:
+                row.followers_count = followers_count
+            else:
+                db.session.add(DailyStat(account_id=account_id, stat_date=today,
+                                         followers_count=followers_count, views_count=None, source="api"))
+            db.session.commit()
+        result["followers_count"] = followers_count
+
+    # 日別views: 確定済みバケットを直近数日分取り直す
+    try:
+        result["views_sync"] = sync_daily_views(
+            app, account_id, today - timedelta(days=SNAPSHOT_LOOKBACK_DAYS), user_id, token)
+    except Exception as exc:
+        logger.error("Account insights(views) sync error: %s", exc)
+        result.update(ok=False, error=str(exc)[:200])
+
     logger.info("日次スナップショット完了: %s", result)
     return result
