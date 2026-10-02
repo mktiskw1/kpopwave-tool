@@ -250,15 +250,7 @@
           <input type="password" class="form-control" name="youtube_api_key"
                  value="{{ settings.youtube_api_key }}" placeholder="AIza...">
           <div class="form-text" style="font-size:.75rem">
-            Google Cloud Console で取得。KPOP女性アイドル MV を自動収集します。
-          </div>
-        </div>
-        <div class="mb-0">
-          <label class="form-label" style="font-size:.85rem">YouTube 収集間隔（時間）</label>
-          <input type="number" class="form-control" name="youtube_collect_interval_hours"
-                 value="{{ settings.youtube_collect_interval_hours }}" min="1" max="24" style="max-width:100px">
-          <div class="form-text" style="font-size:.75rem">
-            推奨: 6時間以上（16クエリ × 100ユニット = 1,600ユニット/回、上限10,000/日）。変更は次回起動時に反映。
+            Google Cloud Console で取得。fancam検索・音楽番組検索・チャンネル監視で使用します。
           </div>
         </div>
       </div>
@@ -276,14 +268,6 @@
             自動投稿時刻はアカウントごとに
             <a href="{{ url_for('schedule') }}">週間投稿スケジュール</a>
             画面で設定してください（実際に投稿に使われるのはこちらの設定です）。
-          </div>
-        </div>
-        <div class="mb-3">
-          <label class="form-label" style="font-size:.85rem">RSS 収集間隔（時間）</label>
-          <input type="number" class="form-control" name="collect_interval_hours"
-                 value="{{ settings.collect_interval_hours }}" min="1" max="24" style="max-width:100px">
-          <div class="form-text" style="font-size:.75rem">
-            定期収集の間隔（時間単位）。変更は次回起動時に反映されます。
           </div>
         </div>
         <div class="form-check mb-3">
@@ -340,43 +324,6 @@
             直近の投稿サイクルの最終いいね数がこの値以上の動画は、上の通常間隔ではなく
             こちらの短い間隔で再キュー対象になります（判定は初速ではなく最終いいね数の確定値を使用）。
           </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- RSS フィード -->
-  <div class="col-md-6">
-    <div class="card">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <span><i class="bi bi-rss-fill me-2"></i>RSS フィード</span>
-        <button type="button" class="btn btn-sm btn-outline-success py-0 px-2" onclick="addFeed()">
-          <i class="bi bi-plus-lg"></i> 追加
-        </button>
-      </div>
-      <div class="card-body">
-        <div id="feeds-container">
-          {% for feed in settings.rss_feeds %}
-          <div class="input-group mb-2 feed-row">
-            <input type="text" class="form-control" name="feed_name"
-                   placeholder="名前" value="{{ feed.name }}" style="max-width:110px;font-size:.82rem">
-            <input type="text" class="form-control" name="feed_url"
-                   placeholder="RSS URL" value="{{ feed.url }}" style="font-size:.82rem">
-            <select class="form-select form-select-sm" name="feed_account_id" style="max-width:150px;font-size:.78rem">
-              {% for acc in accounts %}
-              <option value="{{ acc.id }}" {% if (feed.account_id or 1) == acc.id %}selected{% endif %}>{{ acc.account_label }}</option>
-              {% endfor %}
-            </select>
-            <input type="hidden" name="feed_lang" value="{{ feed.lang or '' }}">
-            <button type="button" class="btn btn-outline-danger btn-sm px-2"
-                    onclick="this.closest('.feed-row').remove()">
-              <i class="bi bi-trash3"></i>
-            </button>
-          </div>
-          {% endfor %}
-        </div>
-        <div class="form-text" style="font-size:.72rem">
-          フィードは起動時または手動収集時に取得されます
         </div>
       </div>
     </div>
@@ -553,33 +500,6 @@
 
 {% block scripts %}
 <script>
-const FEED_ACCOUNTS = [{% for acc in accounts %}{"id": {{ acc.id }}, "label": {{ acc.account_label|tojson }}}{% if not loop.last %},{% endif %}{% endfor %}];
-
-function buildFeedAccountOptionsHtml() {
-  return FEED_ACCOUNTS.map(a => {
-    const opt = document.createElement('option');
-    opt.value = a.id;
-    opt.textContent = a.label;
-    return opt.outerHTML;
-  }).join('');
-}
-
-function addFeed() {
-  const c = document.getElementById('feeds-container');
-  const div = document.createElement('div');
-  div.className = 'input-group mb-2 feed-row';
-  div.innerHTML = `
-    <input type="text" class="form-control" name="feed_name" placeholder="名前" style="max-width:110px;font-size:.82rem">
-    <input type="text" class="form-control" name="feed_url" placeholder="RSS URL" style="font-size:.82rem">
-    <select class="form-select form-select-sm" name="feed_account_id" style="max-width:150px;font-size:.78rem">${buildFeedAccountOptionsHtml()}</select>
-    <input type="hidden" name="feed_lang" value="">
-    <button type="button" class="btn btn-outline-danger btn-sm px-2" onclick="this.closest('.feed-row').remove()">
-      <i class="bi bi-trash3"></i>
-    </button>`;
-  c.appendChild(div);
-  div.querySelector('input[name=feed_name]').focus();
-}
-
 function startEditAccountLabel(id) {
   document.getElementById("acc-label-display-" + id).style.display = "none";
   document.getElementById("acc-label-edit-" + id).style.display = "inline-block";

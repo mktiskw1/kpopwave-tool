@@ -24,9 +24,8 @@ kpopwave-tool/
 ├── app.py               # Flaskルート・スケジューラ・API定義
 ├── database.py          # SQLAlchemyモデル定義（全テーブル）
 ├── config.py            # DB URI等の設定（SQLite: rock_metal.db）
-├── summarizer.py        # Claude Haikuによる投稿文生成（2段階生成）
+├── summarizer.py        # 動画投稿の投稿文組み立て（グループ→メンバー→曲名→フック。AI要約は廃止）
 ├── threads_api.py       # Threads API 投稿・動画投稿・カルーセル
-├── rss_collector.py     # RSSフィード収集・女性KPOPキーワードフィルタ
 ├── comments.py          # Threadsコメント取得・返信・いいね
 ├── engagement_tracker.py# いいね数・リプライ数・リポスト数の取得
 ├── learning.py          # バズ投稿分析（BuzzPost → AI tips）
@@ -86,8 +85,8 @@ queued  → failed
 ### `settings` — キーバリュー設定
 
 主なキー：`threads_access_token`, `threads_user_id`, `anthropic_api_key`,
-`rss_feeds`（JSON）, `post_times`（`09:00,15:00,21:00`）,
-`youtube_channels`（JSON）, `youtube_min_view_count`, `youtube_max_view_count`,
+`post_times`（`09:00,15:00,21:00`）,
+`youtube_channels`（JSON）,
 `test_mode`（`true`/`false`）, `learned_style_hints`
 
 ### `comments` — 受信コメント
@@ -162,10 +161,9 @@ queued  → failed
 
 | 機能 | ファイル | 備考 |
 |---|---|---|
-| RSSフィード収集 | `rss_collector.py` | 女性KPOPキーワードフィルタ + AI判定 |
-| YouTube動画収集 | `video_collector.py` | yt-dlp、再生数フィルタあり |
+| YouTube動画収集 | `video_collector.py` | yt-dlp |
 | X（Twitter）動画URL追加 | `app.py` `/api/videos/add-social` | 投稿URL貼付でyt-dlpフルDL（Cookie不要）→承認待ちへ。`feed_source="X動画: <投稿者>"`。複数動画ツイートはUIチェックボックスで「全部/先頭のみ」。**Threadsはyt-dlp未対応のため受付だけして未対応メッセージを返す**（対応が入ったら`add_video_social`のThreadsガードを外すだけ） |
-| AI投稿文生成 | `summarizer.py` | Claude Haiku、2段階生成（生成→口語化） |
+| 動画投稿文の組み立て | `summarizer.py` | AIを使わず「グループ→メンバー→曲名→フック」で決定的に組み立て |
 | Threads投稿 | `threads_api.py` | テキスト・画像カルーセル・動画 |
 | 自動スケジューラ | `app.py` | APScheduler、`post_times`設定に従う |
 | 承認待ち画面 | `pending.html` | 記事タブ・動画タブ切替、承認/却下/再生成 |
@@ -248,14 +246,9 @@ KPOP（account_id=1）・ガチャ沼の住人（account_id=2）それぞれ管�
 
 ---
 
-## 10. RSSフィードとYouTubeチャンネル
+## 10. YouTubeチャンネル
 
-### RSSフィード（英語）
-Soompi / Koreaboo / Hellokpop / KpopPost / NME K-Pop / AsianJunkie / TheBiasList / KpopReviewed / SeoulBeats
-
-### RSSフィード（日本語、`lang:ja`）
-Kstyle（Google News経由）/ BARKS / Daebak Tokyo
-→ キーワードフィルタースキップ、AIによる女性KPOP記事判定のみ
+> ニュース記事(RSS記事)の収集・AI要約・YouTube記事収集は廃止した（2026-10）。既存の投稿済み記事データは分析の履歴として残している。
 
 ### YouTubeチャンネル（デフォルト）
 aespa / NewJeans / BLACKPINK / TWICE / IVE / LE SSERAFIM / ILLIT / tripleS

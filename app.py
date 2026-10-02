@@ -114,22 +114,6 @@ DEFAULT_YOUTUBE_CHANNELS = [
     {"name": "tripleS",      "url": "https://www.youtube.com/channel/UCJnL-TBcsYrF2SLs7tmiC8Q"},
 ]
 
-DEFAULT_FEEDS = [
-    {"name": "Soompi",      "url": "https://www.soompi.com/feed/"},
-    {"name": "Koreaboo",    "url": "https://www.koreaboo.com/feed/"},
-    {"name": "Hellokpop",   "url": "https://www.hellokpop.com/feed/"},
-    {"name": "KpopPost",    "url": "https://kpoppost.com/feed/"},
-    {"name": "NME K-Pop",   "url": "https://www.nme.com/tag/k-pop/feed"},
-    {"name": "AsianJunkie", "url": "https://www.asianjunkie.com/feed/"},
-    {"name": "TheBiasList", "url": "https://thebiaslist.com/feed/"},
-    {"name": "KpopReviewed","url": "https://kpopreviewed.com/feed/"},
-    {"name": "SeoulBeats",  "url": "https://seoulbeats.com/feed/"},
-    # 日本語KPOPサイト（lang:ja → キーワードフィルタースキップ、AI判定のみ）
-    {"name": "Kstyle",       "url": "https://news.google.com/rss/search?q=site:kstyle.com&hl=ja&gl=JP&ceid=JP:ja", "lang": "ja"},
-    {"name": "BARKS",        "url": "https://barks.jp/feed/", "lang": "ja"},
-    {"name": "Daebak Tokyo", "url": "https://daebak.tokyo/feed/", "lang": "ja"},
-]
-
 
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -428,14 +412,9 @@ def _recover_orphaned_jobs():
 
 def _init_default_settings():
     defaults = {
-        "rss_feeds": json.dumps(DEFAULT_FEEDS),
         "post_times": "09:00,15:00,21:00",
-        "collect_interval_hours": "2",
-        "youtube_collect_interval_hours": "6",
         "youtube_api_key": os.getenv("YOUTUBE_API_KEY", ""),
         "kpop_seed_accounts": "",
-        "youtube_min_view_count": "5000000",
-        "youtube_max_view_count": "0",
         "test_mode": "false",
         "early_advance_enabled": "true",
         "threads_user_id": os.getenv("THREADS_USER_ID", ""),
@@ -495,8 +474,6 @@ def inject_globals():
         "pending_count": _scope(Article.query.filter_by(status="pending")).count(),
         "queued_count": _scope(Article.query.filter_by(status="queued")).count(),
         "unread_comments_count": Comment.query.filter_by(is_read=0).count(),
-        "youtube_min_view_count": Setting.get("youtube_min_view_count", "5000000"),
-        "youtube_max_view_count": Setting.get("youtube_max_view_count", "0"),
         "nav_accounts": nav_accounts,
         "nav_active_account_id": account_id,
         "nav_is_kpop_account": nav_is_kpop_account,
@@ -722,8 +699,6 @@ def pending():
 
     counts = {
         "all":    len(all_pending),
-        "rss":    0,
-        "youtube": 0,
         "video":  0,
         "clipped": 0,
         "watch":  0,
@@ -732,17 +707,12 @@ def pending():
         "posted": _scope(Article.query.filter_by(status="posted", content_type="video")).count(),
     }
     for a in all_pending:
-        src = a.feed_source or ""
         if (a.content_type or "article") == "video":
             counts["video"] += 1
             if _is_manual_trim_clip(a):
                 counts["clipped"] += 1
             if a.watched_channel_id:
                 counts["watch"] += 1
-        elif src.startswith("YouTube:"):
-            counts["youtube"] += 1
-        else:
-            counts["rss"] += 1
 
     early_engagement_map = {}
     candidate_rows = []
@@ -792,20 +762,6 @@ def pending():
                 "last_error": c.last_error or "",
                 "orientation": c.orientation or "unknown",
             })
-    elif tab == "youtube":
-        articles = [a for a in all_pending
-                    if (a.feed_source or "").startswith("YouTube:")
-                    and (a.content_type or "article") != "video"]
-        images_map = {}
-        for a in articles:
-            images_map[a.id] = _build_image_list(a.thumbnail_url, a.image_urls)
-    elif tab == "rss":
-        articles = [a for a in all_pending
-                    if not (a.feed_source or "").startswith("YouTube")
-                    and (a.content_type or "article") != "video"]
-        images_map = {}
-        for a in articles:
-            images_map[a.id] = _build_image_list(a.thumbnail_url, a.image_urls)
     else:
         articles = all_pending
         images_map = {}
@@ -1759,9 +1715,7 @@ def settings():
             return redirect(url_for("settings"))
 
         for key in ("anthropic_api_key",
-                    "collect_interval_hours",
-                    "youtube_api_key", "youtube_collect_interval_hours",
-                    "youtube_min_view_count", "youtube_max_view_count",
+                    "youtube_api_key",
                     "meta_app_id", "meta_app_secret", "app_base_url",
                     "buzz_requeue_interval_days",
                     "buzz_fasttrack_interval_days", "buzz_fasttrack_min_likes",
@@ -1790,26 +1744,6 @@ def settings():
 
         Setting.set("test_mode", "true" if request.form.get("test_mode") else "false")
         Setting.set("early_advance_enabled", "true" if request.form.get("early_advance_enabled") else "false")
-
-        feed_names = request.form.getlist("feed_name")
-        feed_urls = request.form.getlist("feed_url")
-        feed_langs = request.form.getlist("feed_lang")
-        feed_account_ids = request.form.getlist("feed_account_id")
-        feeds = []
-        for i, (n, u) in enumerate(zip(feed_names, feed_urls)):
-            if not u.strip():
-                continue
-            feed = {"name": n.strip(), "url": u.strip()}
-            lang = feed_langs[i].strip() if i < len(feed_langs) else ""
-            if lang:
-                feed["lang"] = lang
-            try:
-                acc_id = int(feed_account_ids[i]) if i < len(feed_account_ids) and feed_account_ids[i] else 1
-            except ValueError:
-                acc_id = 1
-            feed["account_id"] = acc_id
-            feeds.append(feed)
-        Setting.set("rss_feeds", json.dumps(feeds))
 
         ch_names = request.form.getlist("youtube_channel_name")
         ch_urls = request.form.getlist("youtube_channel_url")
@@ -1853,11 +1787,7 @@ def settings():
         "threads_access_token": panel_token,
         "threads_token_expires_in_days": threads_token_expires_in_days,
         "anthropic_api_key": Setting.get("anthropic_api_key"),
-        "collect_interval_hours": Setting.get("collect_interval_hours", "2"),
         "youtube_api_key": Setting.get("youtube_api_key"),
-        "youtube_collect_interval_hours": Setting.get("youtube_collect_interval_hours", "6"),
-        "youtube_min_view_count": Setting.get("youtube_min_view_count", "5000000"),
-        "youtube_max_view_count": Setting.get("youtube_max_view_count", "0"),
         "test_mode": Setting.get("test_mode", "true") == "true",
         "early_advance_enabled": Setting.get("early_advance_enabled", "true") == "true",
         "buzz_requeue_interval_days": Setting.get("buzz_requeue_interval_days", "60"),
@@ -1865,7 +1795,6 @@ def settings():
         "buzz_fasttrack_min_likes": Setting.get("buzz_fasttrack_min_likes", "1000"),
         "buzz_threshold_likes": Setting.get("buzz_threshold_likes", "200"),
         "buzz_repost_kill_likes": Setting.get("buzz_repost_kill_likes", "50"),
-        "rss_feeds": json.loads(Setting.get("rss_feeds", "[]") or "[]"),
         "youtube_channels": json.loads(Setting.get("youtube_channels", "[]") or "[]"),
         "meta_app_id": Setting.get("meta_app_id"),
         "meta_app_secret": Setting.get("meta_app_secret"),
@@ -1910,7 +1839,7 @@ def quick_setting():
     data = request.get_json(silent=True) or {}
     key = data.get("key", "")
     value = str(data.get("value", ""))
-    _allowed = {"youtube_min_view_count", "youtube_max_view_count"}
+    _allowed = {"auto_like_comments"}
     if key not in _allowed:
         return jsonify({"ok": False, "error": "invalid key"}), 400
     Setting.set(key, value)
@@ -2915,25 +2844,6 @@ def privacy():
 
 
 # ── 手動操作 API ───────────────────────────────────────────────────────────
-
-
-@app.route("/collect", methods=["POST"])
-def collect():
-    from rss_collector import collect_articles
-
-    account_id = _explicit_account_id(request.form)
-    new = collect_articles(app, account_id=account_id)
-    flash(f"RSS 収集完了: {new} 件の新記事を取得しました（承認待ち画面で要約を生成してください）", "success")
-    return redirect(url_for("index", account_id=account_id) if account_id else url_for("index"))
-
-
-@app.route("/collect-youtube", methods=["POST"])
-def collect_youtube():
-    from youtube_collector import collect_youtube_videos
-
-    new = collect_youtube_videos(app)
-    flash(f"YouTube 収集完了: {new} 件の新しい動画を取得しました（承認待ち画面で要約を生成してください）", "success")
-    return redirect(url_for("index"))
 
 
 def _ffmpeg_trim_clip(source_path: str, dest_path: str, start: float, end: float | None, timeout: int = 600) -> None:

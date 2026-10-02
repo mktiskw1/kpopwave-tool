@@ -209,26 +209,7 @@ def next_post_slot(app, account_id: int = None) -> datetime | None:
 
 # ── ジョブ関数 ─────────────────────────────────────────────────────────────────
 #
-# _collect_job / _collect_youtube_job は意図的に setup_scheduler() に登録していない
-# (定期実行しない)。過去に自動収集(RSS/YouTube定期収集)で男性グループの動画まで
-# 混ざって収集される精度の問題が起きたため、手動収集に切り替えた
-# (app.pyがrss_collector.collect_articles / youtube_collector.collect_youtube_videosを
-# 直接呼び出しており、この2つのラッパー関数自体は現在どこからも呼ばれていない)。
-# その後実装した「音楽番組から出演回を探す」「fancamを探す」機能が、グループ名を
-# 指定した検索によりこの精度問題を解決する代替手段として機能している。
-# 定期実行を再開する場合の雛形として残してある。
-
-def _collect_job(app):
-    from rss_collector import collect_articles
-    logger.info("Running scheduled RSS collection")
-    collect_articles(app)
-
-
-def _collect_youtube_job(app):
-    from youtube_collector import collect_youtube_videos
-    logger.info("Running scheduled YouTube collection")
-    collect_youtube_videos(app)
-
+# RSS/YouTube記事の収集ジョブ(_collect_job/_collect_youtube_job)は、ニュース記事機能の廃止に伴い削除した。
 
 def _collect_comments_job(app):
     from comments import fetch_comments

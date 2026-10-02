@@ -1,177 +1,16 @@
-import json
+"""動画投稿の投稿文(グループ名→メンバー名→曲名→フック)の組み立て。
+
+ニュース記事(RSS記事)用のAI要約・投稿文生成は廃止した。動画投稿の投稿文はAIを使わず決定的に
+組み立てる。"""
 import logging
-import os
-import random
 import re
-from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
+from datetime import datetime
 
-import anthropic
-import requests
-
-from database import Article, BuzzPost, Group, Hook, Member, Setting, ThreadsAccount, db
+from database import Article, Group, Hook, Member, db
 
 logger = logging.getLogger(__name__)
 
-THREADS_MAX = 500
-BODY_MAX_VIDEO   = 50   # 動画投稿の文字数上限
-BODY_MAX_ARTICLE = 150  # 記事投稿の文字数上限
-BODY_MAX_RETRIES = 3    # 超過時の再生成試行回数
-
-# Claude API課金停止時など、AI生成を使わずタイトルそのままを投稿文にするためのフラグ。
-# settings テーブルの値で切り替える（"false" でAI生成をスキップ）。DBに未設定なら従来通りAI有効。
-AI_SUMMARY_SETTING_KEY = "ai_summary_enabled"
-
-_RANKING_TITLE_KEYWORDS = frozenset([
-    "ranking", "rankings", "ranked", "chart", "charts",
-    "poll", "top 10", "top10", "brand reputation",
-])
-
-# 「1. Name (Group)」と「1. Name – Group」の2形式に対応
-_RANK_PATTERNS = [
-    re.compile(
-        r'(\d{1,2})[.)]\s+'
-        r'([\w][\w\s\'\-\.]{1,35}?)\s*'
-        r'\(([\w\s\'\-\.&]{1,40}?)\)',
-        re.UNICODE,
-    ),
-    re.compile(
-        r'(\d{1,2})[.)]\s+'
-        r'([\w][\w\s\'\-\.]{1,35}?)\s*'
-        r'[–\-]\s*([\w\s\'\-\.&]{1,40}?)'
-        r'(?=\s+\d{1,2}[.)]|\s*$)',
-        re.UNICODE,
-    ),
-]
-
-_FETCH_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
-
-# ランダム表現選択リスト（カテゴリ別）
-EXPRESSIONS_VISUAL = [
-    "顔が反則すぎる", "目が離せない", "画面から出てきそう",
-    "空気が変わる", "オーラが次元違う", "見るたびに新鮮",
-    "こんな顔していていいの", "存在が芸術", "光ってる",
-    "カメラが好きすぎる", "角度全部勝ち", "現実にいる人じゃない",
-    "スクリーンが狭い", "顔面偏差値がバグってる", "この世に存在していいの",
-    "重力に逆らってる", "余白がない", "完成されすぎてて怖い",
-    "この子だけ解像度が違う", "見るたびに発見がある",
-    "引きでも寄りでも勝ち", "表情の作り方が天才",
-    "何着ても着こなす", "髪型変えるたびに正解",
-    "笑顔が武器すぎる", "目力で全部持っていく",
-    "美しい", "素敵すぎる",
-]
-
-EXPRESSIONS_PERFORMANCE = [
-    "この完成度どうなってるの", "練習量が見える", "ライブでこれは無理",
-    "鳥肌が止まらない", "どこで覚えたんこの表現力", "全員主役",
-    "センターの引力がやばい", "視線が釘付けになる",
-    "この子だけ時間軸が違う", "踊りながら歌えるの普通に無理",
-    "ステージが似合いすぎる", "生まれながらのパフォーマー",
-    "これを無料で見ていいの", "息の合い方が人間じゃない",
-    "指先まで気が抜けてない", "音楽と体が一体化してる",
-    "表情管理が完璧すぎる", "キレとしなやかさが共存してる",
-    "この子のパート毎回鳥肌", "感情の乗せ方が違う",
-    "技術より先に感情が来る", "見てる側が疲れる密度",
-    "アドリブっぽいのに完璧", "楽しそうに踊るのが一番強い",
-    "本当にうまい", "次元が違う", "かっこよすぎる",
-]
-
-EXPRESSIONS_REACTION = [
-    "声出た", "二度見した", "スクロール止まった", "これ知らなかった人かわいそう",
-    "タイムラインに感謝", "見て後悔しないやつ", "レベルが違う",
-    "見終わった後に放心した", "しばらく他のこと考えられない",
-    "これ見た後の現実がつらい", "沼に落ちる音がした",
-    "好きになる瞬間ってこういうことか", "また好きが更新された",
-    "語彙力が死んだ", "言葉が追いつかない",
-    "画面前で固まった", "気づいたら3回見てた",
-    "これ布教していいですか", "周りに布教したくなる",
-    "一人で抱えるには重い", "好きすぎて語彙力が消えた",
-    "見終わった瞬間また見たくなった", "これが無料でいいの本当に",
-    "何も言えなくて夏", "感想が出てこないタイプのやつ",
-    "ロスになる前に覚悟してください", "これが沼の入り口です",
-    "完成度が高すぎる", "クオリティがすごい",
-]
-
-EXPRESSIONS_MONOLOGUE = [
-    "なんで知らなかったんだろ", "もっと早く教えてほしかった",
-    "布教していい？", "これ好きな人と話したい",
-    "一人で抱えるには重い", "誰かに言いたかっただけ", "見てよかった",
-]
-
-EXPRESSIONS_QUIRKY = [
-    "何も言えなくて夏", "もう優勝でいいよ", "殿堂入りってこういうこと",
-    "好きって言っていいですか", "待って心の準備ができてない",
-    "これ現実？夢？", "審査員全員10点出してください",
-]
-
-# スタイルごとのトーン
-_STYLE_PROMPTS: dict = {
-    "つぶやき型": {
-        "tone": "感情をぶつける・驚き・発見を1〜2行に凝縮。問いかけは不要。勢いとテンションが伝わる短さで。",
-    },
-    "情報型": {
-        "tone": "有益な発見・驚きのファクトを1〜2行で届ける。グループ名・曲名など固有名詞は正確に。",
-    },
-    "体験談型": {
-        "tone": "感情を最初にぶつけて、グループ名・曲名・イベント名と感情表現だけで1〜2行まとめる。",
-    },
-    "バズり型": {
-        "tone": "強烈なフックで引き込む。興奮と勢いを凝縮。熱量MAX。大げさなくらいでOK。",
-    },
-}
-
-
-def _get_time_style_hint() -> str:
-    """現在のJST時刻に応じた投稿スタイルヒントを返す。"""
-    JST = timezone(timedelta(hours=9))
-    h = datetime.now(JST).hour
-    if 6 <= h <= 9:
-        return "【朝の投稿（6〜9時）】学び系・今日から使える情報として届ける。「知ってた？」「今日のKPOP情報」トーンで。"
-    if 11 <= h <= 13:
-        return "【昼の投稿（11〜13時）】共感系・あるある・短め。サクッと読めてニヤッとできる感じで。"
-    if 20 <= h <= 23:
-        return "【夜の投稿（20〜23時）】感情系・ストーリー・深い共感。「泣けるんだけど」「ちょっと聞いて」系のトーンで。"
-    return ""
-
-
-
-# ハッシュタグ生成用KPOPグループリスト（長いグループ名を先に並べて誤検出防止）
-_KPOP_GROUPS = [
-    "KISS OF LIFE", "Girls Generation", "LE SSERAFIM", "BABYMONSTER",
-    "Red Velvet", "MAMAMOO", "BLACKPINK", "NewJeans", "TWICE", "fromis_9",
-    "tripleS", "NMIXX", "Kep1er", "KiiiKiii", "MEOVV", "STAYC", "ARTMS",
-    "Billlie", "aespa", "ITZY", "ILLIT", "WJSN", "IZNA", "UNIS", "KARA",
-    "Apink", "NiziU", "IVE",
-]
-
-
-def _domain(url: str) -> str:
-    host = urlparse(url).netloc
-    return host.removeprefix("www.")
-
-
-def _get_api_key(app) -> str:
-    with app.app_context():
-        key = Setting.get("anthropic_api_key", "")
-    return key or os.getenv("ANTHROPIC_API_KEY", "")
-
-
-def _ai_summary_enabled(app) -> bool:
-    """Trueならこれまで通りClaudeで生成、Falseならタイトルをそのまま投稿文として使う。"""
-    with app.app_context():
-        val = Setting.get(AI_SUMMARY_SETTING_KEY, "true")
-    return str(val).lower() != "false"
-
-
-def _title_only_summary(title: str, body_max: int) -> str:
-    """AI無効時: タイトルをそのまま投稿文にする（上限超過時は末尾を切り詰める）。"""
-    title = (title or "").strip()
-    if len(title) <= body_max:
-        return title
-    return title[: body_max - 1] + "…"
+BODY_MAX_VIDEO = 50   # 動画投稿の文字数上限
 
 
 def _get_next_hook(app, account_id: int) -> str | None:
@@ -188,16 +27,6 @@ def _get_next_hook(app, account_id: int) -> str | None:
         hook.last_used_at = datetime.utcnow()
         db.session.commit()
         return hook.phrase
-
-
-def _attach_hook(hook: str | None, body: str, body_max: int) -> str:
-    """フックを本文の先頭に連結する。上限超過時は安全側で切り詰める。"""
-    if not hook:
-        return body
-    combined = hook + body
-    if len(combined) > body_max:
-        combined = combined[:body_max - 1] + "…"
-    return combined
 
 
 # 動画タイトルの曲名抽出用: KPOPのMVタイトルは曲名を引用符で囲む慣習が強いため、
@@ -336,183 +165,6 @@ def _build_video_post_text(
     return combined[:body_max - 1] + "…" if len(combined) > body_max else combined
 
 
-def _detect_group_name(feed_source: str, title: str) -> str:
-    """feed_sourceまたはtitleからKPOPグループ名を検出して返す。"""
-    text = (feed_source + " " + title)
-    text_lower = text.lower()
-    for group in _KPOP_GROUPS:
-        if group.lower() in text_lower:
-            return group
-    return ""
-
-
-def _build_hashtags(group_name: str, is_youtube: bool = False) -> str:
-    """グループ名・KPOP・韓国音楽タグを組み合わせたハッシュタグ文字列を生成する（3〜5個）。"""
-    tags = []
-    if group_name:
-        # スペースとハイフンを除去してハッシュタグ化（fromis_9 はアンダースコア保持）
-        tag = "#" + re.sub(r'[\s\-]', '', group_name)
-        tags.append(tag)
-    tags.append("#KPOP")
-    tags.append("#韓国音楽")
-    tags.append("#女性アイドル")          # グループ不明でも最低3タグ保証
-    if is_youtube:
-        tags.append("#KpopMV")
-    return " ".join(tags)
-
-
-def _fetch_article_page(url: str) -> tuple:
-    """
-    元記事URLからHTMLを取得し (text, image_urls, success) を返す。
-    text: 本文テキスト（最大8000文字）
-    image_urls: 記事の画像URL一覧（最大4件）
-    success: 取得成功フラグ
-    """
-    try:
-        r = requests.get(
-            url,
-            headers={
-                "User-Agent": _FETCH_UA,
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
-            },
-            timeout=15,
-        )
-        if r.status_code != 200:
-            logger.warning("元記事 HTTP %d: %s", r.status_code, url)
-            return "", [], False
-
-        html = r.text
-
-        # ── 画像URL抽出 ────────────────────────────────────────────
-        images = _extract_images_from_html(html)
-
-        # ── テキスト抽出 ───────────────────────────────────────────
-        # スクリプト・スタイルを事前除去
-        html_clean = re.sub(r"<(script|style)[^>]*>[\s\S]*?</\1>", " ", html, flags=re.IGNORECASE)
-
-        for tag in ("article", "main", "body"):
-            m = re.search(rf"<{tag}[^>]*>([\s\S]*?)</{tag}>", html_clean, re.IGNORECASE)
-            if m:
-                block = m.group(1)
-                break
-        else:
-            block = html_clean
-
-        text = re.sub(r"<[^>]+>", " ", block)
-        text = re.sub(r"\s+", " ", text).strip()
-
-        if len(text) < 100:
-            return "", images, False
-
-        logger.info("元記事取得成功 (%d chars, %d images): %s", len(text), len(images), url)
-        return text[:8000], images, True
-
-    except Exception as exc:
-        logger.warning("元記事取得失敗: %s — %s", url, exc)
-        return "", [], False
-
-
-# 画像除外ドメイン（Googleデフォルト画像・プロフィール写真など）
-_EXCLUDE_IMAGE_DOMAINS = (
-    "gstatic.com",
-    "news.google.com",
-    "googleusercontent.com",
-    "lh3.google.com",
-)
-# URLに含まれるサイズヒントから64px以下の小画像を検出するパターン
-_SMALL_SIZE_HINTS = (
-    "=s16", "=s24", "=s32", "=s48", "=s64",
-    "/s16/", "/s24/", "/s32/", "/s48/", "/s64/",
-    "/s16-", "/s24-", "/s32-", "/s48-", "/s64-",
-    "16x16", "24x24", "32x32", "48x48", "64x64",
-)
-
-
-def _is_valid_image_url(url: str) -> bool:
-    """保存・投稿に使用可能な画像URLか判定する（threads_api._is_valid_image_url と同一基準）。"""
-    if not url or not url.startswith("http"):
-        return False
-    if any(d in url for d in _EXCLUDE_IMAGE_DOMAINS):
-        return False
-    low = url.lower()
-    if any(h in low for h in _SMALL_SIZE_HINTS):
-        return False
-    return True
-
-
-def _extract_images_from_html(html: str) -> list:
-    """HTMLからog:imageと記事本文内の画像URLを最大4件抽出する。
-    Googleデフォルト画像・64px以下の小画像は除外する。"""
-    images = []
-
-    # og:image（最優先：記事のメイン画像）
-    og_match = re.search(
-        r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']'
-        r'|<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-        html, re.IGNORECASE,
-    )
-    if og_match:
-        og_url = og_match.group(1) or og_match.group(2) or ""
-        if _is_valid_image_url(og_url):
-            images.append(og_url)
-        elif og_url:
-            logger.debug("og:image 除外: %s", og_url)
-
-    # article/main ブロック内の <img src>
-    for section_tag in ("article", "main"):
-        m = re.search(rf"<{section_tag}[^>]*>([\s\S]*?)</{section_tag}>", html, re.IGNORECASE)
-        if m:
-            block = m.group(1)
-            for img_url in re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', block, re.IGNORECASE):
-                if not _is_valid_image_url(img_url) or img_url in images:
-                    continue
-                low = img_url.lower()
-                # SVG・1px追跡画像・アイコン系を除外
-                if any(x in low for x in (".svg", "1x1", "pixel", "tracking", "avatar", "icon", "logo")):
-                    continue
-                images.append(img_url)
-                if len(images) >= 4:
-                    break
-            break
-
-    return images[:4]
-
-
-def _is_ranking_article(title: str) -> bool:
-    t = title.lower()
-    return any(kw in t for kw in _RANKING_TITLE_KEYWORDS)
-
-
-def _extract_rankings(text: str) -> list:
-    """元記事テキストから (rank, name, group) のリストを抽出して rank 順に返す。"""
-    for pattern in _RANK_PATTERNS:
-        matches = pattern.findall(text)
-        if len(matches) < 3:
-            continue
-        seen, results = set(), []
-        for m in matches:
-            try:
-                rank = int(m[0])
-            except ValueError:
-                continue
-            if rank in seen or not (1 <= rank <= 100):
-                continue
-            seen.add(rank)
-            results.append((rank, m[1].strip(), m[2].strip()))
-        if len(results) >= 3 and min(r for r, _, _ in results) <= 3:
-            results.sort(key=lambda x: x[0])
-            return results
-    return []
-
-
-_JA_FEED_SOURCES = frozenset(["kstyle", "barks", "daebak"])
-
-
-def _is_japanese_source(feed_source: str) -> bool:
-    return any(s in (feed_source or "").lower() for s in _JA_FEED_SOURCES)
-
-
 def _save_error(app, article_id: int, message: str) -> None:
     """エラーメッセージをDBに保存するヘルパー。"""
     with app.app_context():
@@ -526,7 +178,10 @@ def summarize_article(
     app, article_id: int, style: str = "つぶやき型", scheduled_at: str | None = None,
     preview_group_name: str | None = None, preview_member_name: str | None = None,
 ) -> bool:
-    """1 記事の日本語投稿テキストを生成して DB に保存する。成功なら True。
+    """動画投稿の投稿文を「グループ名→メンバー名→曲名→フック」で組み立てて DB に保存する。成功なら True。
+
+    動画以外(ニュース記事など)のAI要約・投稿文生成は廃止したため、動画以外の記事に対してはエラー
+    メッセージを保存して False を返す(投稿文は手入力する)。scheduled_at は互換のために残している(未使用)。
 
     preview_group_name/preview_member_name: 承認前プレビュー用の一時的なタグ指定
     (Noneでなければ、article.group_id/member_idの代わりにこちらを使って動画投稿文を
@@ -534,82 +189,18 @@ def summarize_article(
     プレビュー専用)。
     """
     logger.info(
-        "[summarize_article] article=%d style=%r scheduled_at=%r preview_group=%r preview_member=%r",
-        article_id, style, scheduled_at, preview_group_name, preview_member_name,
-    )
-    style_conf = _STYLE_PROMPTS.get(style, _STYLE_PROMPTS["つぶやき型"])
-    style_tone = style_conf["tone"]
-    time_hint  = _get_time_style_hint()
-
-    # ── 今回使う表現をランダムに選択 ────────────────────────────────────────
-    picked_monologue   = random.choice(EXPRESSIONS_MONOLOGUE)
-    picked_visual      = random.choice(EXPRESSIONS_VISUAL)
-    picked_performance = random.choice(EXPRESSIONS_PERFORMANCE)
-    picked_reaction    = random.choice(EXPRESSIONS_REACTION)
-    picked_quirky      = random.choice(EXPRESSIONS_QUIRKY)
-    EXPRESSION_PICK_SECTION = (
-        f"━━ 今回必ず使う表現 ━━\n"
-        f"以下からいずれか1〜2つを本文に自然に組み込むこと：\n"
-        f"・{picked_monologue}（独り言系・最優先）\n"
-        f"・{picked_visual}（ビジュアル系）\n"
-        f"・{picked_performance}（パフォーマンス系）\n"
-        f"・{picked_reaction}（感情・反応系）\n"
-        f"・{picked_quirky}（ちょっとズレた系）\n"
-        f"【必須】上記の「今回必ず使う表現」を本文に自然に組み込むこと"
-    )
-    logger.info(
-        "[summarize_article] 今回の表現: 独り言=%r 視覚=%r パフォーマンス=%r 反応=%r ズレ=%r",
-        picked_monologue, picked_visual, picked_performance, picked_reaction, picked_quirky,
+        "[summarize_article] article=%d style=%r preview_group=%r preview_member=%r",
+        article_id, style, preview_group_name, preview_member_name,
     )
 
-    # ── buzz_posts から AI 分析済みの tips を最大5件取得 ──────────────────
-    with app.app_context():
-        learned_hints = Setting.get("learned_style_hints", "")
-        buzz_tips: list[str] = []
-        try:
-            buzz_rows = (
-                BuzzPost.query
-                .filter(BuzzPost.analysis.isnot(None))
-                .order_by(BuzzPost.created_at.desc())
-                .limit(5)
-                .all()
-            )
-            for row in buzz_rows:
-                try:
-                    parsed = json.loads(row.analysis)
-                    tip = parsed.get("tips", "")
-                    if tip:
-                        buzz_tips.append(f"・{tip}")
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    buzz_section = ""
-    if buzz_tips:
-        buzz_section += "\n━━ バズり投稿から学んだコツ（参考にすること） ━━\n" + "\n".join(buzz_tips)
-    if learned_hints:
-        buzz_section += f"\n━━ 学習済みインサイト ━━\n{learned_hints}"
-
-    # ── 記事情報取得 ───────────────────────────────────────────────────────
     with app.app_context():
         article = db.session.get(Article, article_id)
         if not article:
             logger.error("article id=%d が見つかりません", article_id)
             return False
         title         = article.title
-        stored_body   = (article.raw_content or "")[:3000]
-        url           = article.url
-        feed_source   = article.feed_source or ""
-        thumbnail_url = article.thumbnail_url or ""
-        is_ja_src     = _is_japanese_source(feed_source)
         content_type  = article.content_type or "article"
         article_account_id = article.account_id
-        content_topic = ""
-        if article.account_id:
-            acc = db.session.get(ThreadsAccount, article.account_id)
-            if acc and acc.content_topic:
-                content_topic = acc.content_topic.strip()
         tagged_group_name  = ""
         tagged_member_name = ""
         if preview_group_name is not None:
@@ -636,422 +227,33 @@ def summarize_article(
                         "メンバー名なしで組み立てます。", article_id, article.member_id,
                     )
 
-    is_video_post = (content_type == "video")
-    body_max = BODY_MAX_VIDEO if is_video_post else BODY_MAX_ARTICLE
+    if content_type != "video":
+        msg = "ニュース記事のAI要約は廃止されました。投稿文は手入力してください（動画投稿のみ自動で組み立てます）。"
+        logger.info("[summarize_article] article=%d content_type=%s は自動生成の対象外", article_id, content_type)
+        _save_error(app, article_id, msg)
+        return False
+
+    body_max = BODY_MAX_VIDEO
     hook = _get_next_hook(app, article_account_id) if article_account_id else None
 
-    # ── 動画投稿: AIを使わず「グループ名→メンバー名→曲名→フック」で決定的に組み立てる ──
+    # 動画投稿: AIを使わず「グループ名→メンバー名→曲名→フック」で決定的に組み立てる
     # (承認モーダルでタグ付けされたgroup_id/member_idと、タイトルから抽出した曲名を使う。
     # タグ付けされていない・抽出できない要素はスキップし、残りの要素だけで組み立てる)
-    if is_video_post:
-        song_title = _extract_song_title(title, tagged_group_name)
-        post_text = _build_video_post_text(tagged_group_name, tagged_member_name, song_title, hook, body_max)
-        with app.app_context():
-            art = db.session.get(Article, article_id)
-            if art:
-                art.summary       = post_text
-                art.post_style    = style
-                art.error_message = None
-                # 自動組み立てで上書きするため、手動編集フラグは解除する
-                # (このパス自体はapprove_article側でsummary_is_manual=Trueなら呼ばれない)。
-                art.summary_is_manual = False
-                db.session.commit()
-        logger.info(
-            "動画投稿テキストを組み立て: article=%d group=%r member=%r song=%r hook=%r (%d文字)",
-            article_id, tagged_group_name or None, tagged_member_name or None,
-            song_title or None, hook, len(post_text),
-        )
-        return True
-
-    # ── AI生成フラグ確認（無効ならタイトルそのままで即保存して終了） ──────────
-    if not _ai_summary_enabled(app):
-        post_text = _attach_hook(hook, _title_only_summary(title, body_max), body_max)
-        with app.app_context():
-            art = db.session.get(Article, article_id)
-            if art:
-                art.summary       = post_text
-                art.post_style    = style
-                art.error_message = None
-                art.summary_is_manual = False
-                db.session.commit()
-        logger.info(
-            "AI生成スキップ（固定テンプレート）: article=%d video=%s (%d文字)",
-            article_id, is_video_post, len(post_text),
-        )
-        return True
-
-    # ── APIキー確認 ────────────────────────────────────────────────────────
-    api_key = _get_api_key(app)
+    song_title = _extract_song_title(title, tagged_group_name)
+    post_text = _build_video_post_text(tagged_group_name, tagged_member_name, song_title, hook, body_max)
     with app.app_context():
-        db_key  = Setting.get("anthropic_api_key", "")
-    env_key = os.getenv("ANTHROPIC_API_KEY", "")
+        art = db.session.get(Article, article_id)
+        if art:
+            art.summary       = post_text
+            art.post_style    = style
+            art.error_message = None
+            # 自動組み立てで上書きするため、手動編集フラグは解除する
+            # (このパス自体はapprove_article側でsummary_is_manual=Trueなら呼ばれない)。
+            art.summary_is_manual = False
+            db.session.commit()
     logger.info(
-        "Anthropic APIキー確認 — DB: %s / ENV: %s",
-        f'"{db_key[:12]}..." ({len(db_key)}文字)' if db_key else "未設定",
-        f'"{env_key[:12]}..." ({len(env_key)}文字)' if env_key else "未設定",
+        "動画投稿テキストを組み立て: article=%d group=%r member=%r song=%r hook=%r (%d文字)",
+        article_id, tagged_group_name or None, tagged_member_name or None,
+        song_title or None, hook, len(post_text),
     )
-    if not api_key:
-        msg = "Anthropic APIキーが未設定です。管理画面 → 設定 → Anthropic API キーを登録してください。"
-        logger.error(msg)
-        _save_error(app, article_id, msg)
-        return False
-    if api_key.endswith("...") or api_key in ("sk-ant-...", "your-api-key-here"):
-        msg = f"Anthropic APIキーがプレースホルダーのままです ({api_key!r})。管理画面 → 設定 → Anthropic API キーに本物のキーを入力してください。"
-        logger.error(msg)
-        _save_error(app, article_id, msg)
-        return False
-
-    # ── コンテンツ取得 ─────────────────────────────────────────────────────
-    is_youtube = "youtube.com/watch" in url or "youtu.be/" in url or "youtube.com/shorts/" in url
-
-    if is_youtube:
-        article_body   = stored_body
-        article_images = [thumbnail_url] if thumbnail_url else []
-        fetch_ok       = True
-    else:
-        fresh_body, article_images, fetch_ok = _fetch_article_page(url)
-        article_body = fresh_body if fetch_ok else stored_body
-
-    # ── 非KPOPアカウント（content_topic設定済み）: 汎用シンプル生成パス ──────
-    if content_topic:
-        try:
-            client = anthropic.Anthropic(api_key=api_key)
-            generic_prompt = (
-                f"あなたは{content_topic}が好きな人です。"
-                "以下の記事を読んで、友達にLINEで一言伝えるような自然な口語体で"
-                f"感想を書いてください。{body_max}文字以内。\n"
-                "絵文字なし・ハッシュタグなし・URLなし。「〜です」「〜ます」ではなく口語体で。\n"
-                "伝聞表現（〜とのこと、〜と報じられている）は使わない。\n"
-                "出力は投稿文のみ（前置き・説明不要）。\n\n"
-                f"【記事タイトル】{title}\n【本文】{article_body[:2000]}"
-            )
-            msg = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=200,
-                messages=[{"role": "user", "content": generic_prompt}],
-            )
-            post_text = _attach_hook(hook, msg.content[0].text.strip(), body_max)
-        except Exception as exc:
-            logger.error("Generic summarize error for article %d: %s", article_id, exc, exc_info=True)
-            _save_error(app, article_id, f"{type(exc).__name__}: {exc}")
-            return False
-
-        with app.app_context():
-            art = db.session.get(Article, article_id)
-            if art:
-                art.summary       = post_text
-                art.post_style    = style
-                art.error_message = None
-                art.summary_is_manual = False
-                if article_images:
-                    art.image_urls = json.dumps(article_images, ensure_ascii=False)
-                db.session.commit()
-        logger.info(
-            "Summarized(generic) article %d topic=%s (%d文字, %d images)",
-            article_id, content_topic, len(post_text), len(article_images),
-        )
-        return True
-
-    # ── グループ名検出 ─────────────────────────────────────────────────────
-    group_name = _detect_group_name(feed_source, title)
-    group_hint = f"・「{group_name}」の名前を自然に含めること" if group_name else ""
-
-    # ── 共通ブロック ───────────────────────────────────────────────────────
-    STRUCTURE_SECTION = (
-        "━━ 投稿構造 ━━\n"
-        "1行目：フックで引き込む\n"
-        "↓本文：グループ名・キーワードを自然に含める\n"
-        "↓末尾（必須）：「みんなはどう思う？」「一緒にハマってる人いない？」「推しは誰？」などコメントを誘発する問いかけで締める"
-    )
-
-    COMMON_RULES = (
-        f"━━ 絶対ルール ━━\n"
-        f"・{body_max}文字以内（厳守）\n"
-        f"・絵文字なし\n"
-        f"・ハッシュタグなし\n"
-        f"・URLなし\n"
-        f"・「〜です」「〜ます」禁止。自然な口語体で\n"
-        f"・伝聞表現禁止：「〜とのこと」「〜と報じられている」「記事によると」など一切不可\n"
-        f"・説明的書き出し禁止：「〜なんだけど」「〜してたんだけど」「ちょっと聞いて」など\n"
-        f"・具体的な描写禁止（ダンス・歌声・衣装など直接確認できないもの）\n"
-        f"{group_hint}\n"
-        f"━━ 固有名詞ルール（必須） ━━\n"
-        f"・必ずグループ名またはメンバー名を1つ以上含めること\n"
-        f"・記事タイトルや内容から固有名詞を抽出して使う\n"
-        f"・固有名詞なしの投稿文は生成しないこと\n"
-        f"良い例：「待って、aespaのWINTERって次元が違う。」\n"
-        f"悪い例：「待って、この子って次元が違う。」（固有名詞なし）\n"
-        f"固有名詞チェック：生成後にグループ名・曲名が含まれているか必ず確認すること。含まれていない場合は書き直す。\n"
-        f"・出力は投稿文のみ（前置き・説明・スタイル名不要）\n\n"
-        f"━━ 締めの問いかけルール（必須） ━━\n"
-        f"・投稿文の最後は必ずコメントを誘発する質問・問いかけで締めること\n"
-        f"・例：「みんなはどう思う？」「一緒にハマってる人いない？」「推しは誰？」など\n"
-        f"・問いかけがない投稿文は生成しないこと（Threadsアルゴリズムはリプライ数を重視するため必須）\n\n"
-        f"━━ 投稿文の手本 ━━\n"
-        f"「好きにならない方が無理じゃない？BABYMONSTERのSUGAR HONEY ICE TEAマジやばい。曲も映像も完璧だし、何回見ても沼にハマる。一緒にハマってる人いない？」\n"
-        f"→ グループ名・曲名・感情・問いかけがすべて入っている。この密度と、末尾の問いかけを目指すこと。\n\n"
-        f"━━ 言語ルール ━━\n"
-        f"・投稿文は必ず日本語のみで書くこと\n"
-        f"・韓国語・英語は使わない\n"
-        f"・グループ名・メンバー名はアルファベット表記でOK（例：aespa、WINTER）\n"
-        f"・曲名もアルファベット表記でOK（例：LEMONADE、WDA）\n"
-        f"・それ以外の本文は全て日本語で書くこと\n\n"
-        f"━━ 絶対ルール（ポジティブ表現のみ） ━━\n"
-        f"ネガティブな言葉・誤解を生む言葉は褒め言葉でも絶対に使わない。\n"
-        f"字面通り受け取られても問題ない、明確にポジティブな表現だけを使う。\n\n"
-        f"━━ 使用禁止ワード ━━\n"
-        f"・「興奮」「止まらん」「頭おかしい」「事件」「事故」「心臓に悪い」「狂ってる」「これガチなんですけど」「絶対バズる」→ 誤解・釣りに見えるため絶対使わない\n"
-        f"・「〜やで」「〜やわ」「〜やん」→ 関西弁は使わない\n"
-        f"・「マジで」を連発しない（1投稿に1回まで）\n"
-        f"・「〜してる。止まらん。」のような語尾の繰り返しパターン禁止\n\n"
-        f"━━ 使える表現集（積極的に活用すること） ━━\n"
-        f"以下の表現を記事の内容に合わせて積極的かつランダムに使うこと。\n"
-        f"毎回同じ表現を繰り返さず、毎回違う表現を選ぶこと。\n"
-        f"前の投稿と違うカテゴリの表現を選ぶこと。\n"
-        f"特に「独り言系」は人間っぽさが出るので積極的に使うこと。\n"
-        f"中でも「誰かに言いたかっただけ」「布教していい？」は優先的に採用すること。\n\n"
-        f"■ ビジュアル・外見\n"
-        f"顔が反則すぎる／目が離せない／画面から出てきそう／"
-        f"空気が変わる／オーラが次元違う／見るたびに新鮮／"
-        f"こんな顔していていいの／存在が芸術／光ってる／"
-        f"カメラが好きすぎる／角度全部勝ち／現実にいる人じゃない／"
-        f"スクリーンが狭い／顔面偏差値がバグってる／この世に存在していいの／"
-        f"重力に逆らってる／余白がない／完成されすぎてて怖い／"
-        f"この子だけ解像度が違う／見るたびに発見がある／"
-        f"引きでも寄りでも勝ち／表情の作り方が天才／"
-        f"何着ても着こなす／髪型変えるたびに正解／"
-        f"笑顔が武器すぎる／目力で全部持っていく／美しい／素敵すぎる\n\n"
-        f"■ パフォーマンス・実力\n"
-        f"この完成度どうなってるの／練習量が見える／ライブでこれは無理／"
-        f"鳥肌が止まらない／どこで覚えたんこの表現力／全員主役／"
-        f"センターの引力がやばい／視線が釘付けになる／"
-        f"この子だけ時間軸が違う／踊りながら歌えるの普通に無理／"
-        f"ステージが似合いすぎる／生まれながらのパフォーマー／"
-        f"これを無料で見ていいの／息の合い方が人間じゃない／"
-        f"指先まで気が抜けてない／音楽と体が一体化してる／"
-        f"表情管理が完璧すぎる／キレとしなやかさが共存してる／"
-        f"この子のパート毎回鳥肌／感情の乗せ方が違う／"
-        f"技術より先に感情が来る／見てる側が疲れる密度／"
-        f"アドリブっぽいのに完璧／楽しそうに踊るのが一番強い／本当にうまい／次元が違う／かっこよすぎる\n\n"
-        f"■ 楽曲・MV\n"
-        f"サビで毎回やられる／イントロから引き込まれる／リピートが止まらない／"
-        f"世界観が完璧すぎる／この曲に出会えてよかった／また名曲生まれた／"
-        f"何回聴いても飽きない／歌詞が刺さりすぎる／MVの世界観に入り込んだ／"
-        f"一曲でこんなに感情動かされるの／このメロディー反則／耳から離れない／"
-        f"リリースのたびに超えてくる／これが最高傑作は毎回更新される／"
-        f"曲の世界観に完全に入り込んでる／映像と音楽が喧嘩してない／"
-        f"色使いのセンスが突き抜けてる／カット割りのセンスが好き／"
-        f"衣装がMVの一部になってる／背景まで全部計算されてる／"
-        f"この曲調でこのダンスは反則／タイトルと中身が完璧にリンクしてる／"
-        f"尺が短くて逆に惜しい／フルで聴いたら印象変わった\n\n"
-        f"■ 感情・反応\n"
-        f"声出た／二度見した／スクロール止まった／これ知らなかった人かわいそう／"
-        f"タイムラインに感謝／見て後悔しないやつ／レベルが違う／完成度が高すぎる／"
-        f"見終わった後に放心した／しばらく他のこと考えられない／"
-        f"これ見た後の現実がつらい／沼に落ちる音がした／"
-        f"好きになる瞬間ってこういうことか／また好きが更新された／"
-        f"語彙力が死んだ／言葉が追いつかない／"
-        f"画面前で固まった／気づいたら3回見てた／"
-        f"これ布教していいですか／周りに布教したくなる／"
-        f"一人で抱えるには重い／好きすぎて語彙力が消えた／"
-        f"見終わった瞬間また見たくなった／これが無料でいいの本当に／"
-        f"何も言えなくて夏／感想が出てこないタイプのやつ／"
-        f"ロスになる前に覚悟してください／これが沼の入り口です\n\n"
-        f"■ グループ・メンバーへの愛\n"
-        f"このグループ本当に外れない／誰がセンターでも成立する／"
-        f"こんなグループいていいの／末永く応援したい／"
-        f"デビューから目が離せない／これからどこまで行くんだろ／"
-        f"まだ本気出してないでしょ／ポテンシャルが怖い／"
-        f"ファンになってよかった／推してて誇らしい／"
-        f"こんなに安定して好きでいられるグループ珍しい／"
-        f"新曲出るたびに信頼が増す／期待を裏切らないのが一番すごい／"
-        f"この子の良さに気づくのに時間かかった人ほど沼深い／"
-        f"ファン歴関係なく刺さる／古参も新規も関係ない強さ／"
-        f"応援してる自分を褒めたくなる／ずっと好きでいたい\n\n"
-        f"■ 驚き・衝撃系\n"
-        f"え、待って／ちょっとちょっと／うそでしょ／"
-        f"反則すぎる／こんなのあり？／なんなんこれ／どういうこと\n\n"
-        f"■ 感動・共感系\n"
-        f"わかってしまう／刺さりすぎた／心に来た／"
-        f"ずっと見てられる／何回でも見れる／これが好きなんだよな／たまらん\n\n"
-        f"■ 独り言系（最優先で使うこと）\n"
-        f"なんで知らなかったんだろ／もっと早く教えてほしかった／"
-        f"布教していい？／これ好きな人と話したい／"
-        f"一人で抱えるには重い／誰かに言いたかっただけ／見てよかった\n\n"
-        f"■ ちょっとズレた表現（たまに使う）\n"
-        f"何も言えなくて夏／もう優勝でいいよ／殿堂入りってこういうこと／"
-        f"好きって言っていいですか／待って心の準備ができてない／"
-        f"これ現実？夢？／審査員全員10点出してください\n\n"
-        f"━━ フック後の展開（必須） ━━\n"
-        f"・フックの後は必ず具体的な内容（グループ名・曲名・出来事など）を続けること\n"
-        f"・悪い例：「待って、これやばい。最高。」→ フックだけで終わっている\n"
-        f"・良い例：「待って、これやばい。aespaの新曲、何回聴いても飽きない。」\n\n"
-        f"━━ 表現バリエーション（必須） ━━\n"
-        f"・「〜すぎる」「〜に震えた」「〜が可愛すぎる」などの決まり文句を毎回使わない\n"
-        f"・毎回違う言葉・角度・切り口で表現すること\n\n"
-        f"━━ あいまいな感情語（単独使用禁止） ━━\n"
-        f"以下の言葉だけで文章を終わらせない：\n"
-        f"「やばい」「すごい」「最高」「可愛すぎる」「震えた」\n"
-        f"使う場合は必ず「何が」「どのように」かを具体的に続けること。\n"
-        f"・悪い例：「待って、やばい。」→（何がどうやばいか不明）\n"
-        f"・良い例：「待って、aespaの振り付けってどこ切り取っても絵になる。こんなグループいる？」"
-    )
-
-    time_section = f"\n━━ 時間帯スタイル ━━\n{time_hint}" if time_hint else ""
-
-    # ── ランキング記事判定・抽出 ───────────────────────────────────────────
-    extracted_rankings: list = []
-    if _is_ranking_article(title):
-        extracted_rankings = _extract_rankings(article_body)
-        if extracted_rankings:
-            logger.info("ランキング抽出成功: %d件", len(extracted_rankings))
-        else:
-            logger.info("ランキング抽出失敗: 通常プロンプトで処理")
-
-    # ── Step1 プロンプト組み立て ───────────────────────────────────────────
-    PERSONA = (
-        "あなたは25歳の日本人女性。KPOPオタク歴8年。"
-        "推しはaespa。普段からThreadsでKPOP情報を発信している。"
-        "友達にLINEで送るような感覚で書く。"
-        "テンションは高すぎず・低すぎず。"
-        "語尾は「〜だわ」「〜やん」などの関西弁は使わない。"
-        "説明しすぎない。感じたことをそのまま書く。"
-    )
-
-    if is_youtube:
-        step1_prompt = (
-            f"{PERSONA}\n"
-            f"動画の存在を知って「やばい」と思っている自分として書く。内容を詳しく説明せず、グループ名・動画タイトルと感情表現だけで伝える。\n\n"
-            f"【動画情報】\nタイトル: {title}\n{article_body[:1000]}\n\n"
-            f"{STRUCTURE_SECTION}\n\n"
-            f"━━ スタイル: {style} ━━\n{style_tone}"
-            f"{time_section}\n"
-            f"{buzz_section}\n\n"
-            f"{EXPRESSION_PICK_SECTION}\n\n"
-            f"{COMMON_RULES}"
-        )
-
-    elif extracted_rankings:
-        top10 = extracted_rankings[:10]
-        has_more = len(extracted_rankings) > 10
-        ranking_lines = "\n".join(
-            f"{rank}位 {name}（{group}）" for rank, name, group in top10
-        )
-        more_note = "\n他は元記事へ" if has_more else ""
-        step1_prompt = (
-            f"{PERSONA}\n"
-            f"このランキングを自分が直接見つけた情報として書く。「〜と発表された」など伝聞表現は一切不可。\n\n"
-            f"━━ 出力フォーマット ━━\n"
-            f"・1行目: フックで始まる導入一言\n"
-            f"・続き: 下記ランキングデータをそのまま全行出力（省略禁止）\n"
-            f"・末尾: コメントを誘発する質問・問いかけ（例：「みんなの推しは何位？」「納得の順位だった？」）\n\n"
-            f"━━ ルール ━━\n"
-            f"・{body_max}文字以内（厳守）\n"
-            f"・絵文字なし・ハッシュタグなし・URLなし\n"
-            f"・伝聞表現禁止\n"
-            f"・投稿文は必ず日本語のみで書くこと（韓国語禁止）\n"
-            f"・グループ名・メンバー名はアルファベット表記でOK\n"
-            f"・末尾の問いかけは必須（省略しないこと）\n"
-            f"・出力は本文のみ\n\n"
-            f"{EXPRESSION_PICK_SECTION}\n\n"
-            f"━━ ランキングデータ ━━\n{ranking_lines}{more_note}"
-        )
-
-    else:
-        step1_prompt = (
-            f"{PERSONA}\n"
-            f"このニュース・出来事を自分が直接体験・発見したかのように書く。記事・情報源は存在しない。完全に一人称の意見・感情として書く。\n\n"
-            f"【情報】\nタイトル: {title}\n{article_body[:2000]}\n\n"
-            f"{STRUCTURE_SECTION}\n\n"
-            f"━━ スタイル: {style} ━━\n{style_tone}"
-            f"{time_section}\n"
-            f"{buzz_section}\n\n"
-            f"{EXPRESSION_PICK_SECTION}\n\n"
-            f"{COMMON_RULES}"
-        )
-
-    # ── Claude API 呼び出し（2段階生成） ───────────────────────────────────
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        summary_text = ""
-
-        # Step1: 初期生成
-        msg1 = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            messages=[{"role": "user", "content": step1_prompt}],
-        )
-        step1_text = msg1.content[0].text.strip()
-        logger.info("Step1生成 (%d文字): article=%d", len(step1_text), article_id)
-
-        # Step2: 人間っぽく変換（リトライ付き）
-        step2_base = (
-            "この文章を25歳の日本人女性が友達にLINEで送るメッセージに変換してください。\n"
-            "・説明文を感情に変える\n"
-            "・長い文を短く切る\n"
-            "・AIっぽい言い回しを口語に変える\n"
-            f"・絵文字なし・タグなし・URLなし。必ず{body_max}文字以内。\n"
-            "【絶対厳守】グループ名・メンバー名・曲名・動画タイトルのいずれか最低1つを必ず残すこと。固有名詞が一つもない場合は出力禁止。\n"
-            "【厳守】元の文章の末尾にある問いかけ（「？」で終わる一文）は必ず残すこと。文字数を削る場合は本文側を短くし、末尾の問いかけは削らない。\n"
-            "出力は変換後の文章のみ。\n\n"
-        )
-
-        for attempt in range(1, BODY_MAX_RETRIES + 1):
-            step2_prompt = step2_base + step1_text
-            msg2 = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=400,
-                messages=[{"role": "user", "content": step2_prompt}],
-            )
-            summary_text = msg2.content[0].text.strip()
-            if len(summary_text) <= body_max:
-                break
-            logger.warning(
-                "Step2 本文 %d文字（上限 %d）→ 再生成 %d/%d: article=%d",
-                len(summary_text), body_max, attempt, BODY_MAX_RETRIES, article_id,
-            )
-        else:
-            summary_text = summary_text[:body_max - 1] + "…"
-            logger.warning("再生成上限到達、強制切り詰め: article=%d", article_id)
-
-        # ── DB保存（ハッシュタグ・URLなし） ──────────────────────────────────
-        post_text = _attach_hook(hook, summary_text, body_max)
-
-        with app.app_context():
-            art = db.session.get(Article, article_id)
-            if art:
-                art.summary       = post_text
-                art.post_style    = style
-                art.error_message = None
-                art.summary_is_manual = False
-                if article_images:
-                    art.image_urls = json.dumps(article_images, ensure_ascii=False)
-                db.session.commit()
-
-        logger.info(
-            "Summarized article %d (%d文字, %d images, fetch=%s, group=%s)",
-            article_id, len(post_text), len(article_images), fetch_ok, group_name or "不明",
-        )
-        return True
-
-    except Exception as exc:
-        logger.error("Summarize error for article %d: %s", article_id, exc, exc_info=True)
-        _save_error(app, article_id, f"{type(exc).__name__}: {exc}")
-        return False
-
-
-def summarize_pending_articles(app) -> int:
-    """要約未生成の pending 記事をまとめて処理する。成功件数を返す。"""
-    with app.app_context():
-        ids = [
-            a.id
-            for a in Article.query.filter_by(status="pending")
-            .filter(Article.summary.is_(None))
-            .all()
-        ]
-
-    count = 0
-    for article_id in ids:
-        if summarize_article(app, article_id):
-            count += 1
-    return count
+    return True
