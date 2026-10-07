@@ -210,8 +210,34 @@ def _try_refresh_tunnel_url(app) -> tuple[bool, str]:
     return False, "cloudflaredメトリクスに到達できませんでした"
 
 
+def _abort_video_post(app, article_id: int, reason: str) -> None:
+    """動画記事の投稿を中止し、キューに残す。**動画なし(テキストのみ)では投稿しない**。
+
+    記事はstatus='queued'に戻し、理由をerror_messageに記録する。そのまま同じ枠に残すと、次の5分ごとの
+    ジョブが毎回この記事を選び続けて後ろの記事が投稿されなくなるため、スケジュールは次の空き枠
+    (キューの後ろ)へ移す。"""
+    from scheduler import next_post_slot
+
+    logger.error("[動画投稿中止] article=%d: %s", article_id, reason)
+    with app.app_context():
+        art = db.session.get(Article, article_id)
+        if not art:
+            return
+        account_id = art.account_id
+        art.status = "queued"
+        art.error_message = reason[:500]
+        db.session.commit()
+    slot = next_post_slot(app, account_id)
+    if slot:
+        with app.app_context():
+            art = db.session.get(Article, article_id)
+            if art and art.status == "queued":
+                art.scheduled_at = slot
+                db.session.commit()
+
+
 def _post_video(user_id: str, token: str, post_text: str, video_url: str, article_id: int, app) -> tuple[bool, str]:
-    """動画投稿。コンテナ作成→処理待ち→公開。失敗時はテキストにフォールバック。"""
+    """動画投稿。コンテナ作成→処理待ち→公開。失敗時は投稿を中止してキューに残す(テキストにはフォールバックしない)。"""
     res = requests.post(
         f"{THREADS_API}/{user_id}/threads",
         data={
@@ -226,13 +252,15 @@ def _post_video(user_id: str, token: str, post_text: str, video_url: str, articl
     logger.info("Container (VIDEO): HTTP %d %s", res.status_code, data)
     if res.status_code != 200:
         err = data.get("error", {}).get("message", res.text[:200])
-        logger.warning("動画コンテナ作成失敗、テキスト投稿にフォールバック: %s", err)
-        return _post_text_only(user_id, token, post_text, article_id, app)
+        msg = f"動画コンテナ作成失敗のため投稿を中止しました（キューに残しています）: {err}"
+        _abort_video_post(app, article_id, msg)
+        return False, msg
 
     container_id = data.get("id")
     if not container_id:
-        logger.warning("コンテナIDなし、テキスト投稿にフォールバック")
-        return _post_text_only(user_id, token, post_text, article_id, app)
+        msg = "動画コンテナIDを取得できないため投稿を中止しました（キューに残しています）"
+        _abort_video_post(app, article_id, msg)
+        return False, msg
 
     # 動画処理完了を最大150秒ポーリング
     logger.info("動画処理待ち: container_id=%s", container_id)
@@ -252,14 +280,14 @@ def _post_video(user_id: str, token: str, post_text: str, video_url: str, articl
             break
         if status == "ERROR":
             err_msg = st.get("error_message", "UNKNOWN")
-            logger.warning(
-                "動画処理エラー: err_msg=%r full_response=%s → テキスト投稿にフォールバック",
-                err_msg, st,
-            )
-            return _post_text_only(user_id, token, post_text, article_id, app)
+            msg = f"Threads側の動画処理エラーのため投稿を中止しました（キューに残しています）: {err_msg}"
+            logger.warning("動画処理エラー: err_msg=%r full_response=%s", err_msg, st)
+            _abort_video_post(app, article_id, msg)
+            return False, msg
     else:
-        logger.warning("動画処理タイムアウト、テキスト投稿にフォールバック")
-        return _post_text_only(user_id, token, post_text, article_id, app)
+        msg = "Threads側の動画処理がタイムアウトしたため投稿を中止しました（キューに残しています）"
+        _abort_video_post(app, article_id, msg)
+        return False, msg
 
     ok, result = _publish(user_id, token, container_id)
     if ok:
@@ -462,6 +490,16 @@ def post_to_threads(app, article_id: int, test_mode: bool = False, account_id: i
         "Threads投稿準備 article=%d content_type=%s images=%d test=%s",
         article_id, content_type, len(images), test_mode,
     )
+
+    # 動画の記事は、動画ファイルが存在しなければテキストだけで投稿せず、投稿を中止してキューに残す。
+    if content_type == "video":
+        _local_video = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "static", video_file_path or ""
+        )
+        if not video_file_path or not os.path.isfile(_local_video) or os.path.getsize(_local_video) == 0:
+            msg = f"動画ファイルが見つからないため投稿を中止しました（キューに残しています）: {video_file_path}"
+            _abort_video_post(app, article_id, msg)
+            return False, msg
 
     # ── テストモード ──────────────────────────────────────────────
     if test_mode:

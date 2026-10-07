@@ -708,9 +708,17 @@ def _buzz_requeue_candidates(app, account_id: int, limit: int | None = None) -> 
             .filter(Article.id.in_(eligible_ids))
             .order_by(Article.posted_at.asc())
         )
-        if limit is not None:
-            query = query.limit(limit)
-        return query.all()
+        # 動画ファイルが存在しない記事は再キューしない(再キューすると投稿サイクル数だけが進み、
+        # 投稿時にも動画なしで投稿できずに中止されるため)。
+        import os
+        static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+        candidates = []
+        for a in query.all():
+            if not os.path.isfile(os.path.join(static_dir, a.video_file_path)):
+                logger.warning("[buzz_requeue] id=%d は動画ファイルが無いため再キュー対象から除外: %s", a.id, a.video_file_path)
+                continue
+            candidates.append(a)
+        return candidates[:limit] if limit is not None else candidates
 
 
 def buzz_requeue_backlog_stats(app, account_id: int = _BUZZ_REQUEUE_ACCOUNT_ID) -> dict:
@@ -1098,33 +1106,19 @@ def _video_cleanup_job(app):
         if kept_grace:
             logger.info("[_video_cleanup_job] 猶予により削除を見送り: %d件", kept_grace)
 
+        from video_files import referenced_video_basenames
+        # 削除する記事自身は参照元に数えない。他の記事が使っているファイルは消さない
+        _refs = referenced_video_basenames([a.id for a, _ in targets])
         deleted_files = 0
         for article, reason in targets:
             # 成績の記録(失敗してもログを残すだけで、以降のファイル・レコード削除は続行する)。
             # 記事削除と同じトランザクションで確定する。
             record_deleted_post(article, reason)
 
-            base_name = os.path.splitext(os.path.basename(article.video_file_path))[0]
-
-            main_path = os.path.join(static_dir, article.video_file_path)
-            if os.path.exists(main_path):
-                try:
-                    os.remove(main_path)
-                    deleted_files += 1
-                except OSError:
-                    pass
-
-            if os.path.isdir(videos_dir):
-                for fname in os.listdir(videos_dir):
-                    if fname.endswith(".mp4") and (
-                        fname.startswith(base_name + "_clip_")
-                        or fname.startswith(base_name + "_original")
-                    ):
-                        try:
-                            os.remove(os.path.join(videos_dir, fname))
-                            deleted_files += 1
-                        except OSError:
-                            pass
+            from video_files import delete_article_video_files
+            deleted_files += delete_article_video_files(
+                article.video_file_path, static_dir, referenced=_refs,
+            )
 
             db.session.delete(article)
 

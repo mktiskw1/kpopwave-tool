@@ -627,35 +627,12 @@ def _is_preview_valid_image(url: str) -> bool:
     return True
 
 
-def _delete_video_files(video_file_path: str, static_dir: str) -> int:
-    """動画ファイル本体・クリップ・オリジナルを削除する。削除したファイル数を返す。"""
-    if not video_file_path:
-        return 0
-    base_name = os.path.splitext(os.path.basename(video_file_path))[0]
-    videos_dir = os.path.join(static_dir, "videos")
-    deleted = 0
-
-    main_path = os.path.join(static_dir, video_file_path)
-    if os.path.exists(main_path):
-        try:
-            os.remove(main_path)
-            deleted += 1
-        except OSError:
-            pass
-
-    if os.path.isdir(videos_dir):
-        for fname in os.listdir(videos_dir):
-            if fname.endswith(".mp4") and (
-                fname.startswith(base_name + "_clip_")
-                or fname.startswith(base_name + "_original")
-            ):
-                try:
-                    os.remove(os.path.join(videos_dir, fname))
-                    deleted += 1
-                except OSError:
-                    pass
-
-    return deleted
+def _delete_video_files(video_file_path: str, static_dir: str, exclude_article_ids=(), referenced=None) -> int:
+    """動画ファイル本体・クリップ・オリジナルを削除する。削除したファイル数を返す。
+    他の記事から参照されているファイルは削除しない(video_files.delete_article_video_files参照)。
+    exclude_article_idsには、これから削除する記事のIDを全て渡すこと。"""
+    from video_files import delete_article_video_files
+    return delete_article_video_files(video_file_path, static_dir, exclude_article_ids, referenced)
 
 
 def _build_image_list(thumbnail_url, image_urls_json, max_images=20):
@@ -838,9 +815,11 @@ def bulk_delete_articles():
     articles = Article.query.filter(Article.id.in_(int_ids)).all()
     targets = [a for a in articles if not a.is_favorite]
     skipped_favorite_count = len(articles) - len(targets)
+    from video_files import referenced_video_basenames
+    _refs = referenced_video_basenames([a.id for a in targets])
     for a in targets:
         if a.video_file_path:
-            _delete_video_files(a.video_file_path, static_dir)
+            _delete_video_files(a.video_file_path, static_dir, referenced=_refs)
     target_ids = [a.id for a in targets]
     if target_ids:
         for a in targets:
@@ -866,9 +845,11 @@ def delete_all_pending():
     articles = _account_query_scope(
         Article.query.filter_by(status="pending"), Article, account_id, legacy_id
     ).all()
+    from video_files import referenced_video_basenames
+    _refs = referenced_video_basenames([a.id for a in articles])
     for a in articles:
         if a.video_file_path:
-            _delete_video_files(a.video_file_path, static_dir)
+            _delete_video_files(a.video_file_path, static_dir, referenced=_refs)
     count = len(articles)
     Article.query.filter(Article.id.in_([a.id for a in articles])).delete(synchronize_session=False)
     db.session.commit()
@@ -1065,6 +1046,18 @@ def approve_article(id):
     from datetime import timedelta
 
     article = Article.query.get_or_404(id)
+
+    # 動画ファイルが無い動画記事をキューに入れても、投稿時に中止される(動画なしでは投稿しない)ため、
+    # 承認の時点で止める。
+    if (article.content_type or "article") == "video":
+        _vp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", article.video_file_path or "")
+        if not article.video_file_path or not os.path.isfile(_vp):
+            _msg = "動画ファイルが見つからないため、キューに追加できません。動画を取り込み直してください。"
+            if request.headers.get("X-Requested-With") == "fetch":
+                return jsonify({"ok": False, "error": _msg}), 400
+            flash(_msg, "danger")
+            return redirect(url_for("pending"))
+
     article.status = "queued"
 
     tag_data = request.get_json(silent=True) or {}
