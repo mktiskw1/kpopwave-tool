@@ -88,6 +88,9 @@ class Article(db.Model):
     # チャンネル監視(WatchedChannel)経由で取り込んだ記事の監視チャンネルID。承認待ちの絞り込みと
     # 「📡 監視」バッジ用。監視チャンネルを削除しても記事側の印は残す(参照制約なし)。
     watched_channel_id = db.Column(db.Integer, nullable=True, index=True)
+    # 「優先」を押した日時。キューの記事のうち、これが設定されたものはグループ調整より先に(押した順に)投稿される
+    # (group_balance.select_for_slot参照)。投稿・再キュー・取り消しでNULLに戻す。
+    priority_requested_at = db.Column(db.DateTime, nullable=True)
 
     def to_dict(self):
         return {
@@ -510,3 +513,14 @@ class WatchedCandidate(db.Model):
     status_changed_at = db.Column(db.DateTime, nullable=True)
     last_error = db.Column(db.Text, nullable=True)        # 直近の取り込み失敗理由(失敗時は未確認のまま残す)
     imported_article_id = db.Column(db.Integer, nullable=True)
+
+
+class GroupPlanSetting(db.Model):
+    """グループごとの手動補正(投稿頻度の倍率)とカムバック補正の期限(group_balance参照)。
+    group_id=NULLは「グループなし」。"""
+    __tablename__ = "group_plan_setting"
+
+    id = db.Column(db.Integer, primary_key=True)
+    group_id = db.Column(db.Integer, nullable=True, unique=True)
+    manual_factor = db.Column(db.Float, nullable=False, default=1.0)   # 0〜3。0なら出さない
+    comeback_until = db.Column(db.DateTime, nullable=True)             # この日時までカムバック補正をかける

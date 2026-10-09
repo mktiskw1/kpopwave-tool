@@ -3,6 +3,46 @@
 
 <h4 class="mb-4 fw-bold">投稿キュー</h4>
 
+{% if stock_plan %}
+<!-- グループ別のストック計画(どのグループの動画を集めるべきか) -->
+<div class="card mb-4" id="plan-card" data-plan='{{ stock_plan|tojson }}'>
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span><i class="bi bi-bar-chart-steps me-2"></i>グループ別のストック計画</span>
+    <span class="d-flex align-items-center gap-2 flex-wrap" style="font-size:.82rem">
+      <label class="mb-0" for="plan-per-day">1日の投稿数</label>
+      <input type="number" id="plan-per-day" class="form-control form-control-sm" min="1" max="20" style="width:70px">
+      <label class="mb-0" for="plan-days">計画の日数</label>
+      <input type="number" id="plan-days" class="form-control form-control-sm" min="1" max="60" style="width:70px">
+      <button type="button" class="btn btn-sm btn-outline-primary" onclick="savePlanSettings()">再計算</button>
+    </span>
+  </div>
+  <div class="card-body">
+    <div id="plan-summary" class="mb-2 fw-bold" style="font-size:.9rem"></div>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-2" style="font-size:.8rem">
+        <thead>
+          <tr>
+            <th>グループ</th>
+            <th class="text-end">新しく必要な本数</th>
+            <th class="text-end">ストック本数</th>
+            <th class="text-end">過不足</th>
+            <th class="text-end">再投稿の見込み</th>
+            <th class="text-end">評価値<br><span style="font-weight:400">(閲覧数の中央値)</span></th>
+            <th class="text-end">計算に使った本数</th>
+            <th class="text-end">目標の割合</th>
+            <th class="text-end">直近14日の実際</th>
+            <th class="text-end">手動補正</th>
+            <th>カムバック補正</th>
+          </tr>
+        </thead>
+        <tbody id="plan-tbody"></tbody>
+      </table>
+    </div>
+    <div class="form-text" style="font-size:.74rem" id="plan-note"></div>
+  </div>
+</div>
+{% endif %}
+
 <!-- キュー中 -->
 <div class="card mb-4">
   <div class="card-header d-flex justify-content-between">
@@ -39,6 +79,10 @@
           </span>
           {% else %}
           <span class="badge bg-secondary" style="font-size:.72rem;opacity:.6">時間未設定</span>
+          {% endif %}
+          {% if a.priority_requested_at %}
+          <span class="badge ms-1" style="font-size:.7rem;background:linear-gradient(135deg,#ffb300,#ff6f00);color:#fff"
+                title="優先に設定済み。グループ調整より先に、押した順に投稿されます">⭐ 優先</span>
           {% endif %}
           {% if (a.buzz_repost_count or 1) > 1 %}
           <span class="badge bg-warning-subtle text-warning-emphasis ms-1" style="font-size:.7rem"
@@ -121,16 +165,18 @@
             <i class="bi bi-send-fill"></i> 今すぐ投稿
           </button>
         </form>
-        {% if not loop.first %}
-        <button class="btn btn-outline-warning btn-sm" style="font-size:.8rem"
-                onclick="prioritizeArticle({{ a.id }}, this)"
-                title="現在の先頭記事とスケジュール枠を入れ替えて、この投稿を次の投稿にします">
-          <i class="bi bi-arrow-bar-up"></i> この投稿を最優先にする
+        {% if a.priority_requested_at %}
+        <button class="btn btn-warning btn-sm" style="font-size:.8rem"
+                onclick="unprioritizeArticle({{ a.id }}, this)"
+                title="優先を取り消します（以後はグループ調整の対象に戻ります）">
+          <i class="bi bi-x-circle"></i> 優先を取り消す
         </button>
         {% else %}
-        <span class="badge badge-queued align-self-stretch text-center" style="font-size:.72rem;padding:.35rem">
-          <i class="bi bi-arrow-bar-up"></i> 次の投稿
-        </span>
+        <button class="btn btn-outline-warning btn-sm" style="font-size:.8rem"
+                onclick="prioritizeArticle({{ a.id }}, this)"
+                title="この投稿を優先にします。グループ調整より先に（押した順に）次の枠で投稿されます">
+          <i class="bi bi-arrow-bar-up"></i> この投稿を最優先にする
+        </button>
         {% endif %}
         <button class="btn btn-outline-info btn-sm" style="font-size:.8rem"
                 onclick="toggleSchedule({{ a.id }})">
@@ -443,6 +489,80 @@ function setSchedule(id) {
   });
 }
 
+// ── グループ別のストック計画 ──
+var planCard = document.getElementById('plan-card');
+
+function pEsc(v) {
+  var d = document.createElement('div');
+  d.textContent = v == null ? '' : String(v);
+  return d.innerHTML;
+}
+
+function pPct(x) { return (x * 100).toFixed(1) + '%'; }
+
+function balanceCell(b) {
+  if (b < 0) return '<span class="badge bg-danger">あと' + (-b) + '本不足</span>';
+  if (b <= 1) return '<span class="badge bg-warning text-dark">余裕' + b + '本</span>';
+  return '<span class="badge bg-success">余裕' + b + '本</span>';
+}
+
+function renderPlan(plan) {
+  document.getElementById('plan-per-day').value = plan.posts_per_day;
+  document.getElementById('plan-days').value = plan.days;
+  var t = plan.totals;
+  var tb = t.balance < 0 ? '<span class="text-danger">あと' + (-t.balance) + '本不足</span>'
+                         : '<span class="text-success">余裕' + t.balance + '本</span>';
+  document.getElementById('plan-summary').innerHTML =
+    '期間中の投稿枠 ' + plan.slots + '枠（' + plan.posts_per_day + '本/日 × ' + plan.days + '日） ／ ' +
+    '新しく必要な本数 合計 ' + t.needed + '本 ／ ストック 合計 ' + t.stock + '本 ／ 全体の過不足: ' + tb;
+  document.getElementById('plan-tbody').innerHTML = plan.rows.map(function (r) {
+    var cb = r.comeback_active ? '🆕 ×' + r.comeback_factor + '（' + pEsc(r.comeback_until) + 'まで）' : '-';
+    var tip = r.median == null ? '初回投稿の実績なし（全体の中央値で評価）' : '本数' + r.n + ' / グループの中央値 ' + r.median.toLocaleString();
+    return '<tr>' +
+      '<td class="fw-bold">' + pEsc(r.name) + '</td>' +
+      '<td class="text-end">' + r.needed + '</td>' +
+      '<td class="text-end">' + r.stock + '</td>' +
+      '<td class="text-end">' + balanceCell(r.balance) + '</td>' +
+      '<td class="text-end" title="期間中の出番 ' + r.turns + ' 本のうち、再投稿でまかなえる見込みの本数">' + r.repost + '</td>' +
+      '<td class="text-end" title="' + pEsc(tip) + '">' + r.score.toLocaleString() + '</td>' +
+      '<td class="text-end">' + r.n + '</td>' +
+      '<td class="text-end">' + pPct(r.target) + '</td>' +
+      '<td class="text-end">' + pPct(r.actual) + '（' + r.actual_count + '本）</td>' +
+      '<td class="text-end"><input type="number" min="0" max="3" step="0.1" value="' + r.manual + '" ' +
+        'class="form-control form-control-sm text-end" style="width:72px;display:inline-block" ' +
+        'onchange="saveManual(\'' + pEsc(r.id) + '\', this)" title="0〜3。0にするとこのグループは出しません"></td>' +
+      '<td>' + cb + '</td></tr>';
+  }).join('');
+  document.getElementById('plan-note').textContent =
+    '評価値＝直近' + plan.lookback_days + '日に初回投稿した動画の閲覧数の中央値（本数が少ないグループは全体の中央値' +
+    plan.overall_median.toLocaleString() + 'に寄せています）。目標の割合は評価値の平方根×手動補正×カムバック補正で決まり、' +
+    '手動補正が0でないグループには最低割合を保証します。新しく必要な本数＝期間中の出番−再投稿の見込み。' +
+    (plan.enabled ? '' : '【注意】グループ調整はOFFのため、実際の投稿はこの目標に従いません。');
+}
+
+function planRequest(url, body) {
+  return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(r => r.json().then(d => ({ ok: r.ok, d: d })));
+}
+
+function savePlanSettings() {
+  planRequest('/api/stock-plan/settings', {
+    posts_per_day: document.getElementById('plan-per-day').value,
+    days: document.getElementById('plan-days').value,
+  }).then(x => {
+    if (x.ok && x.d.ok) { renderPlan(x.d.plan); } else { alert(x.d.error || '保存に失敗しました'); }
+  }).catch(() => alert('通信エラーが発生しました'));
+}
+
+function saveManual(groupId, input) {
+  planRequest('/api/group-plan/manual', { group_id: groupId, factor: input.value })
+    .then(x => {
+      if (x.ok && x.d.ok) { renderPlan(x.d.plan); } else { alert(x.d.error || '保存に失敗しました'); }
+    }).catch(() => alert('通信エラーが発生しました'));
+}
+
+if (planCard) { renderPlan(JSON.parse(planCard.getAttribute('data-plan'))); }
+
 // ── 割り込み（この投稿を次の投稿にする） ────────────────────────────────
 function showQueueToast(message) {
   const existing = document.getElementById('queue-toast');
@@ -457,6 +577,17 @@ function showQueueToast(message) {
   setTimeout(() => { if (toast.parentNode) toast.remove(); }, 3000);
 }
 
+function unprioritizeArticle(id, btn) {
+  btn.disabled = true;
+  fetch('/queue/' + id + '/unprioritize', { method: 'POST', headers: { 'X-Requested-With': 'fetch' } })
+    .then(r => r.json())
+    .then(d => {
+      if (d.success) { showQueueToast('優先を取り消しました'); setTimeout(() => location.reload(), 700); }
+      else { btn.disabled = false; alert('取り消しに失敗しました'); }
+    })
+    .catch(() => { btn.disabled = false; alert('通信エラーが発生しました'); });
+}
+
 function prioritizeArticle(id, btn) {
   const orig = btn.innerHTML;
   btn.disabled = true;
@@ -468,12 +599,12 @@ function prioritizeArticle(id, btn) {
   .then(r => r.json())
   .then(d => {
     if (d.success) {
-      showQueueToast('⏫ この投稿を次の投稿にしました');
+      showQueueToast('⭐ 優先にしました（押した順に次の枠で投稿されます）');
       setTimeout(() => location.reload(), 900);
     } else if (d.already_head) {
       btn.disabled = false;
       btn.innerHTML = orig;
-      showQueueToast('この投稿はすでに次の投稿です');
+      showQueueToast('この投稿はすでに優先に設定されています');
     } else {
       btn.disabled = false;
       btn.innerHTML = orig;

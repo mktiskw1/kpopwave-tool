@@ -328,6 +328,24 @@ def _run_post_job_for_account(app, account_id):
             )
             return
 
+        # グループの偏り防止・閲覧数に応じた頻度調整: 今の枠(article)に投稿する記事を決め直す。
+        # 優先(押した順) → バズ再投稿(従来どおり) → 目標の割合に最も足りないグループ。
+        # 選んだ記事と今の枠の記事で scheduled_at を入れ替える(時間枠自体は変えない)。
+        # 例外が出ても投稿は止めず、従来どおり今の枠の記事を投稿する。
+        try:
+            import group_balance
+            chosen, why = group_balance.select_for_slot(account_id, article, now)
+            if chosen.id != article.id:
+                logger.info("[_post_job] account_id=%s 投稿記事を変更: head id=%d → id=%d (%s)",
+                            account_id, article.id, chosen.id, why)
+                group_balance.apply_slot_choice(app, account_id, article, chosen)
+                article = chosen
+            else:
+                logger.info("[_post_job] account_id=%s 投稿記事: id=%d (%s)", account_id, article.id, why)
+        except Exception:
+            db.session.rollback()
+            logger.exception("[_post_job] account_id=%s グループ調整に失敗したため従来の順番で投稿します", account_id)
+
         article_id = article.id
         logger.info(
             "[_post_job] account_id=%s 投稿対象決定: id=%d scheduled_at(UTC)=%s has_summary=%s",
@@ -847,6 +865,7 @@ def _process_one_buzz_requeue(app, account_id: int, article_id: int, position_in
         article.status = "queued"
         article.scheduled_at = slot
         article.threads_post_id = None
+        article.priority_requested_at = None
         article.buzz_repost_count = (article.buzz_repost_count or 1) + 1
         new_repost_count = article.buzz_repost_count
         db.session.commit()

@@ -73,6 +73,11 @@
 <div class="d-flex align-items-center gap-2 mb-3 p-2 rounded flex-wrap" style="background:var(--surface2);border:1.5px solid var(--border);border-radius:14px!important">
   <input type="checkbox" id="cand-select-all" class="form-check-input mt-0" title="表示中の候補を全選択/全解除" onchange="candToggleAll(this)">
   <label for="cand-select-all" class="text-muted mb-0" style="font-size:.82rem;cursor:pointer">全選択</label>
+  <select id="cand-sort" class="form-select form-select-sm ms-2" style="width:auto" onchange="candSetSort(this.value)"
+          title="並び順">
+    <option value="new">並び順: 新しい順</option>
+    <option value="shortage">並び順: 不足しているグループ順</option>
+  </select>
   <div class="btn-group btn-group-sm ms-2" role="group" aria-label="縦横の絞り込み">
     <button type="button" class="btn btn-outline-secondary" id="cand-filter-all" onclick="candSetFilter('all')">すべて</button>
     <button type="button" class="btn btn-outline-secondary" id="cand-filter-landscape" onclick="candSetFilter('landscape')">横のみ</button>
@@ -112,7 +117,8 @@
 </div>
 
 {% for c in candidate_rows %}
-<div class="card mb-2 cand-row" id="cand-{{ c.id }}" data-id="{{ c.id }}" data-orientation="{{ c.orientation }}">
+<div class="card mb-2 cand-row" id="cand-{{ c.id }}" data-id="{{ c.id }}" data-orientation="{{ c.orientation }}"
+     data-shortage="{{ c.shortage }}" data-idx="{{ loop.index0 }}">
   <div class="card-body py-2 d-flex gap-3 align-items-start flex-wrap">
     <input type="checkbox" class="form-check-input cand-cb mt-1 flex-shrink-0" value="{{ c.id }}" onchange="candUpdateSel()">
     <div class="cand-thumb flex-shrink-0" data-video-id="{{ c.video_id }}" onclick="candPlay(this)" title="クリックで再生"
@@ -140,6 +146,9 @@
         {% if c.guessed_group %}
         <span class="badge bg-info-subtle text-info-emphasis" style="font-size:.72rem">{{ c.guessed_group }}</span>
         {% endif %}
+        {% if c.shortage %}
+        <span class="badge bg-danger" style="font-size:.72rem" title="このグループは、計画の期間中にストックが足りません(キュー画面のストック計画)">あと{{ c.shortage }}本不足</span>
+        {% endif %}
       </div>
       <div style="font-size:.78rem;color:var(--text-muted)">
         公開 {{ c.published }} ／ 長さ {{ c.duration }} ／ YouTube再生数 {{ c.views }}
@@ -155,6 +164,7 @@
   </div>
 </div>
 {% endfor %}
+<div id="cand-rows-end"></div>
 
 {% elif articles %}
 <!-- 一括操作ツールバー -->
@@ -182,7 +192,7 @@
 
   <!-- 記事カード -->
   {% for a in articles %}
-  <div class="card mb-3 article-card{% if a.is_favorite %} favorited{% endif %}" id="card-{{ a.id }}"
+  <div class="card mb-3 article-card{% if a.is_favorite %} favorited{% endif %}" id="card-{{ a.id }}" data-content-type="{{ a.content_type or 'article' }}"
        data-view-count="{{ a.view_count or 0 }}"
        data-published="{{ a.published_at.strftime('%Y%m%d%H%M%S') if a.published_at else '0' }}"
        data-title="{{ a.title }}">
@@ -543,6 +553,15 @@
       <div id="tag-group-suggestions-list" class="d-none"
            style="position:absolute;left:0;right:0;z-index:10;background:#fff;border:1px solid #ccc;
                   border-radius:6px;max-height:180px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.15)"></div>
+      <div class="form-check mt-1" id="tag-nogroup-wrap">
+        <input type="checkbox" class="form-check-input" id="tag-nogroup-input" onchange="onNoGroupToggle()">
+        <label class="form-check-label" for="tag-nogroup-input" style="font-size:.8rem">
+          グループなし（どのグループにも属さない動画）
+        </label>
+      </div>
+      <div id="tag-group-required-note" class="d-none mt-1" style="font-size:.75rem;color:#c62828">
+        ※動画の承認ではグループの入力が必須です（無い場合は「グループなし」を選択）
+      </div>
     </div>
     <div class="mb-2">
       <label class="form-label" style="font-size:.8rem">メンバー名（空欄可）</label>
@@ -585,7 +604,9 @@
       </button>
       {% endif %}
       <button type="button" class="btn btn-sm btn-outline-secondary" onclick="closeTagModal()">キャンセル</button>
-      <button type="button" id="tag-modal-confirm-btn" class="btn btn-sm btn-success" onclick="confirmTagModal()">承認してキューへ</button>
+      <button type="button" id="tag-modal-priority-btn" class="btn btn-sm btn-warning" onclick="confirmTagModal(true)"
+              title="承認してキューに入れ、同時に優先にします。グループ調整より先に(押した順に)次の枠で投稿されます">承認して最優先</button>
+      <button type="button" id="tag-modal-confirm-btn" class="btn btn-sm btn-success" onclick="confirmTagModal(false)">承認してキューへ</button>
     </div>
   </div>
 </div>
@@ -761,6 +782,31 @@ function candSetFilter(mode) {
   });
   document.getElementById('cand-filter-empty').classList.toggle('d-none', !(rows.length > 0 && shown === 0));
   candUpdateSel();
+}
+
+// 並び替え: 「不足しているグループ順」は不足本数が多い順(同じ不足本数の中は元の並び順)
+var CAND_SORT_KEY = 'candSortMode';
+
+function candSetSort(mode) {
+  if (mode !== 'shortage') mode = 'new';
+  try { localStorage.setItem(CAND_SORT_KEY, mode); } catch (e) {}
+  var sel = document.getElementById('cand-sort');
+  if (sel) sel.value = mode;
+  var rows = Array.prototype.slice.call(document.querySelectorAll('.cand-row'));
+  rows.sort(function (a, b) {
+    var ia = parseInt(a.getAttribute('data-idx'), 10), ib = parseInt(b.getAttribute('data-idx'), 10);
+    if (mode === 'shortage') {
+      var sa = parseInt(a.getAttribute('data-shortage'), 10) || 0, sb = parseInt(b.getAttribute('data-shortage'), 10) || 0;
+      if (sa !== sb) return sb - sa;
+    }
+    return ia - ib;
+  });
+  var marker = document.getElementById('cand-rows-end');
+  rows.forEach(function (row) { marker.parentNode.insertBefore(row, marker); });
+}
+
+function candCurrentSort() {
+  try { return localStorage.getItem(CAND_SORT_KEY) || 'new'; } catch (e) { return 'new'; }
 }
 
 function candCurrentFilter() {
@@ -971,6 +1017,7 @@ function candPoll() {
     .catch(function () { candSchedulePoll(8000); });
 }
 
+candSetSort(candCurrentSort());
 candSetFilter(candCurrentFilter());
 candPoll();
 candFetchResume();
@@ -1277,6 +1324,38 @@ function getTagGroupInputEl() {
   return document.getElementById('tag-group-input');
 }
 
+function isVideoCard(id) {
+  var card = document.getElementById('card-' + id);
+  return !!card && card.dataset.contentType === 'video';
+}
+
+// 承認時だけ表示するコントロール(「承認して最優先」、グループ必須の案内)。「グループなし」は毎回未選択から始める。
+function setApproveOnlyControls(approveMode, isVideo) {
+  var prio = document.getElementById('tag-modal-priority-btn');
+  if (prio) prio.classList.toggle('d-none', !approveMode);
+  var note = document.getElementById('tag-group-required-note');
+  if (note) note.classList.toggle('d-none', !(approveMode && isVideo));
+  var ng = document.getElementById('tag-nogroup-input');
+  if (ng) { ng.checked = false; }
+  onNoGroupToggle();
+}
+
+// 「グループなし」を選ぶと、グループ・メンバー欄を無効にする
+function onNoGroupToggle() {
+  var ng = document.getElementById('tag-nogroup-input');
+  var gi = getTagGroupInputEl();
+  if (!ng || !gi) return;
+  if (ng.checked) {
+    gi.value = '';
+    updateMemberFieldForGroup('', '');
+  }
+  gi.disabled = ng.checked;
+  var mi = document.getElementById('tag-member-input');
+  var ms = document.getElementById('tag-member-select');
+  if (mi) mi.disabled = ng.checked;
+  if (ms) ms.disabled = ng.checked;
+}
+
 function setOptionalFieldsVisible(visible) {
   var comebackWrap = document.getElementById('tag-comeback-wrap');
   var replyWrap = document.getElementById('tag-reply-wrap');
@@ -1332,8 +1411,9 @@ function approveArticle(id, btn) {
       updateMemberFieldForGroup(guess.group || '', guess.member || '');
     }
     document.getElementById('tag-modal-title').textContent = groupInput
-      ? 'グループ・メンバーを入力（任意）' : 'オプション設定（任意）';
+      ? 'グループ・メンバーを入力' : 'オプション設定（任意）';
     document.getElementById('tag-modal-confirm-btn').textContent = '承認してキューへ';
+    setApproveOnlyControls(true, isVideoCard(id));
     resetOptionalFields();
     setOptionalFieldsVisible(true);
     resetTagModalPreview();
@@ -1357,6 +1437,7 @@ function editTag(id, btn) {
   }
   document.getElementById('tag-modal-title').textContent = 'グループ・メンバーを編集';
   document.getElementById('tag-modal-confirm-btn').textContent = '保存';
+  setApproveOnlyControls(false, false);
   // カムバック曲・2件目設定はtag_article(タグ編集のみのエンドポイント)では保存されない
   // ため、編集モードでは触らせない(入力させたのに保存されない事故を防ぐ)。
   resetOptionalFields();
@@ -1381,10 +1462,20 @@ function closeTagModal() {
   pendingEditBtn = null;
 }
 
-function confirmTagModal() {
+function confirmTagModal(withPriority) {
   var groupInput = getTagGroupInputEl();
   var groupName = groupInput ? groupInput.value.trim() : '';
   var memberName = getMemberFieldValue();
+  var noGroupEl = document.getElementById('tag-nogroup-input');
+  var noGroup = !!(noGroupEl && noGroupEl.checked);
+  // 動画の承認(KPOPアカウント)ではグループ入力が必須。「グループなし」を明示的に選んだ場合のみ空で承認できる
+  if (tagModalMode !== 'edit' && groupInput && isVideoCard(pendingApproveId) && !groupName && !noGroup) {
+    var note = document.getElementById('tag-group-required-note');
+    if (note) note.classList.remove('d-none');
+    alert('グループを入力してください。グループが無い動画は「グループなし」を選んでください。');
+    groupInput.focus();
+    return;
+  }
   document.getElementById('tag-modal').classList.add('d-none');
   if (tagModalMode === 'edit') {
     doSaveTag(pendingEditId, pendingEditBtn, groupName, memberName);
@@ -1397,7 +1488,8 @@ function confirmTagModal() {
     var replyOn = !!(replyToggle && replyToggle.checked);
     var replyText = replyOn && replyTextEl ? replyTextEl.value.trim() : '';
     var replyUrl = replyOn && replyUrlEl ? replyUrlEl.value.trim() : '';
-    doApprove(pendingApproveId, pendingApproveBtn, groupName, memberName, isComeback, replyText, replyUrl);
+    doApprove(pendingApproveId, pendingApproveBtn, groupName, memberName, isComeback, replyText, replyUrl,
+              noGroup, !!withPriority);
   }
   // doApprove/doSaveTagへは値渡し済みなので、ここでグローバル変数をリセットしても
   // 実行中の処理には影響しない。リセットし忘れると、モーダルを閉じずに終えた場合に
@@ -1616,7 +1708,7 @@ function applyBulkGuess() {
   next();
 }
 
-function doApprove(id, btn, groupName, memberName, isComeback, replyText, replyUrl) {
+function doApprove(id, btn, groupName, memberName, isComeback, replyText, replyUrl, noGroup, priority) {
   btn.disabled = true;
   const orig = btn.innerHTML;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
@@ -1625,6 +1717,7 @@ function doApprove(id, btn, groupName, memberName, isComeback, replyText, replyU
     headers: { 'X-Requested-With': 'fetch', 'Content-Type': 'application/json' },
     body: JSON.stringify({
       group_name: groupName, member_name: memberName,
+      no_group: !!noGroup, priority: !!priority,
       is_comeback: !!isComeback,
       thread_reply_text: replyText || '',
       thread_reply_url: replyUrl || '',
@@ -1652,7 +1745,7 @@ function doApprove(id, btn, groupName, memberName, isComeback, replyText, replyU
     } else {
       btn.disabled = false;
       btn.innerHTML = orig;
-      alert('承認に失敗しました');
+      alert(d.error || '承認に失敗しました');
     }
   })
   .catch(function() {

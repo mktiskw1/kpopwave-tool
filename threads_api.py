@@ -70,6 +70,7 @@ def _mark_posted(app, article_id: int, post_id: str):
             art.status = "posted"
             art.posted_at = datetime.utcnow()
             art.threads_post_id = post_id
+            art.priority_requested_at = None
             db.session.commit()
             reply_text = (art.thread_reply_text or "").strip()
             reply_url = (art.thread_reply_url or "").strip()
@@ -515,6 +516,7 @@ def post_to_threads(app, article_id: int, test_mode: bool = False, account_id: i
                 art.status = "posted"
                 art.posted_at = datetime.utcnow()
                 art.threads_post_id = f"test_{article_id}"
+                art.priority_requested_at = None
                 db.session.commit()
                 reply_text = (art.thread_reply_text or "").strip()
                 reply_url = (art.thread_reply_url or "").strip()

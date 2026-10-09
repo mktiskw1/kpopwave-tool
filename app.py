@@ -16,6 +16,7 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, sen
 from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
 
+import group_balance
 from config import Config, YOUTUBE_DL_FORMAT
 from database import (
     Article, BuzzPost, ChapterClip, ChapterJob, Comment, DailyStat, EarlyAdvanceLog, Group, Hook, Member,
@@ -167,6 +168,7 @@ def _migrate_db():
         ("channel_id", "VARCHAR(64)"),
         ("channel_name", "VARCHAR(200)"),
         ("watched_channel_id", "INTEGER"),
+        ("priority_requested_at", "DATETIME"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -432,6 +434,7 @@ def _init_default_settings():
         "watched_candidate_expire_days": "14",
         "watched_fancam_keywords": "직캠, fancam, 원테이크, 페이스캠, facecam",
         "watched_auto_fetch_enabled": "true",
+        **group_balance.DEFAULTS,
     }
     for key, value in defaults.items():
         if not Setting.query.filter_by(key=key).first():
@@ -725,6 +728,11 @@ def pending():
         # 監視で見つけた候補(未ダウンロード)。承認待ち記事ではないのでarticlesは空にして別枠で描画する
         articles = []
         images_map = {}
+        try:
+            shortage = group_balance.shortage_by_group_id(group_balance.compute_stock_plan(app, _plan_account_id()))
+        except Exception:
+            logger.exception("ストック計画の計算に失敗しました")
+            shortage = {}
         for c in (_account_query_scope(WatchedCandidate.query.filter_by(status="new"),
                                        WatchedCandidate, account_id, legacy_id)
                   .order_by(WatchedCandidate.published_at.desc().nullslast(), WatchedCandidate.id.desc()).all()):
@@ -738,6 +746,7 @@ def pending():
                 "views": f"{c.view_count:,}" if c.view_count is not None else "-",
                 "last_error": c.last_error or "",
                 "orientation": c.orientation or "unknown",
+                "shortage": shortage.get(c.guessed_group_id, 0) if c.guessed_group_id else 0,
             })
     else:
         articles = all_pending
@@ -1046,26 +1055,46 @@ def approve_article(id):
     from datetime import timedelta
 
     article = Article.query.get_or_404(id)
+    is_fetch = request.headers.get("X-Requested-With") == "fetch"
+
+    def _reject(msg):
+        if is_fetch:
+            return jsonify({"ok": False, "error": msg}), 400
+        flash(msg, "danger")
+        return redirect(url_for("pending"))
+
+    tag_data = request.get_json(silent=True) or {}
+    group_name = (tag_data.get("group_name") or "").strip()
+    member_name = (tag_data.get("member_name") or "").strip()
+    no_group = bool(tag_data.get("no_group"))
+    want_priority = bool(tag_data.get("priority"))
 
     # 動画ファイルが無い動画記事をキューに入れても、投稿時に中止される(動画なしでは投稿しない)ため、
     # 承認の時点で止める。
     if (article.content_type or "article") == "video":
         _vp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", article.video_file_path or "")
         if not article.video_file_path or not os.path.isfile(_vp):
-            _msg = "動画ファイルが見つからないため、キューに追加できません。動画を取り込み直してください。"
-            if request.headers.get("X-Requested-With") == "fetch":
-                return jsonify({"ok": False, "error": _msg}), 400
-            flash(_msg, "danger")
-            return redirect(url_for("pending"))
+            return _reject("動画ファイルが見つからないため、キューに追加できません。動画を取り込み直してください。")
+
+        # 動画(KPOPアカウント)の承認ではグループの入力を必須にする。グループ別の投稿頻度の調整・評価・
+        # ストック計画はグループのタグに基づくため。「グループなし」を明示的に選んだ場合は承認できる
+        # (タグを付けず、「グループなし」として扱う)。既にタグが付いている記事はそのタグで承認できる。
+        _acc = db.session.get(ThreadsAccount, article.account_id) if article.account_id else None
+        if (_acc is None or not (_acc.content_topic or "").strip()):
+            if not group_name and not no_group and not article.group_id:
+                return _reject("グループを入力してください（グループが無い場合は「グループなし」を選んでください）。")
 
     article.status = "queued"
 
-    tag_data = request.get_json(silent=True) or {}
-    group_name = tag_data.get("group_name", "")
-    member_name = tag_data.get("member_name", "")
-    if group_name or member_name:
+    if group_name:
         group_id, member_id = _resolve_group_and_member(group_name, member_name)
         article.group_id = group_id
+        article.member_id = member_id
+    elif no_group:
+        article.group_id = None
+        article.member_id = None
+    elif member_name:
+        _, member_id = _resolve_group_and_member("", member_name)
         article.member_id = member_id
 
     # カムバック曲タグ(手動のみ・自動判定はしない)とツリー2件目(アフィリエイト等・任意)。
@@ -1075,6 +1104,14 @@ def approve_article(id):
     reply_url = (tag_data.get("thread_reply_url") or "").strip()
     article.thread_reply_text = reply_text or None
     article.thread_reply_url = reply_url or None
+
+    # カムバック曲が承認されたら、そのグループの投稿頻度を一定期間(既定14日)引き上げる。
+    # 期間中に別のカムバック曲が承認されたら、期間をそこから延長する。
+    if article.is_comeback and article.group_id:
+        group_balance.mark_comeback(article.group_id)
+
+    if want_priority and article.priority_requested_at is None:
+        article.priority_requested_at = datetime.utcnow()
 
     slot_utc = next_post_slot(app, account_id=article.account_id)
     if slot_utc:
@@ -1099,7 +1136,12 @@ def approve_article(id):
         db.session.expire_all()
         article = Article.query.get_or_404(id)
 
-    if request.headers.get("X-Requested-With") == "fetch":
+    if want_priority:
+        # 承認して最優先: 既に優先されている記事の後ろ(押した順)に並べる
+        _place_priority(article)
+        slot_label = "（最優先）"
+
+    if is_fetch:
         return jsonify({"ok": True, "slot_label": slot_label})
     flash(f"キューに追加しました{slot_label}: {article.title[:50]}", "success")
     return redirect(url_for("pending"))
@@ -1182,10 +1224,10 @@ _ARTICLE_RESTORE_FIELDS = [
     "repost_count", "quote_count", "engagement_fetched_at", "post_style",
     "image_urls", "content_type", "video_file_path", "is_fancam", "account_id",
     "group_id", "member_id", "buzz_repost_count", "buzz_low_streak",
-    "channel_id", "channel_name", "watched_channel_id",
+    "channel_id", "channel_name", "watched_channel_id", "priority_requested_at",
 ]
 _ARTICLE_DATETIME_FIELDS = {
-    "published_at", "scheduled_at", "posted_at", "created_at", "engagement_fetched_at",
+    "published_at", "scheduled_at", "posted_at", "created_at", "engagement_fetched_at", "priority_requested_at",
 }
 
 
@@ -1534,7 +1576,15 @@ def queue():
         if (a.content_type or "article") != "video":
             images_map[a.id] = _build_image_list(a.thumbnail_url, a.image_urls)
 
-    return render_template("queue.html", queued=queued, posted=posted, failed=failed, images_map=images_map)
+    stock_plan = None
+    _sel = db.session.get(ThreadsAccount, account_id) if account_id else None
+    if _sel is None or not (_sel.content_topic or "").strip():
+        try:
+            stock_plan = group_balance.compute_stock_plan(app, _plan_account_id())
+        except Exception:
+            logger.exception("ストック計画の計算に失敗しました")
+    return render_template("queue.html", queued=queued, posted=posted, failed=failed, images_map=images_map,
+                           stock_plan=stock_plan)
 
 
 @app.route("/queue/<int:id>/schedule", methods=["POST"])
@@ -1665,18 +1715,83 @@ def reorder_queue():
         return jsonify({"success": False, "error": str(exc)})
 
 
+def _place_priority(article) -> None:
+    """優先の記録(priority_requested_at)を付け、キューの先頭付近(既に優先中の記事の後ろ)に並べる。
+    投稿ジョブは、この記録がある記事を押した順に、グループ調整より先に投稿する。"""
+    from scheduler import prioritize_article
+    if article.priority_requested_at is None:
+        article.priority_requested_at = datetime.utcnow()
+        db.session.commit()
+    ahead = Article.query.filter(
+        Article.status == "queued", Article.id != article.id,
+        Article.account_id == article.account_id, Article.priority_requested_at.isnot(None),
+        Article.priority_requested_at < article.priority_requested_at,
+    ).count()
+    prioritize_article(app, article.id, position_index=ahead)
+
+
 @app.route("/queue/<int:id>/prioritize", methods=["POST"])
 def prioritize_queue_article(id):
-    """選択したキュー記事を「次に投稿される1件」に割り込ませる（scheduler.prioritize_article参照）。"""
-    from scheduler import prioritize_article
-
-    success, info = prioritize_article(app, id)
-    if not success:
-        return jsonify({"success": False, "error": info.get("error", "エラーが発生しました")})
-    if info.get("already_head"):
-        return jsonify({"success": False, "already_head": True,
-                        "error": "この投稿はすでに次の投稿です"})
+    """選択したキュー記事を「優先」にする。押した日時を記録し、押した順に(グループ調整より先に)投稿される。
+    表示上も、既に優先中の記事の後ろ(=次に投稿される位置)に並べる(scheduler.prioritize_article参照)。"""
+    article = Article.query.get_or_404(id)
+    if article.status != "queued":
+        return jsonify({"success": False, "error": "この記事はキューにありません"})
+    if article.priority_requested_at is not None:
+        return jsonify({"success": False, "already_head": True, "error": "この投稿はすでに優先に設定されています"})
+    _place_priority(article)
     return jsonify({"success": True})
+
+
+@app.route("/queue/<int:id>/unprioritize", methods=["POST"])
+def unprioritize_queue_article(id):
+    """優先を取り消す(スケジュール枠はそのまま。以後はグループ調整の対象に戻る)。"""
+    article = Article.query.get_or_404(id)
+    article.priority_requested_at = None
+    db.session.commit()
+    return jsonify({"success": True})
+
+
+# ── グループ別ストック計画 ───────────────────────────────────────────────────
+
+
+def _plan_account_id() -> int:
+    from scheduler import _BUZZ_REQUEUE_ACCOUNT_ID
+    return _BUZZ_REQUEUE_ACCOUNT_ID
+
+
+@app.route("/api/stock-plan")
+def api_stock_plan():
+    return jsonify({"ok": True, "plan": group_balance.compute_stock_plan(app, _plan_account_id())})
+
+
+@app.route("/api/stock-plan/settings", methods=["POST"])
+def api_stock_plan_settings():
+    data = request.get_json(silent=True) or {}
+    try:
+        per_day = int(str(data.get("posts_per_day", "")).strip())
+        days = int(str(data.get("days", "")).strip())
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "1日の投稿数と計画の日数は整数で入力してください"}), 400
+    if not (1 <= per_day <= 20) or not (1 <= days <= 60):
+        return jsonify({"ok": False, "error": "1日の投稿数は1〜20、計画の日数は1〜60で入力してください"}), 400
+    Setting.set("stock_plan_posts_per_day", str(per_day))
+    Setting.set("stock_plan_days", str(days))
+    return jsonify({"ok": True, "plan": group_balance.compute_stock_plan(app, _plan_account_id())})
+
+
+@app.route("/api/group-plan/manual", methods=["POST"])
+def api_group_plan_manual():
+    data = request.get_json(silent=True) or {}
+    try:
+        key = group_balance.str_to_key(data.get("group_id"))
+        factor = float(data.get("factor"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "手動補正は0〜3の数値で入力してください"}), 400
+    if not (0.0 <= factor <= 3.0):
+        return jsonify({"ok": False, "error": "手動補正は0〜3の数値で入力してください"}), 400
+    group_balance.set_manual_factor(key, factor)
+    return jsonify({"ok": True, "plan": group_balance.compute_stock_plan(app, _plan_account_id())})
 
 
 # ── 設定 ───────────────────────────────────────────────────────────────────
@@ -1706,6 +1821,30 @@ def settings():
         if not (_threshold_likes <= _fasttrack_min_likes):
             flash("「バズ判定いいね数」は「ファストトラックの基準いいね数」以下にしてください", "danger")
             return redirect(url_for("settings"))
+
+        # グループ別の投稿頻度調整の設定(いずれも範囲内の数値のみ受け付ける)
+        _gb_specs = [
+            ("group_score_lookback_days", int, 1, 365, "評価に使う日数"),
+            ("group_score_smoothing", float, 0, 1000, "平滑化の強さ(k)"),
+            ("group_min_share", float, 0, 50, "最低割合(%)"),
+            ("group_spacing", int, 0, 10, "連続を避ける回数"),
+            ("comeback_boost_factor", float, 1, 10, "カムバック補正の倍率"),
+            ("comeback_boost_days", int, 1, 90, "カムバック補正の日数"),
+        ]
+        _gb_values = {}
+        for _key, _cast, _lo, _hi, _label in _gb_specs:
+            try:
+                _v = _cast((request.form.get(_key) or "").strip())
+            except (ValueError, TypeError):
+                flash(f"「{_label}」は{_lo}〜{_hi}の数値で入力してください", "danger")
+                return redirect(url_for("settings"))
+            if not (_lo <= _v <= _hi):
+                flash(f"「{_label}」は{_lo}〜{_hi}の数値で入力してください", "danger")
+                return redirect(url_for("settings"))
+            _gb_values[_key] = str(_v)
+        for _key, _val in _gb_values.items():
+            Setting.set(_key, _val)
+        Setting.set("group_balance_enabled", "true" if request.form.get("group_balance_enabled") else "false")
 
         for key in ("anthropic_api_key",
                     "youtube_api_key",
@@ -1788,6 +1927,13 @@ def settings():
         "buzz_fasttrack_min_likes": Setting.get("buzz_fasttrack_min_likes", "1000"),
         "buzz_threshold_likes": Setting.get("buzz_threshold_likes", "200"),
         "buzz_repost_kill_likes": Setting.get("buzz_repost_kill_likes", "50"),
+        "group_balance_enabled": group_balance.get_config()["enabled"],
+        "group_score_lookback_days": Setting.get("group_score_lookback_days", group_balance.DEFAULTS["group_score_lookback_days"]),
+        "group_score_smoothing": Setting.get("group_score_smoothing", group_balance.DEFAULTS["group_score_smoothing"]),
+        "group_min_share": Setting.get("group_min_share", group_balance.DEFAULTS["group_min_share"]),
+        "group_spacing": Setting.get("group_spacing", group_balance.DEFAULTS["group_spacing"]),
+        "comeback_boost_factor": Setting.get("comeback_boost_factor", group_balance.DEFAULTS["comeback_boost_factor"]),
+        "comeback_boost_days": Setting.get("comeback_boost_days", group_balance.DEFAULTS["comeback_boost_days"]),
         "youtube_channels": json.loads(Setting.get("youtube_channels", "[]") or "[]"),
         "meta_app_id": Setting.get("meta_app_id"),
         "meta_app_secret": Setting.get("meta_app_secret"),

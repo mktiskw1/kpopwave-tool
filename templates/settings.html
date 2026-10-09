@@ -277,6 +277,62 @@
             前倒し投稿（KPOPアカウント、投稿後60分いいね0で次の投稿を前倒し、連鎖は最大2回まで）
           </label>
         </div>
+        <div class="mb-3 p-2" style="border:1.5px solid var(--border);border-radius:10px">
+          <div class="form-check mb-2">
+            <input type="checkbox" class="form-check-input" name="group_balance_enabled" id="group_balance_enabled"
+                   {% if settings.group_balance_enabled %}checked{% endif %}>
+            <label class="form-check-label fw-bold" for="group_balance_enabled" style="font-size:.85rem">
+              グループ別の投稿頻度の自動調整（KPOPアカウントの動画）
+            </label>
+          </div>
+          <div class="form-text mb-2" style="font-size:.75rem">
+            ONのとき、投稿の枠ごとに「優先に設定した投稿（押した順）→ バズ再投稿（従来どおりの順番・時刻）→
+            直近14日の実際の割合が目標の割合に最も足りないグループの、キューで最も古い投稿」の順で次の投稿を決めます。
+            OFFのときは従来どおりキューの順番で投稿します（「優先」は常に先に出ます）。
+            動画以外の投稿（テキスト投稿など）と田中アカウントは対象外です。
+          </div>
+          <div class="d-flex gap-3 flex-wrap">
+            <div>
+              <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">評価に使う日数</label>
+              <input type="number" class="form-control" name="group_score_lookback_days" min="1" max="365"
+                     value="{{ settings.group_score_lookback_days }}" style="max-width:110px">
+              <div class="form-text" style="font-size:.7rem">直近この日数に初回投稿した動画の閲覧数（中央値）でグループを評価</div>
+            </div>
+            <div>
+              <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">少ない本数を全体に寄せる強さ(k)</label>
+              <input type="number" class="form-control" name="group_score_smoothing" min="0" max="1000" step="0.5"
+                     value="{{ settings.group_score_smoothing }}" style="max-width:110px">
+              <div class="form-text" style="font-size:.7rem">大きいほど、本数が少ないグループの評価が全体の中央値に近づく</div>
+            </div>
+            <div>
+              <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">最低割合（%）</label>
+              <input type="number" class="form-control" name="group_min_share" min="0" max="50" step="0.5"
+                     value="{{ settings.group_min_share }}" style="max-width:110px">
+              <div class="form-text" style="font-size:.7rem">手動補正が0でないグループの最低の出番</div>
+            </div>
+            <div>
+              <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">連続を避ける回数</label>
+              <input type="number" class="form-control" name="group_spacing" min="0" max="10"
+                     value="{{ settings.group_spacing }}" style="max-width:110px">
+              <div class="form-text" style="font-size:.7rem">直近この回数に投稿したグループは選ばない（選べない時は緩める）</div>
+            </div>
+            <div>
+              <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">カムバック補正の倍率</label>
+              <input type="number" class="form-control" name="comeback_boost_factor" min="1" max="10" step="0.1"
+                     value="{{ settings.comeback_boost_factor }}" style="max-width:110px">
+              <div class="form-text" style="font-size:.7rem">カムバック曲を承認したグループの目標の割合にかける倍率</div>
+            </div>
+            <div>
+              <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">カムバック補正の日数</label>
+              <input type="number" class="form-control" name="comeback_boost_days" min="1" max="90"
+                     value="{{ settings.comeback_boost_days }}" style="max-width:110px">
+              <div class="form-text" style="font-size:.7rem">承認日からこの日数のあいだ補正（期間中に別のカムバック曲を承認すると延長）</div>
+            </div>
+          </div>
+          <div class="form-text" style="font-size:.72rem">
+            グループごとの手動補正（0〜3倍）は、投稿キュー画面の「グループ別のストック計画」で変更できます。
+          </div>
+        </div>
         <div class="mb-3">
           <label class="form-label" style="font-size:.85rem">バズ動画 判定基準</label>
           <div class="d-flex gap-3 flex-wrap align-items-end">
