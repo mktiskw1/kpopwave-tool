@@ -1826,6 +1826,7 @@ def settings():
         _gb_specs = [
             ("group_score_lookback_days", int, 1, 365, "評価に使う日数"),
             ("group_score_smoothing", float, 0, 1000, "平滑化の強さ(k)"),
+            ("group_score_cap_ratio", float, 1, 100, "評価値の上限倍率"),
             ("group_min_share", float, 0, 50, "最低割合(%)"),
             ("group_spacing", int, 0, 10, "連続を避ける回数"),
             ("comeback_boost_factor", float, 1, 10, "カムバック補正の倍率"),
@@ -1930,6 +1931,7 @@ def settings():
         "group_balance_enabled": group_balance.get_config()["enabled"],
         "group_score_lookback_days": Setting.get("group_score_lookback_days", group_balance.DEFAULTS["group_score_lookback_days"]),
         "group_score_smoothing": Setting.get("group_score_smoothing", group_balance.DEFAULTS["group_score_smoothing"]),
+        "group_score_cap_ratio": Setting.get("group_score_cap_ratio", group_balance.DEFAULTS["group_score_cap_ratio"]),
         "group_min_share": Setting.get("group_min_share", group_balance.DEFAULTS["group_min_share"]),
         "group_spacing": Setting.get("group_spacing", group_balance.DEFAULTS["group_spacing"]),
         "comeback_boost_factor": Setting.get("comeback_boost_factor", group_balance.DEFAULTS["comeback_boost_factor"]),

@@ -23,6 +23,7 @@ from database import (
 logger = logging.getLogger(__name__)
 
 NONE_LABEL = "グループなし"
+CATCHALL_NAME = "その他"          # 名簿の受け皿グループ。「グループなし」と同様に評価値の重み付けの対象外(最低割合で固定)
 ACTUAL_WINDOW_DAYS = 14          # 「実際の割合」を数える期間
 FINAL_DAYS = 7                   # 閲覧数が確定するまでの日数
 
@@ -31,6 +32,7 @@ DEFAULTS = {
     "group_balance_enabled": "true",
     "group_score_lookback_days": "60",
     "group_score_smoothing": "5",
+    "group_score_cap_ratio": "3",      # 評価値の上限 = 全体の中央値 × この倍率
     "group_min_share": "5",            # パーセント
     "group_spacing": "2",
     "comeback_boost_factor": "1.5",
@@ -69,6 +71,7 @@ def get_config() -> dict:
         "enabled": (Setting.get("group_balance_enabled", DEFAULTS["group_balance_enabled"]) or "true").strip().lower() != "false",
         "lookback_days": _num("group_score_lookback_days", int, 1, 365),
         "smoothing": _num("group_score_smoothing", float, 0.0, 1000.0),
+        "cap_ratio": _num("group_score_cap_ratio", float, 1.0, 100.0),
         "min_share": _num("group_min_share", float, 0.0, 50.0) / 100.0,
         "spacing": _num("group_spacing", int, 0, 10),
         "boost_factor": _num("comeback_boost_factor", float, 1.0, 10.0),
@@ -155,15 +158,16 @@ def _initial_cycle_samples(account_id: int, now: datetime, lookback_days: int, n
     return out
 
 
-def _compute_targets(raws: dict, eligible: set, min_share: float) -> dict:
-    """raws(重み×補正)から目標の割合を作る。eligible(手動補正≠0)のグループには min_share を保証する。"""
+def _compute_targets(raws: dict, eligible: set, min_share: float, fixed_keys=()) -> dict:
+    """raws(重み×補正)から目標の割合を作る。eligible(手動補正≠0)のグループには min_share を保証する。
+    fixed_keys(「その他」「グループなし」)は重み付けの対象外で、目標の割合を min_share に固定する。"""
     shares = {k: 0.0 for k in raws}
     elig = [k for k in raws if k in eligible]
     if not elig:
         return shares
     floor = min(min_share, 1.0 / len(elig))
-    free = set(elig)
-    fixed = set()
+    fixed = {k for k in fixed_keys if k in eligible}
+    free = set(elig) - fixed
     while True:
         remaining = 1.0 - floor * len(fixed)
         total = sum(raws[k] for k in free)
@@ -237,6 +241,8 @@ def compute_state(account_id: int, now: datetime = None) -> dict:
             score = ((n * med if n else 0.0) + k * overall) / (n + k)
         else:
             score = med if med is not None else overall
+        # 少数のバズ動画に引っ張られないよう、評価値は「全体の中央値×上限倍率」までに抑えてから平方根をとる
+        capped = min(score, overall * cfg["cap_ratio"]) if overall > 0 else score
         ps = plan_settings.get(gid)
         manual = float(ps.manual_factor) if ps is not None and ps.manual_factor is not None else 1.0
         manual = max(0.0, min(3.0, manual))
@@ -244,7 +250,8 @@ def compute_state(account_id: int, now: datetime = None) -> dict:
         boosted = bool(until and until > now)
         rows.append({
             "key": gid, "id": key_to_str(gid), "name": name, "n": n, "median": med, "score": score,
-            "weight": math.sqrt(score) if score > 0 else 0.0, "manual": manual,
+            "score_capped": capped, "fixed": gid is None or name == CATCHALL_NAME,
+            "weight": math.sqrt(capped) if capped > 0 else 0.0, "manual": manual,
             "comeback_active": boosted, "comeback_until": until if boosted else None,
             "comeback_factor": cfg["boost_factor"] if boosted else 1.0,
         })
@@ -255,7 +262,8 @@ def compute_state(account_id: int, now: datetime = None) -> dict:
             r["weight"] = 1.0
     raws = {r["key"]: r["weight"] * r["manual"] * r["comeback_factor"] for r in rows}
     eligible = {r["key"] for r in rows if r["manual"] > 0}
-    targets = _compute_targets(raws, eligible, cfg["min_share"])
+    fixed_keys = {r["key"] for r in rows if r["fixed"]}
+    targets = _compute_targets(raws, eligible, cfg["min_share"], fixed_keys)
 
     recent = _recent_group_posts(account_id, now - timedelta(days=ACTUAL_WINDOW_DAYS), name_to_id)
     counts = defaultdict(int)
@@ -444,13 +452,14 @@ def compute_stock_plan(app, account_id: int, now: datetime = None) -> dict:
     for r in state["rows"]:
         turns = slots * r["target"]
         repost = reposts.get(r["key"], 0)
-        needed = max(0, math.ceil(round(turns - repost, 6)))
+        # 「その他」「グループなし」は集める対象ではないので、新しく必要な本数は0(不足の表示は出ない)
+        needed = 0 if r["fixed"] else max(0, math.ceil(round(turns - repost, 6)))
         have = stock.get(r["key"], 0)
         balance = have - needed
         rows.append({
             "id": r["id"], "name": r["name"],
             "turns": round(turns, 2), "repost": repost, "needed": needed, "stock": have, "balance": balance,
-            "score": round(r["score"]), "median": None if r["median"] is None else round(r["median"]),
+            "score": round(r["score_capped"]), "score_raw": round(r["score"]), "fixed": r["fixed"], "median": None if r["median"] is None else round(r["median"]),
             "n": r["n"], "target": r["target"], "actual": r["actual"], "actual_count": r["actual_count"],
             "manual": r["manual"], "comeback_active": r["comeback_active"],
             "comeback_until": (r["comeback_until"] + timedelta(hours=9)).strftime("%m/%d") if r["comeback_until"] else None,
@@ -460,7 +469,8 @@ def compute_stock_plan(app, account_id: int, now: datetime = None) -> dict:
     totals = {"needed": sum(x["needed"] for x in rows), "stock": sum(x["stock"] for x in rows),
               "balance": sum(x["balance"] for x in rows)}
     return {"posts_per_day": cfg["posts_per_day"], "days": cfg["plan_days"], "slots": slots,
-            "enabled": cfg["enabled"], "overall_median": round(state["overall_median"]),
+            "enabled": cfg["enabled"], "overall_median": round(state["overall_median"]), "cap_ratio": cfg["cap_ratio"],
+            "min_share": cfg["min_share"],
             "sample_total": state["sample_total"], "recent_total": state["recent_total"],
             "lookback_days": cfg["lookback_days"], "rows": rows, "totals": totals}
 

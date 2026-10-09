@@ -305,10 +305,16 @@
               <div class="form-text" style="font-size:.7rem">大きいほど、本数が少ないグループの評価が全体の中央値に近づく</div>
             </div>
             <div>
+              <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">評価値の上限倍率</label>
+              <input type="number" class="form-control" name="group_score_cap_ratio" min="1" max="100" step="0.5"
+                     value="{{ settings.group_score_cap_ratio }}" style="max-width:110px">
+              <div class="form-text" style="font-size:.7rem">評価値を「全体の中央値×この倍率」までに抑えてから平方根をとる（3なら、どんなに強いグループでも重みは全体の約1.7倍まで）</div>
+            </div>
+            <div>
               <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">最低割合（%）</label>
               <input type="number" class="form-control" name="group_min_share" min="0" max="50" step="0.5"
                      value="{{ settings.group_min_share }}" style="max-width:110px">
-              <div class="form-text" style="font-size:.7rem">手動補正が0でないグループの最低の出番</div>
+              <div class="form-text" style="font-size:.7rem">手動補正が0でないグループの最低の出番。「その他」「グループなし」はこの割合で固定</div>
             </div>
             <div>
               <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">連続を避ける回数</label>

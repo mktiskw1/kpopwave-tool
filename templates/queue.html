@@ -519,7 +519,8 @@ function renderPlan(plan) {
     var cb = r.comeback_active ? '🆕 ×' + r.comeback_factor + '（' + pEsc(r.comeback_until) + 'まで）' : '-';
     var tip = r.median == null ? '初回投稿の実績なし（全体の中央値で評価）' : '本数' + r.n + ' / グループの中央値 ' + r.median.toLocaleString();
     return '<tr>' +
-      '<td class="fw-bold">' + pEsc(r.name) + '</td>' +
+      '<td class="fw-bold">' + pEsc(r.name) +
+        (r.fixed ? ' <span class="text-muted" style="font-weight:400;font-size:.7rem" title="評価値の重み付けの対象外。目標の割合は最低割合で固定、集める対象にもしません">(最低割合で固定)</span>' : '') + '</td>' +
       '<td class="text-end">' + r.needed + '</td>' +
       '<td class="text-end">' + r.stock + '</td>' +
       '<td class="text-end">' + balanceCell(r.balance) + '</td>' +
@@ -535,7 +536,8 @@ function renderPlan(plan) {
   }).join('');
   document.getElementById('plan-note').textContent =
     '評価値＝直近' + plan.lookback_days + '日に初回投稿した動画の閲覧数の中央値（本数が少ないグループは全体の中央値' +
-    plan.overall_median.toLocaleString() + 'に寄せています）。目標の割合は評価値の平方根×手動補正×カムバック補正で決まり、' +
+    plan.overall_median.toLocaleString() + 'に寄せ、全体の中央値の' + plan.cap_ratio + '倍を上限にしています）。' +
+    '「その他」「グループなし」は重み付けせず、目標の割合を最低割合（' + (plan.min_share * 100) + '%）で固定します。目標の割合は評価値の平方根×手動補正×カムバック補正で決まり、' +
     '手動補正が0でないグループには最低割合を保証します。新しく必要な本数＝期間中の出番−再投稿の見込み。' +
     (plan.enabled ? '' : '【注意】グループ調整はOFFのため、実際の投稿はこの目標に従いません。');
 }
