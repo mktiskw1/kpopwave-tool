@@ -147,7 +147,7 @@
         <span class="badge bg-info-subtle text-info-emphasis" style="font-size:.72rem">{{ c.guessed_group }}</span>
         {% endif %}
         {% if c.shortage %}
-        <span class="badge bg-danger" style="font-size:.72rem" title="このグループは、計画の期間中にストックが足りません(キュー画面のストック計画)">あと{{ c.shortage }}本不足</span>
+        <span class="badge badge-stock-short" style="font-size:.72rem" title="このグループは、計画の期間中にストックが足りません(キュー画面のストック計画)">あと{{ c.shortage }}本不足</span>
         {% endif %}
       </div>
       <div style="font-size:.78rem;color:var(--text-muted)">
