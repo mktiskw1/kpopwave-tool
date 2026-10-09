@@ -89,17 +89,32 @@ def _probe_video(file_path: str) -> dict:
         return {}
 
 
-def _transcode_to_h264(file_path: str) -> bool:
-    """H.264+AACにインプレース変換する（元ファイルを上書き）。成功したらTrueを返す。"""
+_TARGET_VIDEO_SIZE_MB = 85   # 容量超過のとき、この大きさに収まるビットレートで変換する(上限95MBに余裕を持たせる)
+_AUDIO_KBPS = 128
+
+
+def _transcode_to_h264(file_path: str, duration_sec: float = 0.0, shrink: bool = False) -> bool:
+    """H.264+AACにインプレース変換する（元ファイルを上書き）。成功したらTrueを返す。
+
+    shrink=True(容量が上限を超えているとき)は、動画の長さから逆算したビットレート(目標_TARGET_VIDEO_SIZE_MB)で
+    変換する。以前は一律 crf 23 だったため、元が高ビットレート(例: 1080p60・25Mbps)だと変換後も約500MBのままで
+    Threads側の動画処理エラーになり、投稿のたびに再変換して画質も劣化していた。"""
     import subprocess
     if not os.path.exists(_FFMPEG_EXE):
         logger.error("ffmpeg が見つかりません: %s", _FFMPEG_EXE)
         return False
     tmp_path = file_path + ".converting.mp4"
+    if shrink and duration_sec > 0:
+        video_kbps = max(500, int(_TARGET_VIDEO_SIZE_MB * 8 * 1024 / duration_sec - _AUDIO_KBPS))
+        quality_args = ["-b:v", f"{video_kbps}k", "-maxrate", f"{int(video_kbps * 1.25)}k",
+                        "-bufsize", f"{video_kbps * 2}k"]
+        logger.info("容量超過のためビットレート指定で変換: 目標%dMB / %.0f秒 → 映像%dkbps", _TARGET_VIDEO_SIZE_MB, duration_sec, video_kbps)
+    else:
+        quality_args = ["-crf", "23"]
     cmd = [
         _FFMPEG_EXE, "-y", "-i", file_path,
-        "-vcodec", "libx264", "-crf", "23", "-preset", "fast",
-        "-acodec", "aac", "-b:a", "128k",
+        "-vcodec", "libx264", *quality_args, "-preset", "fast",
+        "-acodec", "aac", "-b:a", f"{_AUDIO_KBPS}k",
         "-movflags", "+faststart",
         tmp_path,
     ]
@@ -158,7 +173,7 @@ def _ensure_threads_compatible(file_path: str, channel_name: str = "") -> bool:
 
     if reasons:
         logger.warning("[%s] Threads非互換: %s → H.264+AACに変換", channel_name, ", ".join(reasons))
-        return _transcode_to_h264(file_path)
+        return _transcode_to_h264(file_path, duration_sec=duration, shrink=size_mb > _MAX_VIDEO_SIZE_MB)
 
     logger.info("[%s] Threads互換OK: %s", channel_name, os.path.basename(file_path))
     return True
