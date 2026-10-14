@@ -190,17 +190,18 @@
 
 <!-- 前倒し投稿履歴 -->
 <div class="card p-3 mb-4">
-  <h6 class="fw-bold mb-3">前倒し投稿履歴（投稿後60分いいね0検出時の自動前倒し、直近20件）</h6>
+  <h6 class="fw-bold mb-1">前倒し投稿履歴（投稿後60分いいね0検出時の自動前倒し、直近50件）</h6>
+  <div class="mb-3" style="font-size:.75rem;color:var(--text-muted)">日時はすべて日本時間(JST)です。いいね数は現在の値（削除済みの投稿は削除時の最終値）です。</div>
   {% if early_advance_logs %}
   <div class="table-responsive">
     <table class="table table-hover mb-0" style="font-size:.85rem">
       <thead>
-        <tr><th>日時</th><th>結果</th><th>連鎖</th><th>詳細</th></tr>
+        <tr><th>日時(JST)</th><th>結果</th><th>連鎖</th><th>いいね0だった投稿</th><th>前倒しした投稿</th></tr>
       </thead>
       <tbody>
         {% for log in early_advance_logs %}
         <tr>
-          <td class="text-nowrap">{{ log.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+          <td class="text-nowrap">{{ (log.created_at | utc_to_jst).strftime('%Y-%m-%d %H:%M') }}</td>
           <td>
             {% if log.action == 'advanced' %}
               <span class="badge bg-success">前倒し実行</span>
@@ -211,7 +212,35 @@
             {% endif %}
           </td>
           <td class="text-nowrap">{{ log.chain_position }}/2</td>
-          <td>{{ log.note }}</td>
+          {% for aid in [log.source_article_id, log.target_article_id] %}
+          {% set info = early_advance_info.get(aid) if aid else None %}
+          <td style="min-width:260px">
+            {% if not aid and loop.last and log.action != 'advanced' %}
+              <span class="text-muted">-</span>
+            {% elif not info or info.state == 'missing' %}
+              <span class="text-muted">削除済み{% if aid %}（id={{ aid }}）{% endif %}</span>
+            {% else %}
+            <div class="d-flex gap-2">
+              {% if info.thumb %}
+              <img src="{{ info.thumb }}" alt="" loading="lazy" style="width:56px;height:42px;object-fit:cover;border-radius:4px;flex-shrink:0"
+                   onerror="this.style.display='none'">
+              {% endif %}
+              <div style="min-width:0;font-size:.78rem">
+                <div class="fw-bold" title="{{ info.title }}">{{ info.title[:40] }}{% if info.title|length > 40 %}…{% endif %}</div>
+                <div class="text-muted">
+                  {{ info.group or 'グループなし' }}{% if info.member %} / {{ info.member }}{% endif %}
+                  {% if info.posted %} ・ 投稿 {{ info.posted }}（{{ info.slot }}）{% endif %}
+                </div>
+                <div>
+                  {% if info.likes is not none %}<span class="badge bg-secondary">{{ info.likes }}いいね{% if info.state == 'deleted' %}（削除済み・最終値）{% else %}（現在）{% endif %}</span>
+                  {% else %}<span class="text-muted">いいね数なし</span>{% endif %}
+                  {% if info.post_id %}<span class="text-muted" title="Threads投稿ID(リンクは保存していません)">ID:{{ info.post_id }}</span>{% endif %}
+                </div>
+              </div>
+            </div>
+            {% endif %}
+          </td>
+          {% endfor %}
         </tr>
         {% endfor %}
       </tbody>

@@ -2622,9 +2622,10 @@ def analytics():
     early_advance_logs = (
         EarlyAdvanceLog.query
         .order_by(EarlyAdvanceLog.created_at.desc())
-        .limit(20)
+        .limit(50)
         .all()
     )
+    early_advance_info = _early_advance_article_infos(early_advance_logs)
 
     return render_template(
         "analytics.html",
@@ -2639,7 +2640,52 @@ def analytics():
         hour_rows=hour_rows,
         weekday_rows=weekday_rows,
         early_advance_logs=early_advance_logs,
+        early_advance_info=early_advance_info,
     )
+
+
+def _early_advance_article_infos(logs) -> dict:
+    """前倒し投稿履歴に表示する、関係する記事の情報 {記事ID: 表示用dict} を返す。
+    記事が残っていればArticleから(いいね数は現在値)、削除済みならdeleted_post_logから、どちらにも無ければ
+    missing=True(「削除済み」と表示)。時刻はJSTで返す。"""
+    ids = {i for lg in logs for i in (lg.source_article_id, lg.target_article_id) if i}
+    infos = {}
+    if not ids:
+        return infos
+    groups = {g.id: g.name for g in Group.query.all()}
+    members = {m.id: m.name for m in Member.query.filter(Member.group_id.in_(list(groups))).all()} if groups else {}
+
+    def _thumb(video_id, fallback=None):
+        if fallback:
+            return fallback
+        return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
+
+    def _when(dt):
+        if not dt:
+            return None, None
+        j = dt + timedelta(hours=9)
+        return j.strftime("%m/%d %H:%M"), f"{j.hour}時台"
+
+    for a in Article.query.filter(Article.id.in_(ids)).all():
+        posted, slot = _when(a.posted_at)
+        infos[a.id] = {
+            "state": "live", "title": a.title, "thumb": _thumb(_extract_youtube_id(a.url or ""), a.thumbnail_url),
+            "group": groups.get(a.group_id), "member": members.get(a.member_id),
+            "posted": posted, "slot": slot, "likes": a.like_count, "post_id": a.threads_post_id, "status": a.status,
+        }
+    from database import DeletedPostLog
+    for lg in DeletedPostLog.query.filter(DeletedPostLog.article_id.in_(ids)).order_by(DeletedPostLog.id.asc()).all():
+        if lg.article_id in infos:
+            continue
+        posted, slot = _when(lg.posted_at)
+        infos[lg.article_id] = {
+            "state": "deleted", "title": lg.title, "thumb": _thumb(lg.youtube_video_id),
+            "group": lg.group_name, "member": lg.member_name, "posted": posted, "slot": slot,
+            "likes": lg.final_likes, "post_id": None, "status": "deleted",
+        }
+    for i in ids:
+        infos.setdefault(i, {"state": "missing"})
+    return infos
 
 
 @app.route("/analytics/daily-stats/add", methods=["POST"])
