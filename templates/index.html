@@ -52,6 +52,10 @@
       <button class="btn btn-accent px-3 flex-shrink-0" onclick="addVideoManual()" id="add-video-btn">
         <i class="bi bi-camera-video-fill me-1"></i>動画を追加
       </button>
+      <button class="btn btn-outline-primary px-3 flex-shrink-0" onclick="addVideoHighlight()" id="add-video-hl-btn"
+              title="YouTubeでよく再生されている部分(無ければサビ推定)だけをダウンロードします">
+        <i class="bi bi-scissors me-1"></i>見どころだけ
+      </button>
     </div>
     <div class="d-flex align-items-center gap-2 mt-2" style="font-size:.82rem;color:var(--text-muted)">
       <span>長尺動画は範囲指定（任意）:</span>
@@ -200,6 +204,7 @@
 {% endblock %}
 
 {% block scripts %}
+{% include '_highlight_modal.html' %}
 <script>
 var CURRENT_ACCOUNT_ID = {{ nav_active_account_id | tojson }};
 
@@ -370,7 +375,21 @@ function startChapterSplit(url) {
   });
 }
 
-function submitAddVideoManual(url, startVal, endVal) {
+// 見どころだけ取り込む(URL貼り付け): 範囲を確認してから、その区間だけをダウンロードする
+function addVideoHighlight() {
+  var input = document.getElementById('add-video-input');
+  var result = document.getElementById('add-video-result');
+  var url = input.value.trim();
+  var m = url.match(/(?:v=|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})/);
+  if (!m) { result.innerHTML = '<span style="color:var(--accent)">YouTube動画のURLを入力してください</span>'; input.focus(); return; }
+  hlOpen([{ key: 0, video_id: m[1], title: url }], function (sels) {
+    var sel = sels[0];
+    if (!sel.method) { submitAddVideoManual(url, '', ''); return; }   // 範囲を決められなかった: 丸ごと
+    submitAddVideoManual(url, '', '', { method: sel.method, start: sel.start, end: sel.end, chart: sel.chart });
+  });
+}
+
+function submitAddVideoManual(url, startVal, endVal, highlight) {
   var input  = document.getElementById('add-video-input');
   var btn    = document.getElementById('add-video-btn');
   var result = document.getElementById('add-video-result');
@@ -384,7 +403,8 @@ function submitAddVideoManual(url, startVal, endVal) {
       url: url,
       account_id: CURRENT_ACCOUNT_ID,
       start_time: startVal,
-      end_time: endVal
+      end_time: endVal,
+      highlight: highlight || null
     })
   })
   .then(function(r) { return r.json(); })
@@ -603,7 +623,9 @@ function _rowHtml(state, v, i) {
     '<td>' + formatViewCount(v.view_count) + '</td>' +
     '<td>' +
       '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="addSingleVideo(\'' + state.prefix + '\', ' + i + ')" id="' + state.prefix + '-single-btn-' + i + '">' +
-        'この動画を追加</button>' +
+        'この動画を追加</button> ' +
+      '<button type="button" class="btn btn-sm btn-outline-primary mt-1" onclick="addHighlightVideos(\'' + state.prefix + '\', [' + i + '])" id="' + state.prefix + '-hl-btn-' + i + '" ' +
+        'title="よく再生されている部分(無ければサビ推定)だけをダウンロード">✂ 見どころだけ</button>' +
     '</td>' +
     '</tr>';
 }
@@ -633,6 +655,8 @@ function renderCandidates(state, videos) {
     '<div class="d-flex gap-2 flex-wrap">' +
       '<button class="btn btn-accent" onclick="addSelectedVideos(\'' + state.prefix + '\')" id="' + state.prefix + '-add-btn">' +
         '<i class="bi bi-download me-1"></i>選択した動画を追加</button>' +
+      '<button class="btn btn-outline-primary" onclick="addHighlightSelected(\'' + state.prefix + '\')">' +
+        '<i class="bi bi-scissors me-1"></i>選択した動画を見どころだけ追加</button>' +
       '<button class="btn btn-outline-secondary" onclick="loadMoreVideos(\'' + state.prefix + '\')" id="' + state.prefix + '-load-more-btn"' +
         (state.nextPageToken ? '' : ' style="display:none"') + '>' +
         '<i class="bi bi-arrow-down-circle me-1"></i>もっと見る（さらに過去を探す）</button>' +
@@ -727,6 +751,50 @@ function addSingleVideo(prefix, index) {
     btn.className = 'btn btn-sm btn-outline-danger';
     btn.innerHTML = '失敗（再試行）';
     btn.title = '通信エラーが発生しました';
+  });
+}
+
+// 見どころだけ追加(音楽番組検索・fancam検索の結果から): 範囲を確認してから、1本ずつ区間だけをダウンロードする
+function addHighlightSelected(prefix) {
+  var idxs = Array.prototype.map.call(document.querySelectorAll('.' + prefix + '-checkbox:checked'), function (cb) { return parseInt(cb.value, 10); });
+  if (!idxs.length) { alert('動画が選択されていません'); return; }
+  addHighlightVideos(prefix, idxs);
+}
+
+function addHighlightVideos(prefix, indices) {
+  var state = STATE_BY_PREFIX[prefix];
+  var progress = document.getElementById(prefix + '-add-progress');
+  var items = indices.map(function (i) { var v = state.videos[i]; return { key: i, video_id: v.video_id, title: v.title }; });
+  hlOpen(items, function (sels) {
+    var queue = sels.slice();
+    var total = queue.length, done = 0, okCount = 0, errors = [];
+    function next() {
+      if (!queue.length) {
+        progress.innerHTML = '<span style="color:var(--accent3)">' + okCount + '/' + total + '件追加しました。</span>' +
+          (okCount > 0 ? ' — <a href="/pending">承認待ち画面で確認</a>' : '') +
+          (errors.length ? '<div style="color:var(--accent)">失敗: ' + escHtml(errors.join(' / ')) + '</div>' : '');
+        return;
+      }
+      var sel = queue.shift();
+      var v = state.videos[sel.key];
+      done++;
+      progress.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>ダウンロード中... (' + done + '/' + total + ') ' + escHtml(v.title.slice(0, 40));
+      var body = { url: v.url, account_id: CURRENT_ACCOUNT_ID };
+      if (sel.method) {
+        body.start_time = String(sel.start); body.end_time = String(sel.end);
+        body.highlight = { method: sel.method, start: sel.start, end: sel.end, chart: sel.chart };
+      }
+      fetch('/api/videos/add-manual', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var btn = document.getElementById(prefix + '-hl-btn-' + sel.key);
+          if (d.ok) { okCount++; if (btn) { btn.className = 'btn btn-sm btn-success mt-1'; btn.textContent = '追加済み'; btn.disabled = true; } }
+          else { errors.push(v.title.slice(0, 30) + ': ' + d.error); }
+          next();
+        })
+        .catch(function () { errors.push(v.title.slice(0, 30) + ': 通信エラー'); next(); });
+    }
+    next();
   });
 }
 

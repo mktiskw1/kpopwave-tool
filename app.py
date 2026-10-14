@@ -169,6 +169,10 @@ def _migrate_db():
         ("channel_name", "VARCHAR(200)"),
         ("watched_channel_id", "INTEGER"),
         ("priority_requested_at", "DATETIME"),
+        ("clip_method", "VARCHAR(20)"),
+        ("highlight_start", "FLOAT"),
+        ("highlight_end", "FLOAT"),
+        ("highlight_heatmap", "TEXT"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -435,6 +439,8 @@ def _init_default_settings():
         "watched_fancam_keywords": "직캠, fancam, 원테이크, 페이스캠, facecam",
         "watched_auto_fetch_enabled": "true",
         **group_balance.DEFAULTS,
+        "highlight_clip_seconds": "45",
+        "highlight_padding_seconds": "1.5",
     }
     for key, value in defaults.items():
         if not Setting.query.filter_by(key=key).first():
@@ -1225,6 +1231,7 @@ _ARTICLE_RESTORE_FIELDS = [
     "image_urls", "content_type", "video_file_path", "is_fancam", "account_id",
     "group_id", "member_id", "buzz_repost_count", "buzz_low_streak",
     "channel_id", "channel_name", "watched_channel_id", "priority_requested_at",
+    "clip_method", "highlight_start", "highlight_end", "highlight_heatmap",
 ]
 _ARTICLE_DATETIME_FIELDS = {
     "published_at", "scheduled_at", "posted_at", "created_at", "engagement_fetched_at", "priority_requested_at",
@@ -1831,6 +1838,8 @@ def settings():
             ("group_spacing", int, 0, 10, "連続を避ける回数"),
             ("comeback_boost_factor", float, 1, 10, "カムバック補正の倍率"),
             ("comeback_boost_days", int, 1, 90, "カムバック補正の日数"),
+            ("highlight_clip_seconds", int, 15, 180, "見どころの目標の長さ(秒)"),
+            ("highlight_padding_seconds", float, 0, 10, "見どころの前後の余白(秒)"),
         ]
         _gb_values = {}
         for _key, _cast, _lo, _hi, _label in _gb_specs:
@@ -1936,6 +1945,8 @@ def settings():
         "group_spacing": Setting.get("group_spacing", group_balance.DEFAULTS["group_spacing"]),
         "comeback_boost_factor": Setting.get("comeback_boost_factor", group_balance.DEFAULTS["comeback_boost_factor"]),
         "comeback_boost_days": Setting.get("comeback_boost_days", group_balance.DEFAULTS["comeback_boost_days"]),
+        "highlight_clip_seconds": Setting.get("highlight_clip_seconds", "45"),
+        "highlight_padding_seconds": Setting.get("highlight_padding_seconds", "1.5"),
         "youtube_channels": json.loads(Setting.get("youtube_channels", "[]") or "[]"),
         "meta_app_id": Setting.get("meta_app_id"),
         "meta_app_secret": Setting.get("meta_app_secret"),
@@ -2095,8 +2106,19 @@ def api_watch_candidates_import():
         WatchedCandidate.id.in_(ids), WatchedCandidate.status == "new")] if ids else []
     if not valid:
         return jsonify({"ok": False, "error": "取り込める候補がありません"}), 400
-    queued = start_candidate_import(app, valid)
-    return jsonify({"ok": True, "queued": queued})
+    highlights = {}
+    raw = (request.get_json(silent=True) or {}).get("highlights")
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            try:
+                cid = int(key)
+            except (TypeError, ValueError):
+                continue
+            meta = _parse_highlight_meta(value)
+            if meta and cid in valid:
+                highlights[cid] = meta
+    queued = start_candidate_import(app, valid, highlights)
+    return jsonify({"ok": True, "queued": queued, "highlight": len(highlights)})
 
 
 @app.route("/api/watch-candidates/skip", methods=["POST"])
@@ -3119,6 +3141,7 @@ def _run_trim_job(app, job_id):
                 account_id=article.account_id,
                 channel_id=article.channel_id,
                 channel_name=article.channel_name,
+                clip_method="manual",
             )
             db.session.add(new_article)
             db.session.flush()  # new_article.id を確定させる（コミット前は未割当のため）
@@ -3456,7 +3479,7 @@ class _YouTubeDownloadNotFoundError(Exception):
     """ダウンロード自体は成功したが、ローカルに出力ファイルが見つからない場合に送出する。"""
 
 
-def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, end_time: float | None, suffix: str, use_cookie: bool = True, playlist_index: int | None = None) -> tuple[str, str]:
+def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, end_time: float | None, suffix: str, use_cookie: bool = True, playlist_index: int | None = None, force_keyframes: bool = False) -> tuple[str, str]:
     """指定範囲(start_time が None なら動画全体)をダウンロードし、(ローカルの一時ファイルパス, 拡張子) を返す。
     ダウンロード自体の失敗は例外をそのまま送出する。ダウンロードは成功したがファイルが見つからない場合は
     _YouTubeDownloadNotFoundError を送出する。use_cookie=False の場合、Cookie認証・js_runtimes・
@@ -3488,6 +3511,9 @@ def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, 
         dl_opts["download_ranges"] = download_range_func(
             [], [(start_time, end_time if end_time is not None else float("inf"))]
         )
+        if force_keyframes:
+            # 切れ目をキーフレームに合わせず再エンコードして、指定した範囲どおりに切り出す(見どころの自動切り出し用)
+            dl_opts["force_keyframes_at_cuts"] = True
     if playlist_index is not None:
         dl_opts["playlist_items"] = str(playlist_index)
 
@@ -3551,6 +3577,78 @@ def search_fancam_videos_endpoint():
     })
 
 
+def _parse_highlight_meta(raw):
+    """画面から渡された見どころの範囲 {"method","start","end","chart"} を検証して返す。不正ならNone。"""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        method = raw.get("method")
+        start, end = float(raw.get("start")), float(raw.get("end"))
+    except (TypeError, ValueError):
+        return None
+    if method not in ("heatmap", "audio") or not (0 <= start < end <= 86400) or end - start < 5:
+        return None
+    chart = raw.get("chart") if isinstance(raw.get("chart"), dict) else None
+    if chart is not None:
+        vals = chart.get("values")
+        if not isinstance(vals, list) or len(vals) > 400 or chart.get("kind") not in ("heatmap", "audio"):
+            chart = None
+    return {"method": method, "start": round(start, 1), "end": round(end, 1), "chart": chart}
+
+
+@app.route("/api/highlight/preview", methods=["POST"])
+def api_highlight_preview():
+    """見どころの範囲を決めて返す(ダウンロードはしない。heatmapが無い動画は音声だけをダウンロードして推定する)。
+    clip_secondsを渡すと、その長さで再計算する(情報はキャッシュされるので2回目以降は速い)。"""
+    import highlight
+    data = request.get_json(silent=True) or {}
+    video_id = (data.get("video_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        return jsonify({"ok": False, "error": "動画IDが不正です"}), 400
+    clip = data.get("clip_seconds")
+    try:
+        clip = float(clip) if clip not in (None, "") else None
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "長さは数値で入力してください"}), 400
+    if clip is not None and not (highlight.CLIP_MIN <= clip <= highlight.CLIP_MAX):
+        return jsonify({"ok": False, "error": f"長さは{highlight.CLIP_MIN}〜{highlight.CLIP_MAX}秒で入力してください"}), 400
+    result = highlight.decide(video_id, clip_seconds=clip)
+    result["method_label"] = highlight.METHOD_LABELS.get(result["method"], "")
+    return jsonify({"ok": True, "result": result})
+
+
+@app.route("/api/articles/<int:article_id>/redownload-full", methods=["POST"])
+def redownload_full_video(article_id):
+    """見どころだけ取り込んだ動画を、元の動画を丸ごとダウンロードし直して差し替える(手動で切り取り直せるようにする)。"""
+    article = Article.query.get_or_404(article_id)
+    if article.clip_method not in ("heatmap", "audio"):
+        return jsonify({"ok": False, "error": "この動画は見どころの自動切り出しで取り込まれたものではありません"}), 400
+    vid_id = _extract_youtube_id(article.url or "")
+    if not vid_id:
+        return jsonify({"ok": False, "error": "元のYouTube動画IDを取得できません"}), 400
+    from channel_watcher import _download_video
+    from video_files import delete_article_video_files, referenced_video_basenames
+    old_path = article.video_file_path
+    try:
+        new_path = _download_video(vid_id)
+    except Exception as exc:
+        logger.error("全体の再ダウンロード失敗 article=%d: %s", article_id, exc)
+        return jsonify({"ok": False, "error": f"ダウンロードに失敗しました: {str(exc)[:120]}"}), 500
+    article.video_file_path = new_path
+    article.clip_method = None
+    article.highlight_start = None
+    article.highlight_end = None          # グラフ用のデータ(highlight_heatmap)は残す
+    if "#t=" in (article.url or ""):
+        base = article.url.split("#", 1)[0]
+        if not Article.query.filter(Article.url == base, Article.id != article.id).first():
+            article.url = base
+    db.session.commit()
+    if old_path and old_path != new_path:
+        static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+        delete_article_video_files(old_path, static_dir, referenced=referenced_video_basenames([]))
+    return jsonify({"ok": True, "video_file_path": new_path})
+
+
 @app.route("/api/videos/add-manual", methods=["POST"])
 def add_video_manual():
     import shutil
@@ -3571,6 +3669,10 @@ def add_video_manual():
     if start_time is not None and end_time is not None and end_time <= start_time:
         return jsonify({"ok": False, "error": "終了時刻は開始時刻より後にしてください"}), 400
     has_range = start_time is not None or end_time is not None
+    hl_meta = _parse_highlight_meta(data.get("highlight"))
+    if hl_meta:
+        # 見どころの自動切り出し: 決めた範囲だけをダウンロードする(範囲指定の仕組みを使う)
+        start_time, end_time, has_range = hl_meta["start"], hl_meta["end"], True
 
     if not has_range and Article.query.filter(
         Article.url == yt_url,
@@ -3614,6 +3716,7 @@ def add_video_manual():
             (start_time or 0) if has_range else None,
             end_time if has_range else None,
             range_suffix,
+            force_keyframes=bool(hl_meta),
         )
     except _YouTubeDownloadNotFoundError:
         return jsonify({"ok": False, "error": "ダウンロードファイルが見つかりません"}), 500
@@ -3660,6 +3763,10 @@ def add_video_manual():
         account_id=_explicit_account_id(data),
         channel_id=full.get("channel_id"),
         channel_name=(full.get("channel") or full.get("uploader") or "")[:200] or None,
+        clip_method=(hl_meta["method"] if hl_meta else ("manual" if has_range else None)),
+        highlight_start=hl_meta["start"] if hl_meta else None,
+        highlight_end=hl_meta["end"] if hl_meta else None,
+        highlight_heatmap=(json.dumps(hl_meta["chart"], ensure_ascii=False) if hl_meta and hl_meta.get("chart") else None),
     )
     db.session.add(article)
     db.session.commit()
@@ -4204,6 +4311,7 @@ def chapter_job_confirm(job_id):
                     account_id=job.account_id,
                     channel_id=job.channel_id,
                     channel_name=job.channel_name,
+                    clip_method="chapter",
                 )
                 db.session.add(article)
                 added += 1

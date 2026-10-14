@@ -91,6 +91,13 @@ class Article(db.Model):
     # 「優先」を押した日時。キューの記事のうち、これが設定されたものはグループ調整より先に(押した順に)投稿される
     # (group_balance.select_for_slot参照)。投稿・再キュー・取り消しでNULLに戻す。
     priority_requested_at = db.Column(db.DateTime, nullable=True)
+    # 取り込み方法の記録(後で成績を比べられるように区別する): heatmap(よく再生された部分で自動切り出し) /
+    # audio(音声からのサビ推定で自動切り出し) / manual(手動の切り取り) / chapter(チャプター分割) / NULL(丸ごと)。
+    # highlight_start/endは自動で決めた範囲(秒)、highlight_heatmapはグラフ表示用のJSON({"kind","values"})。
+    clip_method = db.Column(db.String(20), nullable=True, index=True)
+    highlight_start = db.Column(db.Float, nullable=True)
+    highlight_end = db.Column(db.Float, nullable=True)
+    highlight_heatmap = db.Column(db.Text, nullable=True)
 
     def to_dict(self):
         return {

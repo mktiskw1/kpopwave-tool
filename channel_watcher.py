@@ -8,6 +8,7 @@ playlistItems.list(1ユニット)を使い、動画詳細はvideos.listで50件�
 条件に合った動画はダウンロードせず「候補」(WatchedCandidate)として一覧に並べるだけにする。
 ユーザーが選んだ候補だけを、バックグラウンドでダウンロードして承認待ち(Article)に取り込む。
 """
+import json
 import logging
 import os
 import re
@@ -530,13 +531,14 @@ def get_run_state() -> dict:
 # ── 候補の取り込み(バックグラウンド)・見送り・期限切れ ─────────────────────────
 
 _import_lock = threading.Lock()
-_import_state = {"queue": [], "current": None, "worker": False, "results": {}}
+_import_state = {"queue": [], "current": None, "worker": False, "results": {}, "highlights": {}}
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def start_candidate_import(app, ids: list) -> int:
+def start_candidate_import(app, ids: list, highlights: dict = None) -> int:
     """候補をバックグラウンドでダウンロードして承認待ちへ取り込む。順番に1本ずつ処理する。
-    既に待機中・処理中のIDは無視する。戻り値は新たに待機列へ入れた件数。"""
+    既に待機中・処理中のIDは無視する。戻り値は新たに待機列へ入れた件数。
+    highlights={候補ID: {"method","start","end","chart"}} を渡した候補は、その範囲(見どころ)だけをダウンロードする。"""
     with _import_lock:
         busy = set(_import_state["queue"])
         if _import_state["current"] is not None:
@@ -544,6 +546,9 @@ def start_candidate_import(app, ids: list) -> int:
         new_ids = [i for i in dict.fromkeys(ids) if i not in busy]
         for i in new_ids:
             _import_state["results"].pop(i, None)
+            _import_state["highlights"].pop(i, None)
+            if highlights and i in highlights:
+                _import_state["highlights"][i] = highlights[i]
         _import_state["queue"].extend(new_ids)
         if new_ids and not _import_state["worker"]:
             _import_state["worker"] = True
@@ -560,7 +565,9 @@ def _import_worker(app):
                 return
             cand_id = _import_state["queue"].pop(0)
             _import_state["current"] = cand_id
-        result = _import_one_candidate(app, cand_id)
+        with _import_lock:
+            hl = _import_state["highlights"].pop(cand_id, None)
+        result = _import_one_candidate(app, cand_id, hl)
         with _import_lock:
             _import_state["results"][cand_id] = result
             if len(_import_state["results"]) > 300:
@@ -568,8 +575,9 @@ def _import_worker(app):
                     _import_state["results"].pop(k, None)
 
 
-def _import_one_candidate(app, cand_id: int) -> dict:
-    """1件をダウンロードしてArticle(承認待ち)を作る。失敗時は候補を未確認のまま残し、理由を記録する。"""
+def _import_one_candidate(app, cand_id: int, hl: dict = None) -> dict:
+    """1件をダウンロードしてArticle(承認待ち)を作る。失敗時は候補を未確認のまま残し、理由を記録する。
+    hl(見どころの範囲)があれば、その区間だけをダウンロードし、範囲・決め方・グラフ用データをArticleに記録する。"""
     try:
         with app.app_context():
             cand = db.session.get(WatchedCandidate, cand_id)
@@ -585,7 +593,11 @@ def _import_one_candidate(app, cand_id: int) -> dict:
                 db.session.commit()
                 return {"state": "done", "article_id": existing.id}
 
-            video_path = _download_video(cand.video_id)
+            if hl:
+                import highlight
+                video_path = highlight.download_section(cand.video_id, hl["start"], hl["end"])
+            else:
+                video_path = _download_video(cand.video_id)
             from video_collector import _is_fancam
             article = Article(
                 feed_source=f"{WATCH_FEED_PREFIX}{cand.channel_name}",
@@ -604,6 +616,10 @@ def _import_one_candidate(app, cand_id: int) -> dict:
                 channel_id=cand.channel_id,
                 channel_name=cand.channel_name,
                 watched_channel_id=cand.watched_channel_id,
+                clip_method=hl["method"] if hl else None,
+                highlight_start=hl["start"] if hl else None,
+                highlight_end=hl["end"] if hl else None,
+                highlight_heatmap=(json.dumps(hl["chart"], ensure_ascii=False) if hl and hl.get("chart") else None),
             )
             db.session.add(article)
             db.session.flush()

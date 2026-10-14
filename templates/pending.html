@@ -99,6 +99,9 @@
     <button type="button" id="cand-import-btn" class="btn btn-primary btn-sm" disabled onclick="candImport(null)">
       <i class="bi bi-cloud-download me-1"></i>選択を取り込む
     </button>
+    <button type="button" id="cand-import-hl-btn" class="btn btn-outline-primary btn-sm" disabled onclick="candImportHl(null)">
+      <i class="bi bi-scissors me-1"></i>選択を見どころだけ取り込む
+    </button>
     <button type="button" id="cand-skip-btn" class="btn btn-outline-secondary btn-sm" disabled onclick="candSkip(null)">
       <i class="bi bi-x-circle me-1"></i>選択を見送る
     </button>
@@ -159,6 +162,8 @@
     </div>
     <div class="d-flex flex-column gap-1 flex-shrink-0">
       <button type="button" class="btn btn-primary btn-sm cand-act" onclick="candImport([{{ c.id }}])">取り込む</button>
+      <button type="button" class="btn btn-outline-primary btn-sm cand-act" onclick="candImportHl([{{ c.id }}])"
+              title="YouTubeでよく再生されている部分(無ければサビ推定)だけをダウンロードします">✂ 見どころだけ取り込む</button>
       <button type="button" class="btn btn-outline-secondary btn-sm cand-act" onclick="candSkip([{{ c.id }}])">見送る</button>
     </div>
   </div>
@@ -205,6 +210,15 @@
                  class="form-check-input article-cb mt-0 flex-shrink-0"
                  onchange="updateSelection()">
           <span class="badge bg-secondary" style="font-size:.72rem">{{ a.feed_source }}</span>
+          {% if a.clip_method == 'heatmap' %}
+          <span class="badge bg-info-subtle text-info-emphasis" style="font-size:.72rem" title="YouTubeのよく再生されている部分から自動で切り出しました">✂ 見どころ(自動・再生)</span>
+          {% elif a.clip_method == 'audio' %}
+          <span class="badge bg-info-subtle text-info-emphasis" style="font-size:.72rem" title="音声からサビを推定して自動で切り出しました">✂ 見どころ(自動・音声)</span>
+          {% elif a.clip_method == 'manual' %}
+          <span class="badge bg-secondary-subtle text-secondary-emphasis" style="font-size:.72rem" title="手動で切り取りました">✂ 手動切り取り</span>
+          {% elif a.clip_method == 'chapter' %}
+          <span class="badge bg-secondary-subtle text-secondary-emphasis" style="font-size:.72rem" title="チャプター分割で取り込みました">✂ チャプター</span>
+          {% endif %}
           {% if a.watched_channel_id %}
           <span class="badge bg-primary-subtle text-primary-emphasis" style="font-size:.72rem" title="チャンネル監視で自動取り込みした動画">📡 監視：{{ a.channel_name or '' }}</span>
           {% endif %}
@@ -330,6 +344,26 @@
               </span>
             </span>
           </div>
+          {% if a.highlight_heatmap %}
+          <div class="mb-2 p-2" style="border:1px dashed var(--border);border-radius:8px">
+            <div style="font-size:.8rem;font-weight:700">
+              ✂ 見どころの自動切り出し
+              {% if a.clip_method %}<span class="text-muted" style="font-weight:400">（{{ '再生バーのデータ' if a.clip_method == 'heatmap' else '音声からのサビ推定' }}）</span>{% endif %}
+            </div>
+            <div class="hl-chart my-1" data-hl='{{ a.highlight_heatmap | tojson }}'
+                 data-start="{{ a.highlight_start if a.highlight_start is not none else '' }}"
+                 data-end="{{ a.highlight_end if a.highlight_end is not none else '' }}"></div>
+            <div class="d-flex align-items-center gap-2 flex-wrap" style="font-size:.78rem;color:var(--text-muted)">
+              {% if a.highlight_start is not none %}
+              <span>切り出した範囲: {{ '%.1f'|format(a.highlight_start) }}〜{{ '%.1f'|format(a.highlight_end) }}秒（{{ '%.1f'|format(a.highlight_end - a.highlight_start) }}秒）</span>
+              <button type="button" class="btn btn-sm btn-outline-secondary py-0" onclick="redownloadFull({{ a.id }}, this)"
+                      title="元の動画を丸ごとダウンロードし直して、手動で切り取れるようにします">全体をダウンロードし直す</button>
+              {% else %}
+              <span>丸ごとダウンロード済み（グラフの網掛けは参考）</span>
+              {% endif %}
+            </div>
+          </div>
+          {% endif %}
           <!-- マーク記録ボタン -->
           <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
             <button type="button" onclick="markTrimPoint('start', {{ a.id }})"
@@ -663,6 +697,7 @@
 {% endblock %}
 
 {% block scripts %}
+{% include '_highlight_modal.html' %}
 {% if active_tab == 'candidate' %}
 <script>
 // ── 監視候補の一覧操作 ──
@@ -817,6 +852,7 @@ function candUpdateSel() {
   var all = document.querySelectorAll('.cand-row:not(.d-none) .cand-cb');
   var n = candSelectedIds().length;
   document.getElementById('cand-import-btn').disabled = n === 0;
+  document.getElementById('cand-import-hl-btn').disabled = n === 0;
   document.getElementById('cand-skip-btn').disabled = n === 0;
   document.getElementById('cand-selected-count').textContent = n > 0 ? n + ' 件選択中' : '';
   var sa = document.getElementById('cand-select-all');
@@ -866,12 +902,31 @@ function candShowSummary() {
   document.getElementById('cand-progress').innerHTML = parts.join(' ／ ');
 }
 
-function candImport(ids) {
+// 見どころだけ取り込む: 範囲(開始〜終了・決め方)を確認してから、その区間だけをダウンロードする
+function candImportHl(ids) {
+  ids = ids || candSelectedIds();
+  if (!ids.length) { alert('候補が選択されていません'); return; }
+  var items = ids.map(function (id) {
+    var row = candRow(id);
+    var thumb = row ? row.querySelector('.cand-thumb') : null;
+    var link = row ? row.querySelector('.fw-bold a') : null;
+    return { key: id, video_id: thumb ? thumb.dataset.videoId : '', title: link ? link.textContent.trim() : '' };
+  }).filter(function (it) { return it.video_id; });
+  hlOpen(items, function (sels) {
+    var highlights = {};
+    sels.forEach(function (sel) {
+      if (sel.method) highlights[sel.key] = { method: sel.method, start: sel.start, end: sel.end, chart: sel.chart };
+    });
+    candImport(items.map(function (it) { return it.key; }), highlights);
+  });
+}
+
+function candImport(ids, highlights) {
   ids = ids || candSelectedIds();
   if (!ids.length) { alert('候補が選択されていません'); return; }
   fetch('/api/watch-candidates/import', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ids: ids })
+    body: JSON.stringify({ ids: ids, highlights: highlights || {} })
   })
   .then(function (r) { return r.json(); })
   .then(function (d) {

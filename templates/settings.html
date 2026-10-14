@@ -391,6 +391,33 @@
     </div>
   </div>
 
+  <!-- 見どころだけ取り込む -->
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header"><i class="bi bi-scissors me-2"></i>見どころだけ取り込む</div>
+      <div class="card-body">
+        <div class="form-text mb-3" style="font-size:.75rem">
+          YouTubeの「よく再生されている部分」（再生バーの波）や、無い動画は音声のサビ推定から範囲を決め、その部分だけをダウンロードします。
+          「📡 候補」タブの「見どころだけ取り込む」、動画の追加画面の「見どころだけ」から使えます。
+        </div>
+        <div class="d-flex gap-3 flex-wrap">
+          <div>
+            <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">目標の長さ（秒）</label>
+            <input type="number" class="form-control" name="highlight_clip_seconds" min="15" max="180"
+                   value="{{ settings.highlight_clip_seconds }}" style="max-width:110px">
+            <div class="form-text" style="font-size:.7rem">15〜180秒。この長さの範囲で、再生の山が最も大きい部分を選びます（確認画面でその場でも変えられます）</div>
+          </div>
+          <div>
+            <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">前後の余白（秒）</label>
+            <input type="number" class="form-control" name="highlight_padding_seconds" min="0" max="10" step="0.5"
+                   value="{{ settings.highlight_padding_seconds }}" style="max-width:110px">
+            <div class="form-text" style="font-size:.7rem">選んだ範囲の前後に付ける余白。動画の最初と最後ははみ出しません</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- yt-dlp 動画収集チャンネル -->
   <div class="col-md-6">
     <div class="card">

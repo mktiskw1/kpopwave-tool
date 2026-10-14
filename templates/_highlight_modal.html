@@ -1,0 +1,180 @@
+<!-- 見どころだけ取り込む: 自動で決めた範囲(開始〜終了・長さ・決め方・グラフ)を確認し、長さをその場で変えられる共通モーダル。
+     使い方: hlOpen(items, onConfirm)  items=[{key, video_id, title}] / onConfirm(selections)
+     selections=[{key, video_id, method, start, end, chart}] (method=null は範囲を決められなかった動画=丸ごとダウンロード) -->
+<div id="hl-modal" class="d-none"
+     style="position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;"
+     onclick="if(event.target===this)hlClose()">
+  <div style="background:#fff;border-radius:16px;width:min(780px,95vw);max-height:90vh;overflow-y:auto;padding:20px;position:relative;color:#222"
+       onclick="event.stopPropagation()">
+    <button type="button" onclick="hlClose()"
+            style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:1.3rem;cursor:pointer;color:#888;line-height:1;padding:0">✕</button>
+    <h6 class="fw-bold mb-2">見どころだけ取り込む</h6>
+    <div class="d-flex align-items-center gap-2 flex-wrap mb-2" style="font-size:.85rem">
+      <label for="hl-clip" class="mb-0">目標の長さ（秒）</label>
+      <input type="number" id="hl-clip" class="form-control form-control-sm" min="15" max="180" style="width:90px">
+      <button type="button" class="btn btn-sm btn-outline-primary" id="hl-recalc" onclick="hlRecalc()">この長さで再計算</button>
+      <span id="hl-status" style="font-size:.78rem;color:#666"></span>
+    </div>
+    <div id="hl-items"></div>
+    <div class="form-text mb-3" style="font-size:.74rem">
+      「よく再生された部分」はYouTubeの再生バーの波（視聴者が繰り返し見た場所）から、「サビ推定(音声)」はその波が無い動画の音の大きさから範囲を決めています。
+      範囲が決められなかった動画は、今までどおり丸ごとダウンロードします。気に入らない場合は、取り込み後に承認待ちの切り取り画面から
+      「全体をダウンロードし直す」で手動の切り取りに切り替えられます。
+    </div>
+    <div class="d-flex justify-content-end gap-2">
+      <button type="button" class="btn btn-sm btn-outline-secondary" onclick="hlClose()">キャンセル</button>
+      <button type="button" class="btn btn-sm btn-success" id="hl-go" onclick="hlConfirm()">この範囲でダウンロード</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var HL = { items: [], decisions: {}, onConfirm: null, busy: false };
+
+function hlEsc(v) {
+  var d = document.createElement('div');
+  d.textContent = v == null ? '' : String(v);
+  return d.innerHTML;
+}
+
+function hlFmt(sec) {
+  var m = Math.floor(sec / 60);
+  var s = (sec - m * 60).toFixed(1);
+  return m + ':' + (parseFloat(s) < 10 ? '0' : '') + s;
+}
+
+// 再生バー風のグラフ(値の棒グラフ＋選んだ範囲を強調)
+function hlChartSvg(chart, start, end) {
+  if (!chart || !chart.values || !chart.values.length) return '';
+  var n = chart.values.length, w = 300, h = 36;
+  var bars = chart.values.map(function (v, i) {
+    var bh = Math.max(1, v * (h - 2));
+    return '<rect x="' + (i * w / n).toFixed(2) + '" y="' + (h - bh).toFixed(1) + '" width="' + (w / n - 0.4).toFixed(2) +
+      '" height="' + bh.toFixed(1) + '" fill="#9aa5b1"></rect>';
+  }).join('');
+  var range = '';
+  if (chart.duration && start != null && end != null) {
+    var x1 = start / chart.duration * w, x2 = end / chart.duration * w;
+    range = '<rect x="' + x1.toFixed(1) + '" y="0" width="' + (x2 - x1).toFixed(1) + '" height="' + h +
+      '" fill="rgba(233,30,99,.22)" stroke="#e91e63" stroke-width="1"></rect>';
+  }
+  return '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" style="width:100%;height:44px;background:#f4f6f8;border-radius:6px">' +
+    bars + range + '</svg>';
+}
+
+function hlRender() {
+  var box = document.getElementById('hl-items');
+  box.innerHTML = HL.items.map(function (it) {
+    var d = HL.decisions[it.key] || { loading: true };
+    var body;
+    if (d.loading) {
+      body = '<span class="text-primary"><span class="spinner-border spinner-border-sm me-1"></span>範囲を決めています…（再生バーのデータが無い動画は、音声だけを先にダウンロードします）</span>';
+    } else if (d.error) {
+      body = '<span class="text-danger">' + hlEsc(d.error) + '</span> <span class="text-muted">（この動画は丸ごとダウンロードします）</span>';
+    } else if (!d.method) {
+      body = '<span class="text-warning fw-bold">範囲を決められませんでした</span> <span class="text-muted">' + hlEsc(d.note || '') +
+        '（丸ごとダウンロードします）</span>' + hlChartSvg(d.chart, null, null);
+    } else {
+      body = '<div><span class="badge bg-primary">' + hlEsc(d.method_label) + '</span> ' +
+        '<b>' + hlFmt(d.start) + ' 〜 ' + hlFmt(d.end) + '</b>　長さ ' + d.length + '秒' +
+        '<span class="text-muted">（動画全体 ' + hlFmt(d.duration) + '）</span></div>' + hlChartSvg(d.chart, d.start, d.end);
+    }
+    return '<div class="mb-3 p-2" style="border:1px solid #e1e4e8;border-radius:10px">' +
+      '<div class="fw-bold mb-1" style="font-size:.82rem">' + hlEsc((it.title || it.video_id).slice(0, 70)) + '</div>' +
+      '<div style="font-size:.8rem">' + body + '</div></div>';
+  }).join('');
+  var anyLoading = HL.items.some(function (it) { var d = HL.decisions[it.key]; return !d || d.loading; });
+  document.getElementById('hl-go').disabled = anyLoading;
+  document.getElementById('hl-recalc').disabled = anyLoading;
+  document.getElementById('hl-status').textContent = anyLoading ? '' : HL.items.length + '本';
+}
+
+function hlLoadAll(clipSeconds) {
+  var idx = 0;
+  HL.items.forEach(function (it) { HL.decisions[it.key] = { loading: true }; });
+  hlRender();
+  function next() {
+    if (idx >= HL.items.length) { hlRender(); return; }
+    var it = HL.items[idx++];
+    fetch('/api/highlight/preview', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ video_id: it.video_id, clip_seconds: clipSeconds })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d.ok) {
+        HL.decisions[it.key] = d.result;
+        var input = document.getElementById('hl-clip');
+        if (!input.value) input.value = Math.round(d.result.clip_seconds);
+      } else {
+        HL.decisions[it.key] = { error: d.error || '範囲を決められませんでした' };
+      }
+      hlRender(); next();
+    })
+    .catch(function () { HL.decisions[it.key] = { error: '通信エラーが発生しました' }; hlRender(); next(); });
+  }
+  next();
+}
+
+function hlOpen(items, onConfirm) {
+  HL.items = items;
+  HL.decisions = {};
+  HL.onConfirm = onConfirm;
+  document.getElementById('hl-clip').value = '';
+  document.getElementById('hl-modal').classList.remove('d-none');
+  hlLoadAll(null);
+}
+
+function hlRecalc() {
+  var v = parseFloat(document.getElementById('hl-clip').value);
+  if (!(v >= 15 && v <= 180)) { alert('長さは15〜180秒で入力してください'); return; }
+  hlLoadAll(v);
+}
+
+function hlClose() {
+  document.getElementById('hl-modal').classList.add('d-none');
+  HL.onConfirm = null;
+}
+
+// 承認待ちの切り取り画面: 見どころのグラフと自動で決めた範囲を描く
+function hlDrawArticleCharts() {
+  document.querySelectorAll('.hl-chart').forEach(function (el) {
+    try {
+      var chart = JSON.parse(JSON.parse(el.getAttribute('data-hl')));
+      var start = el.getAttribute('data-start'), end = el.getAttribute('data-end');
+      el.innerHTML = hlChartSvg(chart, start === '' ? null : parseFloat(start), end === '' ? null : parseFloat(end));
+    } catch (e) { el.textContent = ''; }
+  });
+}
+
+// 見どころだけ取り込んだ動画を、元の動画を丸ごとダウンロードし直して差し替える(手動で切り取り直せるようにする)
+function redownloadFull(id, btn) {
+  if (!confirm('元の動画を丸ごとダウンロードし直します。自動で切り出した動画は置き換わります。よろしいですか？')) return;
+  var orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> ダウンロード中…';
+  fetch('/api/articles/' + id + '/redownload-full', { method: 'POST' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d.ok) { location.reload(); }
+      else { btn.disabled = false; btn.innerHTML = orig; alert(d.error || 'ダウンロードに失敗しました'); }
+    })
+    .catch(function () { btn.disabled = false; btn.innerHTML = orig; alert('通信エラーが発生しました'); });
+}
+
+hlDrawArticleCharts();
+
+function hlConfirm() {
+  var cb = HL.onConfirm;
+  var sels = HL.items.map(function (it) {
+    var d = HL.decisions[it.key] || {};
+    if (d.method && d.start != null) {
+      return { key: it.key, video_id: it.video_id, method: d.method, start: d.start, end: d.end,
+               chart: d.chart ? { kind: d.chart.kind, values: d.chart.values, duration: d.duration } : null };
+    }
+    return { key: it.key, video_id: it.video_id, method: null };
+  });
+  hlClose();
+  if (cb) cb(sels);
+}
+</script>
