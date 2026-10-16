@@ -255,6 +255,19 @@ def decide(video_id: str, clip_seconds: float = None, padding: float = None, use
         logger.info("[highlight] heatmapの窓選び %s: %s %.1f〜%.1f", video_id, how, start, end)
         method = METHOD_HEATMAP
         result["chart"] = {"kind": method, "values": _downsample(grid)}
+        if how == "heatmap_plain" and use_audio:
+            # heatmapが平ら(平均を超える所が無い)・窓が取れないときは、音声からの推定に切り替える
+            # (音声の取得は待ち行列を通る)。音声も失敗したときだけ、heatmapの素の合計のままにする
+            try:
+                energy = fetch_audio_energy(video_id, allow_network=not cache_only)
+                start, end = _best_window(energy, GRID, clip)
+                method = METHOD_AUDIO
+                result["chart"] = {"kind": method, "values": _downsample(energy)}
+                result["note"] = "よく再生された部分のデータが平らだったため、音声から推定しました"
+            except yt_queue.NeedNetwork:
+                raise
+            except Exception as exc:
+                logger.error("[highlight] heatmapが平らで音声からの推定にも失敗 %s: %s", video_id, yt_queue.error_text(exc))
     elif use_audio:
         try:
             energy = fetch_audio_energy(video_id, allow_network=not cache_only)
