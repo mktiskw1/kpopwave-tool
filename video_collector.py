@@ -5,6 +5,7 @@ import shutil
 import tempfile
 from datetime import datetime, timedelta
 
+import yt_queue
 from config import YOUTUBE_DL_FORMAT
 from database import Article, Setting, db
 
@@ -301,8 +302,9 @@ def _fetch_channel_entries(channel_url: str, flat_opts: dict, cutoff_str: str,
     for suffix in _URL_SUFFIXES:
         attempt_url = base + suffix
         try:
-            with yt_dlp.YoutubeDL(flat_opts) as ydl:
-                info = ydl.extract_info(attempt_url, download=False)
+            with yt_queue.access():   # YouTubeへのアクセスは待ち行列(yt_queue)の中で間隔を空けて行う
+                with yt_dlp.YoutubeDL(flat_opts) as ydl:
+                    info = ydl.extract_info(attempt_url, download=False)
         except Exception as exc:
             logger.debug("[%s] %s 取得失敗: %s", channel_name, attempt_url, exc)
             continue
@@ -401,8 +403,9 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
         if len(targets) >= MAX_VIDEOS_PER_CHANNEL:
             break
         try:
-            with yt_dlp.YoutubeDL(info_opts) as ydl:
-                full = ydl.extract_info(c["url"], download=False)
+            with yt_queue.access():   # YouTubeへのアクセスは待ち行列(yt_queue)の中で間隔を空けて行う
+                with yt_dlp.YoutubeDL(info_opts) as ydl:
+                    full = ydl.extract_info(c["url"], download=False)
             if not full:
                 continue
 
@@ -512,8 +515,9 @@ def _collect_channel_videos(channel_info: dict, tmp_dir: str, existing_urls: set
         dl_opts = {**dl_opts_base, "outtmpl": outtmpl_path}
 
         try:
-            with yt_dlp.YoutubeDL(dl_opts) as ydl:
-                ydl.download([target["url"]])
+            with yt_queue.access():   # YouTubeへのアクセスは待ち行列(yt_queue)の中で間隔を空けて行う
+                with yt_dlp.YoutubeDL(dl_opts) as ydl:
+                    ydl.download([target["url"]])
         except Exception as exc:
             logger.error("[%s] ダウンロードエラー: %s", channel_name, exc)
             continue
@@ -564,8 +568,9 @@ def _collect_channel_shorts(channel_info: dict, tmp_dir: str, existing_urls: set
 
     # ─── Step1: Shortsリストをフラット取得 ──────────────────────────────────
     try:
-        with yt_dlp.YoutubeDL(flat_opts) as ydl:
-            info = ydl.extract_info(shorts_url, download=False)
+        with yt_queue.access():   # YouTubeへのアクセスは待ち行列(yt_queue)の中で間隔を空けて行う
+            with yt_dlp.YoutubeDL(flat_opts) as ydl:
+                info = ydl.extract_info(shorts_url, download=False)
     except Exception as exc:
         logger.debug("[%s] Shorts取得失敗: %s", channel_name, exc)
         return []
@@ -606,8 +611,9 @@ def _collect_channel_shorts(channel_info: dict, tmp_dir: str, existing_urls: set
         if len(targets) >= MAX_VIDEOS_PER_CHANNEL:
             break
         try:
-            with yt_dlp.YoutubeDL(info_opts) as ydl:
-                full = ydl.extract_info(c["url"], download=False)
+            with yt_queue.access():   # YouTubeへのアクセスは待ち行列(yt_queue)の中で間隔を空けて行う
+                with yt_dlp.YoutubeDL(info_opts) as ydl:
+                    full = ydl.extract_info(c["url"], download=False)
             if not full:
                 continue
 
@@ -682,8 +688,9 @@ def _collect_channel_shorts(channel_info: dict, tmp_dir: str, existing_urls: set
         dl_opts = {**dl_opts_base, "outtmpl": outtmpl_path}
 
         try:
-            with yt_dlp.YoutubeDL(dl_opts) as ydl:
-                ydl.download([target["url"]])
+            with yt_queue.access():   # YouTubeへのアクセスは待ち行列(yt_queue)の中で間隔を空けて行う
+                with yt_dlp.YoutubeDL(dl_opts) as ydl:
+                    ydl.download([target["url"]])
         except Exception as exc:
             logger.error("[%s] Shorts ダウンロードエラー: %s", channel_name, exc)
             continue

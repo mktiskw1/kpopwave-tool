@@ -96,9 +96,9 @@ function hlLoadAll(clipSeconds) {
   function next() {
     if (idx >= HL.items.length) { hlRender(); return; }
     var it = HL.items[idx++];
-    fetch('/api/highlight/preview', {
+    ytFetch('/api/highlight/preview', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ video_id: it.video_id, clip_seconds: clipSeconds })
+      body: JSON.stringify({ video_id: it.video_id, clip_seconds: clipSeconds, title: it.title || '' })
     })
     .then(function (r) { return r.json(); })
     .then(function (d) {
@@ -153,7 +153,7 @@ function redownloadFull(id, btn) {
   var orig = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> ダウンロード中…';
-  fetch('/api/articles/' + id + '/redownload-full', { method: 'POST' })
+  ytFetch('/api/articles/' + id + '/redownload-full', { method: 'POST' })
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (d.ok) { location.reload(); }

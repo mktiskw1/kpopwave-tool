@@ -21,10 +21,11 @@ import requests
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 
+import yt_queue
 from config import YOUTUBE_DL_FORMAT
 from channel_info import extract_youtube_video_id, get_youtube_api_key
 from database import (
-    Article, DeletedPostLog, Group, Setting, ThreadsAccount, WatchedCandidate, WatchedChannel, db,
+    Article, DeletedPostLog, Group, Setting, ThreadsAccount, WatchedCandidate, WatchedChannel, YoutubeJob, db,
 )
 from youtube_collector import (
     YOUTUBE_CHANNELS_URL, YOUTUBE_VIDEOS_URL, _best_thumbnail,
@@ -242,8 +243,9 @@ def _download_video(video_id: str) -> str:
     }
     if os.path.exists(_YOUTUBE_COOKIE_FILE):
         opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+    with yt_queue.access():
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
 
     found = _find_downloaded_file(tmp_dir, video_id)
     if not found:
@@ -530,49 +532,36 @@ def get_run_state() -> dict:
 
 # ── 候補の取り込み(バックグラウンド)・見送り・期限切れ ─────────────────────────
 
-_import_lock = threading.Lock()
-_import_state = {"queue": [], "current": None, "worker": False, "results": {}, "highlights": {}}
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+IMPORT_KIND = "candidate_import"
 
 
 def start_candidate_import(app, ids: list, highlights: dict = None) -> int:
-    """候補をバックグラウンドでダウンロードして承認待ちへ取り込む。順番に1本ずつ処理する。
-    既に待機中・処理中のIDは無視する。戻り値は新たに待機列へ入れた件数。
-    highlights={候補ID: {"method","start","end","chart"}} を渡した候補は、その範囲(見どころ)だけをダウンロードする。"""
-    with _import_lock:
-        busy = set(_import_state["queue"])
-        if _import_state["current"] is not None:
-            busy.add(_import_state["current"])
-        new_ids = [i for i in dict.fromkeys(ids) if i not in busy]
-        for i in new_ids:
-            _import_state["results"].pop(i, None)
-            _import_state["highlights"].pop(i, None)
-            if highlights and i in highlights:
-                _import_state["highlights"][i] = highlights[i]
-        _import_state["queue"].extend(new_ids)
-        if new_ids and not _import_state["worker"]:
-            _import_state["worker"] = True
-            threading.Thread(target=_import_worker, args=(app,), name="candidate_import", daemon=True).start()
-    return len(new_ids)
+    """候補をバックグラウンドでダウンロードして承認待ちへ取り込む。YouTubeの待ち行列(yt_queue)に入れ、
+    1本ずつ間隔を空けて処理する。既に待機中・処理中のIDは無視する。戻り値は新たに待機列へ入れた件数。
+    highlights={候補ID: {"method","start","end","chart"}} を渡した候補は、その範囲(見どころ)だけをダウンロードする。
+    app context内で呼ぶこと。"""
+    busy = set()
+    for job in YoutubeJob.query.filter(YoutubeJob.kind == IMPORT_KIND,
+                                       YoutubeJob.status.in_(("waiting", "running"))):
+        try:
+            busy.add(json.loads(job.payload).get("cand_id"))
+        except (TypeError, ValueError):
+            pass
+    added = 0
+    for cand_id in dict.fromkeys(ids):
+        if cand_id in busy:
+            continue
+        cand = db.session.get(WatchedCandidate, cand_id)
+        hl = (highlights or {}).get(cand_id)
+        yt_queue.enqueue(IMPORT_KIND, {"cand_id": cand_id, "hl": hl}, key=cand.video_id if cand else None,
+                         title=(cand.title if cand else str(cand_id)))
+        added += 1
+    return added
 
 
-def _import_worker(app):
-    while True:
-        with _import_lock:
-            if not _import_state["queue"]:
-                _import_state["current"] = None
-                _import_state["worker"] = False
-                return
-            cand_id = _import_state["queue"].pop(0)
-            _import_state["current"] = cand_id
-        with _import_lock:
-            hl = _import_state["highlights"].pop(cand_id, None)
-        result = _import_one_candidate(app, cand_id, hl)
-        with _import_lock:
-            _import_state["results"][cand_id] = result
-            if len(_import_state["results"]) > 300:
-                for k in list(_import_state["results"])[:100]:
-                    _import_state["results"].pop(k, None)
+def run_import_job(app, payload: dict) -> dict:
+    """待ち行列のハンドラ: 候補1件を取り込む。"""
+    return _import_one_candidate(app, payload["cand_id"], payload.get("hl"))
 
 
 def _import_one_candidate(app, cand_id: int, hl: dict = None) -> dict:
@@ -631,8 +620,8 @@ def _import_one_candidate(app, cand_id: int, hl: dict = None) -> dict:
             logger.info("[channel_watch] 候補を取り込み: %s / %s", cand.channel_name, cand.title[:60])
             return {"state": "done", "article_id": article.id}
     except Exception as exc:
-        message = _ANSI_RE.sub("", str(exc)).strip().splitlines()[-1][:250] if str(exc).strip() else "不明なエラー"
-        logger.error("[channel_watch] 候補の取り込み失敗 id=%s: %s", cand_id, exc)
+        message = yt_queue.error_text(exc)[:1000] if str(exc).strip() else "不明なエラー"   # yt-dlpの元のエラー文
+        logger.error("[channel_watch] 候補の取り込み失敗 id=%s: %s", cand_id, yt_queue.error_text(exc))
         try:
             with app.app_context():
                 db.session.rollback()
@@ -646,12 +635,34 @@ def _import_one_candidate(app, cand_id: int, hl: dict = None) -> dict:
 
 
 def get_import_progress() -> dict:
-    """取り込みの進行状況: active={id: queued|downloading}、results={id: {state: done|failed, error}}。"""
-    with _import_lock:
-        active = {i: "queued" for i in _import_state["queue"]}
-        if _import_state["current"] is not None:
-            active[_import_state["current"]] = "downloading"
-        return {"active": active, "results": dict(_import_state["results"])}
+    """取り込みの進行状況: active={id: queued|downloading}、results={id: {state: done|failed, error}}、
+    detail={id: {position, eta}}(待ち行列の何件目か・開始予定のJST時刻)。app context内で呼ぶこと。"""
+    active, results, detail = {}, {}, {}
+    waiting = yt_queue._waiting_ordered()
+    running = YoutubeJob.query.filter_by(status="running").first()
+    next_slot, paused_until = yt_queue.get_next_slot(), yt_queue.get_paused_until()
+    jobs = YoutubeJob.query.filter(YoutubeJob.kind == IMPORT_KIND).order_by(YoutubeJob.id.desc()).limit(300).all()
+    for job in reversed(jobs):                  # 古い順に並べ、同じ候補は新しいジョブで上書き
+        try:
+            cand_id = json.loads(job.payload).get("cand_id")
+        except (TypeError, ValueError):
+            continue
+        if job.status == "running":
+            active[cand_id] = "downloading"
+        elif job.status == "waiting":
+            active[cand_id] = "queued"
+            view = yt_queue.job_view(job, waiting=waiting, running=running, next_slot=next_slot,
+                                     paused_until=paused_until)
+            detail[cand_id] = {"position": view["position"], "eta": view["eta"]}
+        elif job.status in ("done", "failed", "cancelled"):
+            res = (json.loads(job.result).get("body") if job.result else None) or {}
+            if job.status == "done" and res.get("state") == "done":
+                results[cand_id] = res
+            else:
+                results[cand_id] = {"state": "failed", "error": res.get("error") or job.error or "取り込みに失敗しました"}
+    for cand_id in active:
+        results.pop(cand_id, None)
+    return {"active": active, "results": results, "detail": detail}
 
 
 def set_candidates_status(ids: list, status: str) -> int:

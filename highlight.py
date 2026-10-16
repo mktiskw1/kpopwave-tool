@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 
+import yt_queue
 from config import YOUTUBE_DL_FORMAT
 from database import Setting
 
@@ -25,7 +26,7 @@ CLIP_MIN, CLIP_MAX, CLIP_DEFAULT = 15, 180, 45
 PAD_MIN, PAD_MAX, PAD_DEFAULT = 0.0, 10.0, 1.5
 GRID = 0.5                   # 窓を動かす刻み(秒)
 CHART_POINTS = 100           # 画面のグラフ用に保存する点数
-CACHE_TTL = 30 * 60
+CACHE_TTL = yt_queue.INFO_CACHE_TTL   # 6時間(動画ごと。同じ動画に何度もアクセスしない)
 
 METHOD_HEATMAP = "heatmap"   # よく再生された部分
 METHOD_AUDIO = "audio"       # 音声からのサビ推定
@@ -76,6 +77,7 @@ def _cache_get(video_id: str):
 
 
 def _cache_put(video_id: str, **kw) -> dict:
+    """音の大きさの時系列のキャッシュ(情報取得のキャッシュはyt_queue側)。"""
     with _cache_lock:
         item = _cache.get(video_id) or {"ts": time.time()}
         item.update(kw)
@@ -87,21 +89,16 @@ def _cache_put(video_id: str, **kw) -> dict:
         return item
 
 
-def fetch_info(video_id: str) -> dict:
-    """yt-dlpの情報取得(ダウンロードなし)。{"duration", "title", "heatmap": [(start,end,value)] or None}"""
-    cached = _cache_get(video_id)
-    if cached and "duration" in cached:
-        return cached
-    import yt_dlp
-    with yt_dlp.YoutubeDL(_ydl_opts()) as ydl:
-        info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
-    if not info:
-        raise RuntimeError("動画情報を取得できませんでした")
+def fetch_info(video_id: str, allow_network: bool = True) -> dict:
+    """動画の情報。{"duration", "title", "heatmap": [(start,end,value)] or None}
+    yt_queue.get_info の6時間キャッシュを使う(確認モーダルで取った情報をダウンロードや範囲決定でも使い回す)。
+    allow_network=Falseでキャッシュに無ければyt_queue.NeedNetworkを送出する。"""
+    info = yt_queue.get_info(video_id, _ydl_opts(), allow_network=allow_network)
     hm = info.get("heatmap") or None
     heatmap = None
     if hm:
         heatmap = [(float(s["start_time"]), float(s["end_time"]), float(s["value"])) for s in hm]
-    return _cache_put(video_id, duration=float(info.get("duration") or 0), title=info.get("title") or "", heatmap=heatmap)
+    return {"duration": float(info.get("duration") or 0), "title": info.get("title") or "", "heatmap": heatmap}
 
 
 # ───────────── 範囲の決定 ─────────────
@@ -144,18 +141,21 @@ def _decode_audio_energy(audio_path: str):
     return np.convolve(rms, np.ones(k) / k, mode="same")
 
 
-def fetch_audio_energy(video_id: str):
+def fetch_audio_energy(video_id: str, allow_network: bool = True):
     """音声だけをダウンロードして(動画よりずっと軽い)音の大きさの時系列を返す。結果はキャッシュする。"""
     cached = _cache_get(video_id)
     if cached and cached.get("energy") is not None:
         return cached["energy"]
+    if not allow_network:
+        raise yt_queue.NeedNetwork()
     import yt_dlp
     from video_collector import _find_downloaded_file
     tmp_dir = tempfile.mkdtemp(prefix="kpopwave_audio_")
     try:
         opts = _ydl_opts(format="bestaudio[ext=m4a]/bestaudio/best", outtmpl=os.path.join(tmp_dir, f"{video_id}.%(ext)s"))
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+        with yt_queue.access():
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
         found = None
         for fn in os.listdir(tmp_dir):
             if video_id in fn:
@@ -182,19 +182,24 @@ def _downsample(values, points: int = CHART_POINTS) -> list:
     return [round(float(v / peak), 3) if peak > 0 else 0.0 for v in out]
 
 
-def decide(video_id: str, clip_seconds: float = None, padding: float = None, use_audio: bool = True) -> dict:
+def decide(video_id: str, clip_seconds: float = None, padding: float = None, use_audio: bool = True,
+           cache_only: bool = False) -> dict:
     """見どころの範囲を決める(ダウンロードはしない。heatmapが無い場合は音声のみダウンロードして推定する)。
     app context内で呼ぶこと。戻り値: {video_id, title, duration, method, start, end, length, clip_seconds, padding,
-    chart:{kind, values}, note}。method=None は範囲を決められなかった場合(丸ごとダウンロード)。"""
+    chart:{kind, values}, note}。method=None は範囲を決められなかった場合(丸ごとダウンロード)。
+    cache_only=Trueならキャッシュだけで答える(ネットワークが必要ならyt_queue.NeedNetworkを送出)。"""
     default_clip, default_pad = get_settings()
     clip = max(CLIP_MIN, min(CLIP_MAX, float(clip_seconds if clip_seconds is not None else default_clip)))
     pad = max(PAD_MIN, min(PAD_MAX, float(padding if padding is not None else default_pad)))
     result = {"video_id": video_id, "title": "", "duration": 0, "method": None, "start": None, "end": None,
               "length": None, "clip_seconds": clip, "padding": pad, "chart": None, "note": ""}
     try:
-        info = fetch_info(video_id)
+        info = fetch_info(video_id, allow_network=not cache_only)
+    except yt_queue.NeedNetwork:
+        raise
     except Exception as exc:
-        result["note"] = f"動画情報を取得できませんでした: {str(exc)[:120]}"
+        logger.error("[highlight] 動画情報の取得に失敗 %s: %s", video_id, yt_queue.error_text(exc))
+        result["note"] = f"動画情報を取得できませんでした: {yt_queue.error_text(exc)}"
         return result
     duration = info["duration"]
     result.update(title=info["title"], duration=duration)
@@ -216,13 +221,15 @@ def decide(video_id: str, clip_seconds: float = None, padding: float = None, use
         result["chart"] = {"kind": method, "values": _downsample(grid)}
     elif use_audio:
         try:
-            energy = fetch_audio_energy(video_id)
+            energy = fetch_audio_energy(video_id, allow_network=not cache_only)
             start, end = _best_window(energy, GRID, clip)
             method = METHOD_AUDIO
             result["chart"] = {"kind": method, "values": _downsample(energy)}
+        except yt_queue.NeedNetwork:
+            raise
         except Exception as exc:
-            logger.warning("[highlight] 音声からの推定に失敗 %s: %s", video_id, exc)
-            result["note"] = f"音声からの推定に失敗しました: {str(exc)[:100]}。丸ごとダウンロードします"
+            logger.error("[highlight] 音声からの推定に失敗 %s: %s", video_id, yt_queue.error_text(exc))
+            result["note"] = f"音声からの推定に失敗しました: {yt_queue.error_text(exc)}。丸ごとダウンロードします"
             return result
     else:
         result["note"] = "よく再生された部分のデータがありません"
@@ -259,8 +266,9 @@ def download_section(video_id: str, start: float, end: float) -> str:
         download_ranges=download_range_func([], [(float(start), float(end))]),
         force_keyframes_at_cuts=True,
     )
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+    with yt_queue.access():
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
     found = _find_downloaded_file(tmp_dir, stem)
     if not found:
         raise RuntimeError("ダウンロードファイルが見つかりません")

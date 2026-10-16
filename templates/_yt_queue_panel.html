@@ -1,0 +1,72 @@
+<!-- YouTube待ち行列の状況: 待ちの件数・処理中の動画・次に始まる時刻・停止中の表示と、停止解除/1件を外すボタン。
+     スタイルとポーリングの共通部分は base.html の ytFetch と同じ場所(.ytq-* クラス)にある。 -->
+<div id="ytq-panel" class="ytq-panel mb-3" style="display:none">
+  <div id="ytq-head"></div>
+  <ul id="ytq-list" class="ytq-list"></ul>
+</div>
+
+<script>
+(function () {
+  var timer = null;
+
+  function esc(v) {
+    var d = document.createElement('div');
+    d.textContent = v == null ? '' : String(v);
+    return d.innerHTML;
+  }
+
+  function render(d) {
+    var panel = document.getElementById('ytq-panel');
+    var head = document.getElementById('ytq-head');
+    var list = document.getElementById('ytq-list');
+    var idle = !d.paused && !d.running && !d.waiting_count;
+    if (idle) { panel.style.display = 'none'; return; }
+    panel.style.display = '';
+    panel.classList.toggle('ytq-paused', !!d.paused);
+    var html = '';
+    if (d.paused) {
+      html += '<div class="ytq-title">YouTubeに止められたため、すべてのYouTubeアクセスを停止中です</div>' +
+        '<div>再開予定: <b>' + esc(d.paused_until) + ' (JST)</b>（時刻になると自動で再開します）</div>' +
+        (d.pause_reason ? '<div style="font-size:.76rem;word-break:break-all">元のエラー: ' + esc(d.pause_reason) + '</div>' : '') +
+        '<div class="mt-1"><button type="button" class="ytq-btn ytq-resume" onclick="ytqResume()">停止を解除して今すぐ再開</button></div>';
+    } else {
+      html += '<div class="ytq-title">YouTube待ち行列</div>';
+    }
+    html += '<div>待ち: <b>' + d.waiting_count + '件</b>' +
+      (d.running ? '　／　処理中: <b>' + esc(d.running.title || d.running.kind) + '</b>' : '') +
+      (d.next_start && !d.paused ? '　／　次に始まる時刻: <b>' + esc(d.next_start) + '</b>（目安）' : '') + '</div>';
+    head.innerHTML = html;
+    list.innerHTML = (d.waiting || []).map(function (j) {
+      return '<li><span>' + j.position + '.</span><span class="ytq-name">' + esc(j.title || j.kind) + '</span>' +
+        '<span>' + esc(j.eta) + '</span>' +
+        '<button type="button" class="ytq-btn" onclick="ytqCancel(' + j.job_id + ')">外す</button></li>';
+    }).join('');
+  }
+
+  function tick() {
+    fetch('/api/yt-queue')
+      .then(function (r) { return r.json(); })
+      .then(function (d) { render(d); schedule(d.waiting_count || d.running || d.paused ? 4000 : 10000); })
+      .catch(function () { schedule(15000); });
+  }
+
+  function schedule(ms) {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(tick, ms);
+  }
+
+  window.ytqResume = function () {
+    if (!confirm('停止を解除して、今すぐYouTubeへのアクセスを再開します。まだ止められている場合は、すぐ再び停止します。よろしいですか？')) return;
+    fetch('/api/yt-queue/resume', { method: 'POST' }).then(function () { tick(); }).catch(function () {});
+  };
+
+  window.ytqCancel = function (jobId) {
+    fetch('/api/yt-jobs/' + jobId + '/cancel', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (!d.ok) alert(d.error || '外せませんでした'); tick(); })
+      .catch(function () {});
+  };
+
+  tick();
+})();
+</script>

@@ -531,3 +531,24 @@ class GroupPlanSetting(db.Model):
     group_id = db.Column(db.Integer, nullable=True, unique=True)
     manual_factor = db.Column(db.Float, nullable=False, default=1.0)   # 0〜3。0なら出さない
     comeback_until = db.Column(db.DateTime, nullable=True)             # この日時までカムバック補正をかける
+
+
+class YoutubeJob(db.Model):
+    """YouTubeにアクセスする処理の待ち行列(yt_queue参照)。1本ずつ・間隔を空けて処理する。
+    status: waiting(待ち) / running(処理中) / done / failed / cancelled。再起動で消えないようDBに保存する。
+    payload: ハンドラへ渡す引数(JSON)。result: {"body": 応答本文, "status": HTTPステータス}(JSON)。"""
+    __tablename__ = "youtube_jobs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    kind = db.Column(db.String(40), nullable=False)
+    key = db.Column(db.String(100), nullable=True)           # 動画IDなど(画面表示用)
+    title = db.Column(db.String(300), nullable=True)         # 画面表示用
+    payload = db.Column(db.Text, nullable=False, default="{}")
+    priority = db.Column(db.Integer, nullable=False, default=1)   # 0=画面が結果を待っている処理(先に処理) / 1=ダウンロード
+    status = db.Column(db.String(12), nullable=False, default="waiting", index=True)
+    attempts = db.Column(db.Integer, nullable=False, default=0)   # 止められて再試行した回数
+    result = db.Column(db.Text, nullable=True)
+    error = db.Column(db.Text, nullable=True)                # yt-dlpの元のエラー文
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    started_at = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)

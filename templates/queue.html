@@ -630,7 +630,7 @@ function requeuePostedArticle(id, btn) {
   const orig = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
-  fetch('/api/articles/' + id + '/requeue', {
+  ytFetch('/api/articles/' + id + '/requeue', {
     method: 'POST',
     headers: {'X-Requested-With': 'fetch'}
   })

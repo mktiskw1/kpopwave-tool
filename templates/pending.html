@@ -69,6 +69,7 @@
 {% endif %}
 
 {% if active_tab == 'candidate' %}
+{% include '_yt_queue_panel.html' %}
 <!-- 監視候補(未ダウンロード): 選んだものだけを取り込んで承認待ちに入れる -->
 <div class="d-flex align-items-center gap-2 mb-3 p-2 rounded flex-wrap" style="background:var(--surface2);border:1.5px solid var(--border);border-radius:14px!important">
   <input type="checkbox" id="cand-select-all" class="form-check-input mt-0" title="表示中の候補を全選択/全解除" onchange="candToggleAll(this)">
@@ -1048,7 +1049,9 @@ function candPoll() {
       Object.keys(d.active).forEach(function (id) {
         if (!candRow(id)) return;
         if (!candTracked[id]) { candTracked[id] = true; candSetBusy(id, true); }
-        var label = d.active[id] === 'downloading' ? 'ダウンロード中…' : '待機中…';
+        var det = (d.detail || {})[id];
+        var label = d.active[id] === 'downloading' ? 'ダウンロード中…'
+          : (det && det.position ? '待ち行列 ' + det.position + '件目・開始予定 ' + det.eta : '待機中…');
         document.getElementById('cand-state-' + id).innerHTML = '<span class="text-primary">' + label + '</span>';
       });
       Object.keys(candTracked).forEach(function (id) {
@@ -1892,7 +1895,7 @@ function requeueArticle(id, btn) {
   const orig = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
-  fetch('/api/articles/' + id + '/requeue', {
+  ytFetch('/api/articles/' + id + '/requeue', {
     method: 'POST',
     headers: {'X-Requested-With': 'fetch'}
   })
@@ -2068,7 +2071,7 @@ function startChapterSplit(articleId, btn) {
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> チャプター検出中...';
   if (msgEl) msgEl.style.display = 'none';
 
-  fetch('/api/videos/chapters/start-from-article', {
+  ytFetch('/api/videos/chapters/start-from-article', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({article_id: articleId})

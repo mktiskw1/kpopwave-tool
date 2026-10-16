@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import os
@@ -17,8 +18,10 @@ from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
 
 import group_balance
+import yt_queue
 from config import Config, YOUTUBE_DL_FORMAT
 from database import (
+    YoutubeJob,
     Article, BuzzPost, ChapterClip, ChapterJob, Comment, DailyStat, EarlyAdvanceLog, Group, Hook, Member,
     PostStat, Setting, TextPostStock, ThreadsAccount, VideoTrimJob, WatchedCandidate, WatchedChannel, get_active_account, db,
     DELETE_REASON_MANUAL, DELETE_REASON_MANUAL_BULK, record_deleted_post,
@@ -2137,6 +2140,38 @@ def api_watch_candidates_progress():
     return jsonify({"ok": True, **get_import_progress()})
 
 
+# ── YouTube待ち行列(yt_queue) ───────────────────────────────────────────────
+
+@app.route("/api/yt-queue")
+def api_yt_queue():
+    """待ち行列の件数・処理中の動画・次に始まる時刻・停止中かどうか(画面の表示用)。"""
+    return jsonify(yt_queue.snapshot())
+
+
+@app.route("/api/yt-jobs/<int:job_id>")
+def api_yt_job(job_id):
+    """待ち行列のジョブの状態(画面がポーリングで結果を待つ)。終わっていれば result={body, status}。"""
+    job = db.session.get(YoutubeJob, job_id)
+    if job is None:
+        return jsonify({"ok": False, "error": "ジョブが見つかりません"}), 404
+    return jsonify({"ok": True, **yt_queue.job_view(job)})
+
+
+@app.route("/api/yt-jobs/<int:job_id>/cancel", methods=["POST"])
+def api_yt_job_cancel(job_id):
+    """待ち行列から1件を外す(待ち中のものだけ)。"""
+    if not yt_queue.cancel(job_id):
+        return jsonify({"ok": False, "error": "外せるのは待ち中のものだけです(処理中・完了済みは外せません)"}), 409
+    return jsonify({"ok": True})
+
+
+@app.route("/api/yt-queue/resume", methods=["POST"])
+def api_yt_queue_resume():
+    """停止を解除して今すぐ再開する。"""
+    yt_queue.resume_now()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/watch-channels/status")
 def api_watch_channels_status():
     from channel_watcher import get_run_state, kpop_account_id, serialize_watched_channels
@@ -3295,57 +3330,18 @@ def requeue_article(article_id):
         needs_download = True
 
     if needs_download:
-        yt_url = article.url
+        # YouTubeからのダウンロードは待ち行列(yt_queue)で1本ずつ間隔を空けて処理する。画面は結果をポーリングで待つ
         from urllib.parse import urlparse, parse_qs as _parse_qs
-        parsed = urlparse(yt_url)
-        vid_id = _parse_qs(parsed.query).get("v", [None])[0]
-        if not vid_id:
+        if not _parse_qs(urlparse(article.url).query).get("v", [None])[0]:
             return jsonify({"ok": False, "error": "動画IDを取得できませんでした"}), 400
+        return _yt_enqueue_response("requeue_download", {"article_id": article_id},
+                                    key=str(article_id), title=f"再ダウンロード: {article.title or article.url}")
 
-        try:
-            import yt_dlp
-        except ImportError:
-            return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
+    return _finish_requeue(article)
 
-        tmp_dir = os.path.join(tempfile.gettempdir(), "kpopwave_videos")
-        os.makedirs(tmp_dir, exist_ok=True)
-        ffmpeg_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin")
-        dl_opts = {
-            "format": YOUTUBE_DL_FORMAT,
-            "ffmpeg_location": ffmpeg_bin,
-            "merge_output_format": "mp4",
-            "outtmpl": os.path.join(tmp_dir, f"{vid_id}.%(ext)s"),
-            "quiet": True,
-            "no_warnings": True,
-        }
-        try:
-            with yt_dlp.YoutubeDL(dl_opts) as ydl:
-                ydl.download([yt_url])
-        except Exception as exc:
-            return jsonify({"ok": False, "error": f"ダウンロードエラー: {_classify_ytdlp_error(exc)}"}), 500
 
-        from video_collector import _find_downloaded_file
-        found = _find_downloaded_file(tmp_dir, vid_id)
-        if not found:
-            return jsonify({"ok": False, "error": "ダウンロードファイルが見つかりません"}), 500
-
-        local_path, ext = found
-        static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
-        os.makedirs(static_dir, exist_ok=True)
-        dest_filename = f"{vid_id}.{ext}"
-        dest_path = os.path.join(static_dir, dest_filename)
-        try:
-            shutil.copy2(local_path, dest_path)
-            try:
-                os.remove(local_path)
-            except Exception:
-                pass
-        except Exception as exc:
-            return jsonify({"ok": False, "error": f"ファイルコピーエラー: {str(exc)[:120]}"}), 500
-
-        article.video_file_path = f"videos/{dest_filename}"
-        logger.info("[requeue] 動画再ダウンロード完了: id=%d %s", article_id, dest_filename)
-
+def _finish_requeue(article):
+    article_id = article.id
     prev_status = article.status
     article.status = "queued"
     article.scheduled_at = None
@@ -3358,6 +3354,44 @@ def requeue_article(article_id):
         return jsonify({"ok": False, "error": f"DB更新失敗: {exc}"}), 500
     logger.info("[requeue] 完了(動画): id=%d %s→queued", article_id, prev_status)
     return jsonify({"ok": True})
+
+
+def _job_requeue_download(payload):
+    """待ち行列のハンドラ: ファイルが無い動画記事をYouTubeから再ダウンロードしてキューに戻す。"""
+    import shutil
+    article_id = payload["article_id"]
+    article = db.session.get(Article, article_id)
+    if article is None:
+        return jsonify({"ok": False, "error": "記事が見つかりません"}), 404
+    yt_url = article.url
+    from urllib.parse import urlparse, parse_qs as _parse_qs
+    vid_id = _parse_qs(urlparse(yt_url).query).get("v", [None])[0]
+    if not vid_id:
+        return jsonify({"ok": False, "error": "動画IDを取得できませんでした"}), 400
+
+    try:
+        found = _download_youtube_range(yt_url, vid_id, None, None, "", use_cookie=False)
+    except _YouTubeDownloadNotFoundError:
+        return jsonify({"ok": False, "error": "ダウンロードファイルが見つかりません"}), 500
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"ダウンロードエラー: {_yt_error_message(exc, vid_id)}"}), 500
+
+    local_path, ext = found
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
+    os.makedirs(static_dir, exist_ok=True)
+    dest_filename = f"{vid_id}.{ext}"
+    try:
+        shutil.copy2(local_path, os.path.join(static_dir, dest_filename))
+        try:
+            os.remove(local_path)
+        except Exception:
+            pass
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"ファイルコピーエラー: {str(exc)[:120]}"}), 500
+
+    article.video_file_path = f"videos/{dest_filename}"
+    logger.info("[requeue] 動画再ダウンロード完了: id=%d %s", article_id, dest_filename)
+    return _finish_requeue(article)
 
 
 @app.route("/api/videos/fill-view-counts", methods=["POST"])
@@ -3475,6 +3509,21 @@ def _classify_ytdlp_error(exc: Exception) -> str:
     return summary if summary else "不明なエラーが発生しました。"
 
 
+def _yt_error_message(exc: Exception, context: str = "") -> str:
+    """YouTubeで失敗したときの表示用メッセージ。yt-dlpの元のエラー文をそのまま返し、ログにも残す
+    (_classify_ytdlp_errorはX用の分類なのでYouTubeには使わない)。"""
+    raw = yt_queue.error_text(exc)
+    logger.error("[youtube] yt-dlpエラー%s: %s", f" ({context})" if context else "", raw)
+    return raw[:1000]
+
+
+def _yt_enqueue_response(kind: str, payload: dict, key: str = None, title: str = None):
+    """YouTubeにアクセスする処理を待ち行列に入れて、ポーリング用のjob_idを返す(202)。
+    画面は /api/yt-jobs/<job_id> を見て結果を待つ(1つのHTTPリクエストで結果まで待たない)。"""
+    job = yt_queue.enqueue(kind, payload, key=key, title=title)
+    return jsonify({"ok": True, "queued": True, **yt_queue.job_view(job)}), 202
+
+
 class _YouTubeDownloadNotFoundError(Exception):
     """ダウンロード自体は成功したが、ローカルに出力ファイルが見つからない場合に送出する。"""
 
@@ -3517,8 +3566,11 @@ def _download_youtube_range(yt_url: str, vid_id: str, start_time: float | None, 
     if playlist_index is not None:
         dl_opts["playlist_items"] = str(playlist_index)
 
-    with yt_dlp.YoutubeDL(dl_opts) as ydl:
-        ydl.download([yt_url])
+    # YouTubeは待ち行列(yt_queue)の中で1本ずつ間隔を空けてアクセスする(Xなど他サイトは対象外)
+    gate = yt_queue.access() if yt_queue.is_youtube_url(yt_url) else contextlib.nullcontext()
+    with gate:
+        with yt_dlp.YoutubeDL(dl_opts) as ydl:
+            ydl.download([yt_url])
 
     found = _find_downloaded_file(tmp_dir, vid_id + suffix)
     if not found:
@@ -3612,7 +3664,21 @@ def api_highlight_preview():
         return jsonify({"ok": False, "error": "長さは数値で入力してください"}), 400
     if clip is not None and not (highlight.CLIP_MIN <= clip <= highlight.CLIP_MAX):
         return jsonify({"ok": False, "error": f"長さは{highlight.CLIP_MIN}〜{highlight.CLIP_MAX}秒で入力してください"}), 400
-    result = highlight.decide(video_id, clip_seconds=clip)
+    try:
+        # キャッシュ(6時間)だけで答えられるときはその場で返す(長さの再計算など。YouTubeにアクセスしない)
+        result = highlight.decide(video_id, clip_seconds=clip, cache_only=True)
+    except yt_queue.NeedNetwork:
+        title = str(data.get("title") or "").strip()[:200]
+        return _yt_enqueue_response("highlight_preview", {"video_id": video_id, "clip_seconds": clip},
+                                    key=video_id, title=f"見どころの範囲: {title or video_id}")
+    result["method_label"] = highlight.METHOD_LABELS.get(result["method"], "")
+    return jsonify({"ok": True, "result": result})
+
+
+def _job_highlight_preview(payload):
+    """待ち行列のハンドラ: 見どころの範囲を決める(情報取得・必要なら音声のダウンロード。1回の実行でアクセスは1回)。"""
+    import highlight
+    result = highlight.decide(payload["video_id"], clip_seconds=payload.get("clip_seconds"))
     result["method_label"] = highlight.METHOD_LABELS.get(result["method"], "")
     return jsonify({"ok": True, "result": result})
 
@@ -3626,14 +3692,26 @@ def redownload_full_video(article_id):
     vid_id = _extract_youtube_id(article.url or "")
     if not vid_id:
         return jsonify({"ok": False, "error": "元のYouTube動画IDを取得できません"}), 400
+    return _yt_enqueue_response("redownload_full", {"article_id": article_id}, key=vid_id,
+                                title=f"全体をダウンロードし直し: {article.title or vid_id}")
+
+
+def _job_redownload_full(payload):
+    """待ち行列のハンドラ: 見どころだけ取り込んだ動画を、元の動画を丸ごとダウンロードし直して差し替える。"""
+    article_id = payload["article_id"]
+    article = db.session.get(Article, article_id)
+    if article is None:
+        return jsonify({"ok": False, "error": "記事が見つかりません"}), 404
+    vid_id = _extract_youtube_id(article.url or "")
+    if not vid_id:
+        return jsonify({"ok": False, "error": "元のYouTube動画IDを取得できません"}), 400
     from channel_watcher import _download_video
     from video_files import delete_article_video_files, referenced_video_basenames
     old_path = article.video_file_path
     try:
         new_path = _download_video(vid_id)
     except Exception as exc:
-        logger.error("全体の再ダウンロード失敗 article=%d: %s", article_id, exc)
-        return jsonify({"ok": False, "error": f"ダウンロードに失敗しました: {str(exc)[:120]}"}), 500
+        return jsonify({"ok": False, "error": f"ダウンロードに失敗しました: {_yt_error_message(exc, vid_id)}"}), 500
     article.video_file_path = new_path
     article.clip_method = None
     article.highlight_start = None
@@ -3651,8 +3729,6 @@ def redownload_full_video(article_id):
 
 @app.route("/api/videos/add-manual", methods=["POST"])
 def add_video_manual():
-    import shutil
-
     data = request.get_json(force=True) or {}
     yt_url = (data.get("url") or "").strip()
 
@@ -3671,8 +3747,7 @@ def add_video_manual():
     has_range = start_time is not None or end_time is not None
     hl_meta = _parse_highlight_meta(data.get("highlight"))
     if hl_meta:
-        # 見どころの自動切り出し: 決めた範囲だけをダウンロードする(範囲指定の仕組みを使う)
-        start_time, end_time, has_range = hl_meta["start"], hl_meta["end"], True
+        has_range = True
 
     if not has_range and Article.query.filter(
         Article.url == yt_url,
@@ -3680,22 +3755,37 @@ def add_video_manual():
     ).first():
         return jsonify({"ok": False, "error": "この動画はすでに承認待ち・キュー中です"}), 400
 
+    # YouTubeへのアクセス(情報取得・ダウンロード)は待ち行列で1本ずつ間隔を空けて処理する。画面は結果をポーリングで待つ
+    payload = {"url": yt_url, "start_time": start_time, "end_time": end_time, "highlight": hl_meta,
+               "account_id": _explicit_account_id(data)}
+    return _yt_enqueue_response("add_manual", payload, key=yt_queue.extract_video_id(yt_url), title=f"取り込み: {yt_url}")
+
+
+def _job_add_manual(payload):
+    """待ち行列のハンドラ: YouTube動画(または指定範囲・見どころ)をダウンロードして承認待ちに追加する。
+    動画の情報はキャッシュ(6時間)から使い、YouTubeにアクセスするのは1回の実行につき1回。"""
+    import shutil
+
+    yt_url = payload["url"]
+    start_time, end_time = payload.get("start_time"), payload.get("end_time")
+    hl_meta = payload.get("highlight")
+    has_range = start_time is not None or end_time is not None
+    if hl_meta:
+        # 見どころの自動切り出し: 決めた範囲だけをダウンロードする(範囲指定の仕組みを使う)
+        start_time, end_time, has_range = hl_meta["start"], hl_meta["end"], True
+
     try:
-        import yt_dlp
+        import yt_dlp  # noqa: F401
     except ImportError:
         return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
 
-    cookie_used = os.path.exists(_YOUTUBE_COOKIE_FILE)
-    info_opts = {"quiet": True, "no_warnings": True, **_YT_DLP_JS_OPTS}
-    if cookie_used:
+    info_opts = {**_YT_DLP_JS_OPTS}
+    if os.path.exists(_YOUTUBE_COOKIE_FILE):
         info_opts["cookiefile"] = _YOUTUBE_COOKIE_FILE
     try:
-        with yt_dlp.YoutubeDL(info_opts) as ydl:
-            full = ydl.extract_info(yt_url, download=False)
-        if not full:
-            return jsonify({"ok": False, "error": "動画情報を取得できませんでした"}), 400
+        full = yt_queue.get_info(yt_url, info_opts)
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_classify_ytdlp_error(exc)}"}), 500
+        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_yt_error_message(exc, yt_url)}"}), 500
 
     vid_id = full.get("id", "")
     if not vid_id:
@@ -3721,8 +3811,7 @@ def add_video_manual():
     except _YouTubeDownloadNotFoundError:
         return jsonify({"ok": False, "error": "ダウンロードファイルが見つかりません"}), 500
     except Exception as exc:
-        error_msg = _classify_ytdlp_error(exc)
-        return jsonify({"ok": False, "error": f"ダウンロードエラー: {error_msg}"}), 500
+        return jsonify({"ok": False, "error": f"ダウンロードエラー: {_yt_error_message(exc, vid_id)}"}), 500
 
     local_path, ext = found
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "videos")
@@ -3760,7 +3849,7 @@ def add_video_manual():
         content_type="video",
         video_file_path=f"videos/{dest_filename}",
         view_count=full.get("view_count"),
-        account_id=_explicit_account_id(data),
+        account_id=payload.get("account_id"),
         channel_id=full.get("channel_id"),
         channel_name=(full.get("channel") or full.get("uploader") or "")[:200] or None,
         clip_method=(hl_meta["method"] if hl_meta else ("manual" if has_range else None)),
@@ -3974,11 +4063,13 @@ def _run_chapter_job(app, job_id):
             ext = os.path.splitext(full_path)[1].lstrip(".") or "mp4"
         else:
             try:
-                full_path, ext = _download_youtube_range(
-                    job.source_url, job.video_id, None, None, "", use_cookie=False
-                )
+                # 元動画のダウンロードも待ち行列(yt_queue)で。このスレッドは終わるまで待つ
+                queued_job = yt_queue.enqueue("chapter_download", {"source_url": job.source_url, "video_id": job.video_id},
+                                              key=job.video_id, title=f"チャプター分割の元動画: {job.video_title or job.video_id}")
+                res = yt_queue.wait_for_job(queued_job.id)
+                full_path, ext = res["path"], res["ext"]
             except Exception as exc:
-                error_msg = _classify_ytdlp_error(exc)
+                error_msg = yt_queue.error_text(exc)
                 job.status = "failed"
                 job.error_message = f"元動画のダウンロードに失敗しました: {error_msg}"
                 for clip in clips:
@@ -4098,6 +4189,25 @@ def _is_supported_youtube_url(yt_url: str) -> bool:
             or "youtube.com/shorts/" in yt_url)
 
 
+def _chapters_info_or_enqueue(kind: str, payload: dict, yt_url: str, title: str):
+    """チャプター判定用の動画情報。キャッシュ(6時間)にあれば (情報, None)、無ければ待ち行列に入れて
+    (None, 202のレスポンス)を返す。"""
+    try:
+        return yt_queue.get_info(yt_url, allow_network=False), None
+    except yt_queue.NeedNetwork:
+        return None, _yt_enqueue_response(kind, payload, key=yt_queue.extract_video_id(yt_url), title=title)
+
+
+def _chapters_detect_result(full):
+    chapters = full.get("chapters") or []
+    return jsonify({
+        "ok": True,
+        "has_chapters": bool(chapters),
+        "chapter_count": len(chapters),
+        "video_title": (full.get("title") or "")[:500],
+    })
+
+
 @app.route("/api/videos/chapters/detect", methods=["POST"])
 def detect_chapters():
     """URLの動画にチャプターがあるかだけを調べて返す。ジョブは作成しない。
@@ -4113,27 +4223,37 @@ def detect_chapters():
     if not _is_supported_youtube_url(yt_url):
         return jsonify({"ok": False, "error": "YouTube動画のURLを入力してください"}), 400
 
-    try:
-        import yt_dlp
-    except ImportError:
-        return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
+    full, queued = _chapters_info_or_enqueue("chapters_detect", {"url": yt_url}, yt_url, f"チャプター確認: {yt_url}")
+    if queued is not None:
+        return queued
+    return _chapters_detect_result(full)
 
-    info_opts = {"quiet": True, "no_warnings": True}
+
+def _job_chapters_detect(payload):
     try:
-        with yt_dlp.YoutubeDL(info_opts) as ydl:
-            full = ydl.extract_info(yt_url, download=False)
-        if not full:
-            return jsonify({"ok": False, "error": "動画情報を取得できませんでした"}), 400
+        full = yt_queue.get_info(payload["url"])
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_classify_ytdlp_error(exc)}"}), 500
+        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_yt_error_message(exc, payload['url'])}"}), 500
+    return _chapters_detect_result(full)
+
+
+def _chapters_start_result(full, yt_url, account_id):
+    vid_id = full.get("id", "")
+    if not vid_id:
+        return jsonify({"ok": False, "error": "動画IDを取得できませんでした"}), 400
 
     chapters = full.get("chapters") or []
-    return jsonify({
-        "ok": True,
-        "has_chapters": bool(chapters),
-        "chapter_count": len(chapters),
-        "video_title": (full.get("title") or "")[:500],
-    })
+    if not chapters:
+        return jsonify({"ok": True, "has_chapters": False})
+
+    _sweep_stale_chapter_jobs()
+    title = (full.get("title") or "YouTube動画")[:500]
+    job = _create_chapter_job(yt_url, vid_id, chapters, title, full.get("thumbnail") or None,
+                               account_id,
+                               channel_id=full.get("channel_id"),
+                               channel_name=full.get("channel") or full.get("uploader"))
+
+    return jsonify({"ok": True, "has_chapters": True, "job_id": job.id})
 
 
 @app.route("/api/videos/chapters/start", methods=["POST"])
@@ -4146,21 +4266,25 @@ def start_chapter_job():
     if not _is_supported_youtube_url(yt_url):
         return jsonify({"ok": False, "error": "YouTube動画のURLを入力してください"}), 400
 
-    try:
-        import yt_dlp
-    except ImportError:
-        return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
-
     # チャプター検出・後続のフルダウンロードはCookie認証を使わない(通常アクセスで十分)
-    info_opts = {"quiet": True, "no_warnings": True}
-    try:
-        with yt_dlp.YoutubeDL(info_opts) as ydl:
-            full = ydl.extract_info(yt_url, download=False)
-        if not full:
-            return jsonify({"ok": False, "error": "動画情報を取得できませんでした"}), 400
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_classify_ytdlp_error(exc)}"}), 500
+    account_id = _explicit_account_id(data)
+    full, queued = _chapters_info_or_enqueue("chapters_start", {"url": yt_url, "account_id": account_id}, yt_url,
+                                              f"チャプター分割: {yt_url}")
+    if queued is not None:
+        return queued
+    return _chapters_start_result(full, yt_url, account_id)
 
+
+def _job_chapters_start(payload):
+    try:
+        full = yt_queue.get_info(payload["url"])
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_yt_error_message(exc, payload['url'])}"}), 500
+    return _chapters_start_result(full, payload["url"], payload.get("account_id"))
+
+
+def _chapters_from_article_result(full, article):
+    yt_url = article.url
     vid_id = full.get("id", "")
     if not vid_id:
         return jsonify({"ok": False, "error": "動画IDを取得できませんでした"}), 400
@@ -4170,11 +4294,12 @@ def start_chapter_job():
         return jsonify({"ok": True, "has_chapters": False})
 
     _sweep_stale_chapter_jobs()
-    title = (full.get("title") or "YouTube動画")[:500]
-    job = _create_chapter_job(yt_url, vid_id, chapters, title, full.get("thumbnail") or None,
-                               _explicit_account_id(data),
-                               channel_id=full.get("channel_id"),
-                               channel_name=full.get("channel") or full.get("uploader"))
+    title = article.title or (full.get("title") or "YouTube動画")[:500]
+    job = _create_chapter_job(yt_url, vid_id, chapters, title,
+                               article.thumbnail_url or full.get("thumbnail") or None,
+                               article.account_id, source_local_path=article.video_file_path,
+                               channel_id=article.channel_id or full.get("channel_id"),
+                               channel_name=article.channel_name or full.get("channel") or full.get("uploader"))
 
     return jsonify({"ok": True, "has_chapters": True, "job_id": job.id})
 
@@ -4202,39 +4327,22 @@ def start_chapter_job_from_article():
     if _probe_duration(local_path) is None:
         return jsonify({"ok": False, "error": "動画ファイルが壊れているか、読み込めません。"}), 400
 
-    yt_url = article.url
+    full, queued = _chapters_info_or_enqueue("chapters_from_article", {"article_id": article_id}, article.url,
+                                              f"チャプター分割: {article.title or article.url}")
+    if queued is not None:
+        return queued
+    return _chapters_from_article_result(full, article)
 
-    try:
-        import yt_dlp
-    except ImportError:
-        return jsonify({"ok": False, "error": "yt-dlpがインストールされていません"}), 500
 
-    info_opts = {"quiet": True, "no_warnings": True}
+def _job_chapters_from_article(payload):
+    article = db.session.get(Article, payload["article_id"])
+    if not article:
+        return jsonify({"ok": False, "error": "記事が見つかりません"}), 404
     try:
-        with yt_dlp.YoutubeDL(info_opts) as ydl:
-            full = ydl.extract_info(yt_url, download=False)
-        if not full:
-            return jsonify({"ok": False, "error": "動画情報を取得できませんでした"}), 400
+        full = yt_queue.get_info(article.url)
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_classify_ytdlp_error(exc)}"}), 500
-
-    vid_id = full.get("id", "")
-    if not vid_id:
-        return jsonify({"ok": False, "error": "動画IDを取得できませんでした"}), 400
-
-    chapters = full.get("chapters") or []
-    if not chapters:
-        return jsonify({"ok": True, "has_chapters": False})
-
-    _sweep_stale_chapter_jobs()
-    title = article.title or (full.get("title") or "YouTube動画")[:500]
-    job = _create_chapter_job(yt_url, vid_id, chapters, title,
-                               article.thumbnail_url or full.get("thumbnail") or None,
-                               article.account_id, source_local_path=article.video_file_path,
-                               channel_id=article.channel_id or full.get("channel_id"),
-                               channel_name=article.channel_name or full.get("channel") or full.get("uploader"))
-
-    return jsonify({"ok": True, "has_chapters": True, "job_id": job.id})
+        return jsonify({"ok": False, "error": f"動画情報取得エラー: {_yt_error_message(exc, article.url)}"}), 500
+    return _chapters_from_article_result(full, article)
 
 
 @app.route("/api/videos/chapters/<int:job_id>/status")
@@ -4345,10 +4453,10 @@ def chapter_job_confirm(job_id):
 
 @app.route("/collect-videos", methods=["POST"])
 def collect_videos():
-    from video_collector import collect_youtube_videos as collect_yt_dlp_videos
-
-    new = collect_yt_dlp_videos(app)
-    flash(f"動画収集完了: {new} 件の動画をダウンロードしました（承認待ち画面で確認してください）", "success")
+    # チャンネルの巡回・ダウンロードはYouTubeの待ち行列で、間隔を空けながら処理する(終わるまで時間がかかる)
+    yt_queue.enqueue("collect_videos", {}, title="動画収集（チャンネル巡回）")
+    flash("動画収集を待ち行列に追加しました。YouTubeに止められないよう間隔を空けて処理します"
+          "（進み具合は取り込み画面の待ち行列で確認できます）", "success")
     return redirect(url_for("index"))
 
 
@@ -4722,6 +4830,39 @@ def debug_threads_video():
     )
 
 
+# ── YouTube待ち行列のハンドラ登録 ──────────────────────────────────────────────
+
+def _register_yt_handlers():
+    import channel_watcher
+    from video_collector import collect_youtube_videos
+
+    # priority=0: 画面が結果を待っている処理(確認モーダルの情報取得・範囲決定など)。ダウンロード(1)より先に処理する
+    yt_queue.register("highlight_preview", _job_highlight_preview, priority=0)
+    yt_queue.register("chapters_detect", _job_chapters_detect, priority=0)
+    yt_queue.register("chapters_start", _job_chapters_start, priority=0)
+    yt_queue.register("chapters_from_article", _job_chapters_from_article, priority=0)
+    yt_queue.register("add_manual", _job_add_manual)
+    yt_queue.register("requeue_download", _job_requeue_download)
+    yt_queue.register("redownload_full", _job_redownload_full)
+    yt_queue.register(channel_watcher.IMPORT_KIND, lambda payload: channel_watcher.run_import_job(app, payload))
+    # チャプター分割の元動画: 待っているスレッドが再起動で消えるので、再起動時は取り消す
+    yt_queue.register("chapter_download", _job_chapter_download, volatile=True)
+    # 動画収集: 1回の実行でチャンネルを巡回し何度もアクセスする(その場で間隔を空けて待つ)
+    yt_queue.register("collect_videos", lambda payload: {"new": collect_youtube_videos(app)}, multi=True)
+
+
+def _job_chapter_download(payload):
+    """待ち行列のハンドラ: チャプター分割の元動画をダウンロードする(Cookie認証なし)。"""
+    try:
+        path, ext = _download_youtube_range(payload["source_url"], payload["video_id"], None, None, "", use_cookie=False)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": _yt_error_message(exc, payload["video_id"])}), 500
+    return {"path": path, "ext": ext}
+
+
+_register_yt_handlers()
+
+
 # ── 起動 ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -4735,5 +4876,6 @@ if __name__ == "__main__":
     # failed化してしまうため)。
     with app.app_context():
         _recover_orphaned_jobs()
+    yt_queue.start_worker(app)   # YouTubeの待ち行列(処理中のまま残ったジョブは待ちに戻す)
     setup_scheduler(app)
     app.run(debug=False, use_reloader=False, host="0.0.0.0", port=5000, threaded=True)

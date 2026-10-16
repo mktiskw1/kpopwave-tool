@@ -5,6 +5,8 @@
   <h4 class="mb-0 fw-bold">ダッシュボード</h4>
 </div>
 
+{% include '_yt_queue_panel.html' %}
+
 <!-- 統計カード -->
 <div class="row g-3 mb-4">
   {% set card_data = [
@@ -280,7 +282,7 @@ function addVideoManual() {
 
   if (!startVal && !endVal) {
     result.innerHTML = '<span style="color:var(--text-muted)"><span class="spinner-border spinner-border-sm me-1"></span>チャプターの有無を確認中...</span>';
-    fetch('/api/videos/chapters/detect', {
+    ytFetch('/api/videos/chapters/detect', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ url: url, account_id: CURRENT_ACCOUNT_ID })
@@ -346,7 +348,7 @@ function startChapterSplit(url) {
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>分割準備中...';
   result.innerHTML = '<span style="color:var(--text-muted)"><span class="spinner-border spinner-border-sm me-1"></span>チャプター分割を開始しています...</span>';
 
-  fetch('/api/videos/chapters/start', {
+  ytFetch('/api/videos/chapters/start', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ url: url, account_id: CURRENT_ACCOUNT_ID })
@@ -396,7 +398,7 @@ function submitAddVideoManual(url, startVal, endVal, highlight) {
   var startInput = document.getElementById('add-video-start');
   var endInput   = document.getElementById('add-video-end');
 
-  fetch('/api/videos/add-manual', {
+  ytFetch('/api/videos/add-manual', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
@@ -727,7 +729,7 @@ function addSingleVideo(prefix, index) {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
 
-  fetch('/api/videos/add-manual', {
+  ytFetch('/api/videos/add-manual', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ url: v.url, account_id: CURRENT_ACCOUNT_ID })
@@ -784,7 +786,7 @@ function addHighlightVideos(prefix, indices) {
         body.start_time = String(sel.start); body.end_time = String(sel.end);
         body.highlight = { method: sel.method, start: sel.start, end: sel.end, chart: sel.chart };
       }
-      fetch('/api/videos/add-manual', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) })
+      ytFetch('/api/videos/add-manual', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) })
         .then(function (r) { return r.json(); })
         .then(function (d) {
           var btn = document.getElementById(prefix + '-hl-btn-' + sel.key);
@@ -829,7 +831,7 @@ function addSelectedVideos(prefix) {
     progress.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>' +
       'ダウンロード中... (' + done + '/' + total + ') ' + escHtml(v.title.slice(0, 40));
 
-    fetch('/api/videos/add-manual', {
+    ytFetch('/api/videos/add-manual', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ url: v.url, account_id: CURRENT_ACCOUNT_ID })

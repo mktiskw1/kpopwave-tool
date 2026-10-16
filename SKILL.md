@@ -30,6 +30,7 @@ kpopwave-tool/
 ├── engagement_tracker.py# いいね数・リプライ数・リポスト数の取得
 ├── learning.py          # バズ投稿分析（BuzzPost → AI tips）
 ├── video_collector.py   # YouTube動画収集（yt-dlp）
+├── yt_queue.py          # YouTubeアクセスの待ち行列（1本ずつ60秒±30%間隔・止められたら6時間停止・DB保存）
 ├── get_token.py         # OAuthトークン取得ヘルパー
 ├── launcher.py          # tkinter製GUIランチャー（ツール起動・Cloudflare Tunnel・Git操作）
 ├── start_cloudflare.bat # Cloudflare Tunnel起動＋URL自動取得→DB保存バッチ
@@ -162,6 +163,7 @@ queued  → failed
 | 機能 | ファイル | 備考 |
 |---|---|---|
 | YouTube動画収集 | `video_collector.py` | yt-dlp |
+| YouTubeアクセスの待ち行列 | `yt_queue.py`・`youtube_jobs`テーブル | yt-dlpでYouTubeに触る処理は**必ず`yt_queue.access()`の中**（待ち行列のワーカー内）で行う。画面は`ytFetch`(base.html)で202→`/api/yt-jobs/<id>`をポーリング。停止の状態は settings の `youtube_paused_until`(UTC)。判定文言は`yt_queue.BLOCK_MARKERS`に一本化。extract_infoは`yt_queue.get_info`で6時間キャッシュ |
 | X（Twitter）動画URL追加 | `app.py` `/api/videos/add-social` | 投稿URL貼付でyt-dlpフルDL（Cookie不要）→承認待ちへ。`feed_source="X動画: <投稿者>"`。複数動画ツイートはUIチェックボックスで「全部/先頭のみ」。**Threadsはyt-dlp未対応のため受付だけして未対応メッセージを返す**（対応が入ったら`add_video_social`のThreadsガードを外すだけ） |
 | 動画投稿文の組み立て | `summarizer.py` | AIを使わず「グループ→メンバー→曲名→フック」で決定的に組み立て |
 | Threads投稿 | `threads_api.py` | テキスト・画像カルーセル・動画 |

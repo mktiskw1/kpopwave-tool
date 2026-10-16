@@ -416,6 +416,126 @@
       background: linear-gradient(135deg, #c9699f, #a84f81);
     }
   </style>
+  <style>
+    /* YouTube待ち行列の表示。テーマが bg-danger / alert-danger などの色を上書きするため、ここでは専用クラスと色の直指定を使う */
+    #yt-wait-box { position: fixed; right: 16px; bottom: 16px; z-index: 11000; width: min(380px, calc(100vw - 32px));
+                   display: flex; flex-direction: column; gap: 8px; }
+    .yt-wait-item { background: #ffffff; color: #1f2933; border: 1px solid #c8d0d8; border-left: 5px solid #1976d2;
+                    border-radius: 10px; padding: 8px 12px; font-size: .82rem; box-shadow: 0 4px 14px rgba(0,0,0,.18); }
+    .yt-wait-item.yt-paused { background: #fdecea; color: #b71c1c; border-color: #d32f2f; border-left-color: #d32f2f; }
+    .yt-wait-item a { color: inherit; text-decoration: underline; cursor: pointer; margin-left: 8px; font-size: .74rem; }
+    .ytq-panel { border: 1px solid #c8d0d8; border-radius: 10px; padding: 10px 14px; background: #ffffff; color: #1f2933;
+                 font-size: .84rem; }
+    .ytq-panel.ytq-paused { background: #fdecea; color: #b71c1c; border: 2px solid #d32f2f; }
+    .ytq-panel .ytq-title { font-weight: 700; }
+    .ytq-btn { display: inline-block; border: 1px solid #5f6b76; background: #ffffff; color: #1f2933; border-radius: 6px;
+               padding: 2px 10px; font-size: .78rem; cursor: pointer; }
+    .ytq-btn.ytq-resume { border-color: #b71c1c; background: #d32f2f; color: #ffffff; font-weight: 700; }
+    .ytq-list { margin: 6px 0 0; padding: 0; list-style: none; font-size: .78rem; }
+    .ytq-list li { display: flex; gap: 8px; align-items: center; padding: 2px 0; border-top: 1px dotted #c8d0d8; }
+    .ytq-list .ytq-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  </style>
+  <script>
+    // YouTubeにアクセスする処理は待ち行列(サーバー側)で1本ずつ間隔を空けて処理される。
+    // ytFetch は fetch と同じ使い方で、サーバーが「待ち行列に入れた(202)」と返したときは、
+    // 結果が出るまでポーリングで待ち(1つのHTTPリクエストで待ち続けない)、元の応答と同じ形で返す。
+    (function () {
+      var items = {};   // job_id -> {el, ...}
+
+      function box() {
+        var b = document.getElementById('yt-wait-box');
+        if (!b) {
+          b = document.createElement('div');
+          b.id = 'yt-wait-box';
+          document.body.appendChild(b);
+        }
+        return b;
+      }
+
+      function esc(v) {
+        var d = document.createElement('div');
+        d.textContent = v == null ? '' : String(v);
+        return d.innerHTML;
+      }
+
+      function show(job) {
+        var it = items[job.job_id];
+        if (!it) {
+          var el = document.createElement('div');
+          el.className = 'yt-wait-item';
+          box().appendChild(el);
+          it = items[job.job_id] = { el: el };
+        }
+        var html;
+        if (job.paused_until) {
+          it.el.classList.add('yt-paused');
+          html = '<b>YouTubeに止められたため停止中</b>（再開予定 ' + esc(job.paused_until) + ' JST）<br>このまま待つと再開後に自動で処理されます。' +
+            (job.title ? '<br><span style="opacity:.8">' + esc(job.title) + '</span>' : '');
+        } else {
+          it.el.classList.remove('yt-paused');
+          if (job.state === 'running') {
+            html = 'YouTubeの処理中…' + (job.title ? '<br><span style="opacity:.8">' + esc(job.title) + '</span>' : '');
+          } else {
+            html = 'YouTube待ち行列 <b>' + (job.position || 1) + '件目</b>・開始予定 <b>' + esc(job.eta || '—') + '</b>' +
+              (job.title ? '<br><span style="opacity:.8">' + esc(job.title) + '</span>' : '');
+          }
+        }
+        if (job.state === 'waiting') {
+          html += ' <a onclick="ytCancelJob(' + job.job_id + ')">待ち行列から外す</a>';
+        }
+        it.el.innerHTML = html;
+      }
+
+      function hide(jobId) {
+        var it = items[jobId];
+        if (it && it.el.parentNode) it.el.parentNode.removeChild(it.el);
+        delete items[jobId];
+      }
+
+      function fakeResponse(body, status) {
+        return { ok: status < 400, status: status, json: function () { return Promise.resolve(body); } };
+      }
+
+      function poll(jobId, delay, errors) {
+        return new Promise(function (resolve) {
+          setTimeout(function () {
+            fetch('/api/yt-jobs/' + jobId)
+              .then(function (r) { return r.json(); })
+              .then(function (d) {
+                if (!d.ok) { hide(jobId); resolve(fakeResponse({ ok: false, error: d.error || 'ジョブが見つかりません' }, 404)); return; }
+                if (d.state === 'done' || d.state === 'failed' || d.state === 'cancelled') {
+                  hide(jobId);
+                  var res = d.result || { body: { ok: false, error: d.error || '処理に失敗しました' }, status: 500 };
+                  resolve(fakeResponse(res.body, res.status || 200));
+                  return;
+                }
+                show(d);
+                resolve(poll(jobId, d.paused_until ? 10000 : 2500, 0));
+              })
+              .catch(function () {
+                if (errors >= 20) { hide(jobId); resolve(fakeResponse({ ok: false, error: '通信エラーが発生しました' }, 0)); return; }
+                resolve(poll(jobId, 5000, errors + 1));
+              });
+          }, delay);
+        });
+      }
+
+      window.ytFetch = function (url, opts) {
+        return fetch(url, opts).then(function (r) {
+          if (r.status !== 202) return r;
+          return r.json().then(function (d) {
+            if (!d || !d.queued || !d.job_id) return fakeResponse(d, 202);
+            show(d);
+            return poll(d.job_id, 1500, 0);
+          });
+        });
+      };
+
+      window.ytCancelJob = function (jobId) {
+        fetch('/api/yt-jobs/' + jobId + '/cancel', { method: 'POST' }).catch(function () {});
+      };
+    })();
+  </script>
 </head>
 <body class="{% if nav_active_account_id == 1 %}theme-kpop{% endif %}">
 
