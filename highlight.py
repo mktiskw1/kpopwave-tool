@@ -116,6 +116,41 @@ def _best_window(values, step: float, clip_seconds: float):
     return i * step, (i + w) * step
 
 
+HEAD_SKIP_SECONDS = 10.0      # heatmapは冒頭が高く出やすいので、先頭のこの秒数(最大で動画の長さの10%)は窓の開始位置にしない
+HEAD_SKIP_RATIO = 0.10
+
+
+def _best_window_heatmap(values, step: float, clip_seconds: float, duration: float):
+    """heatmap用の窓選び。(開始秒, 終了秒, 方法) を返す。方法は "heatmap_excess"(新) / "heatmap_plain"(従来にフォールバック)。
+    - 先頭の min(10秒, 動画の長さの10%) は窓の開始位置にしない
+    - 窓の比べ方は「heatmap全体の平均を超えた分の合計」(max(値-平均, 0)の窓内合計)
+    - 同点なら、窓の中心が値の最も高い所に近いほうを選ぶ
+    - 窓が取れない・全部が平均以下(平ら)など結果がおかしいときは、従来の素の合計(_best_window)に戻す"""
+    import numpy as np
+    vals = np.asarray(values, dtype=float)
+    n = len(vals)
+    w = max(1, int(round(clip_seconds / step)))
+    plain = _best_window(vals, step, clip_seconds)
+    if n <= w:
+        return (*plain, "heatmap_plain")
+    skip = int(np.ceil(min(HEAD_SKIP_SECONDS, duration * HEAD_SKIP_RATIO) / step))
+    last = n - w                                   # 開始位置の最大
+    if skip > last:
+        return (*plain, "heatmap_plain")
+    excess = np.maximum(vals - vals.mean(), 0.0)
+    cs = np.concatenate([[0.0], np.cumsum(excess)])
+    sums = (cs[w:] - cs[:n - w + 1])[skip:last + 1]      # 開始位置 skip..last の窓の合計
+    best = float(sums.max())
+    if not best > 1e-9:                                  # 平均を超える所が無い(平ら)
+        return (*plain, "heatmap_plain")
+    ties = np.flatnonzero(sums >= best - 1e-9 * max(1.0, best)) + skip
+    peaks = np.flatnonzero(vals >= vals.max() - 1e-12)   # 値が最も高い位置
+    centers = (ties + w / 2.0)
+    dist = np.abs(centers[:, None] - (peaks[None, :] + 0.5)).min(axis=1)
+    i = int(ties[int(np.argmin(dist))])                  # 距離が同じなら早いほう(argminは最初を返す)
+    return i * step, (i + w) * step, "heatmap_excess"
+
+
 def _heatmap_to_grid(heatmap, duration: float):
     import numpy as np
     n = max(1, int(round(duration / GRID)))
@@ -216,7 +251,8 @@ def decide(video_id: str, clip_seconds: float = None, padding: float = None, use
     method = None
     if info.get("heatmap"):
         grid = _heatmap_to_grid(info["heatmap"], duration)
-        start, end = _best_window(grid, GRID, clip)
+        start, end, how = _best_window_heatmap(grid, GRID, clip, duration)
+        logger.info("[highlight] heatmapの窓選び %s: %s %.1f〜%.1f", video_id, how, start, end)
         method = METHOD_HEATMAP
         result["chart"] = {"kind": method, "values": _downsample(grid)}
     elif use_audio:
