@@ -324,7 +324,7 @@ def _run_watch(app, dry_run: bool, rescan_days: int = None) -> dict:
         rescan_since = (run_started - timedelta(days=rescan_days)) if rescan_days else None
         rows = WatchedChannel.query.filter_by(enabled=True).order_by(WatchedChannel.id.asc()).all()
         # 「その他」はタグ用の受け皿グループで、タイトルに現れる名前ではないので照合対象外
-        groups = [(g.id, g.name) for g in Group.query.all() if g.name != "その他"]
+        groups = [(g.id, g.name) for g in Group.query.filter_by(is_active=True).all() if g.name != "その他"]
         chans = [{
             "id": r.id, "account_id": r.account_id, "channel_id": r.channel_id, "name": r.channel_name,
             "fancam_required": bool(r.fancam_required), "playlist_id": r.uploads_playlist_id,

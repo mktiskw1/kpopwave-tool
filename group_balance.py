@@ -223,8 +223,11 @@ def compute_state(account_id: int, now: datetime = None) -> dict:
     """全グループ(名簿＋グループなし)の評価値・目標の割合・直近14日の実際の割合を計算する(app context内で呼ぶ)。"""
     now = now or datetime.utcnow()
     cfg = get_config()
-    roster = [(g.id, g.name) for g in Group.query.order_by(Group.name.asc()).all()] + [(None, NONE_LABEL)]
+    roster = [(g.id, g.name) for g in Group.query.filter_by(is_active=True).order_by(Group.name.asc()).all()] + [(None, NONE_LABEL)]
     name_to_id = {name: gid for gid, name in roster if gid is not None}
+    # 名簿から外したグループの過去の成績は「グループなし」に混ぜない(評価値・実績の集計から除く)
+    for g in Group.query.filter_by(is_active=False).all():
+        name_to_id.setdefault(g.name, -1)
 
     samples = _initial_cycle_samples(account_id, now, cfg["lookback_days"], name_to_id)
     all_vals = [v for vs in samples.values() for v in vs]

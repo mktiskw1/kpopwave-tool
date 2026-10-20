@@ -750,7 +750,7 @@ function rosterRenameGroup(id) {
 }
 
 function rosterDeleteGroup(id, name) {
-  if (!confirm('グループ「' + name + '」を削除しますか？\nこのグループでタグ付けされている投稿がある場合、タグは解除されます。')) return;
+  if (!confirm(name + 'を名簿から削除します。過去の投稿データは残ります。よろしいですか？')) return;
   fetch('/api/groups/' + id, { method: 'DELETE' })
     .then(r => r.json())
     .then(d => {

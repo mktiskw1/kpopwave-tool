@@ -261,6 +261,8 @@ class Group(db.Model):
     name = db.Column(db.String(100), nullable=False)
     normalized_name = db.Column(db.String(100), nullable=False, unique=True, index=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # 名簿から外したグループは is_active=False(行と過去記事のタグは残す)。起動時の既定名簿投入でも復活させない
+    is_active = db.Column(db.Boolean, nullable=False, default=True, server_default="1")
 
 
 class Member(db.Model):
@@ -271,6 +273,7 @@ class Member(db.Model):
     name = db.Column(db.String(100), nullable=False)
     normalized_name = db.Column(db.String(100), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    is_active = db.Column(db.Boolean, nullable=False, default=True, server_default="1")
 
     __table_args__ = (db.UniqueConstraint("group_id", "normalized_name", name="uq_member_group_normalized"),)
 

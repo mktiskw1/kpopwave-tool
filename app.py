@@ -167,6 +167,14 @@ def _migrate_db():
     from sqlalchemy import inspect, text
     inspector = inspect(db.engine)
 
+    for _tbl in ("groups", "members"):
+        _cols = {c["name"] for c in inspector.get_columns(_tbl)}
+        if "is_active" not in _cols:
+            with db.engine.connect() as conn:
+                conn.execute(text(f"ALTER TABLE {_tbl} ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1"))
+                conn.commit()
+            logger.info("DB migration: %s.is_active added", _tbl)
+
     # articles テーブル
     existing_articles = {c["name"] for c in inspector.get_columns("articles")}
     article_cols = [
@@ -580,7 +588,7 @@ def index():
     recent = _scope(Article.query).order_by(Article.created_at.desc()).limit(15).all()
     from youtube_collector import PROGRAM_CHANNELS, DEFAULT_PROGRAM_KEY, DEFAULT_TARGET_GROUP
     program_options = [{"key": k, "name": v["name"]} for k, v in PROGRAM_CHANNELS.items()]
-    group_names = [g.name for g in Group.query.order_by(Group.name.asc()).all()]
+    group_names = [g.name for g in Group.query.filter_by(is_active=True).order_by(Group.name.asc()).all()]
     return render_template("index.html", stats=stats, recent=recent,
                             program_options=program_options, group_names=group_names,
                             DEFAULT_PROGRAM_KEY=DEFAULT_PROGRAM_KEY,
@@ -807,13 +815,14 @@ def pending():
         ).all()
     } if video_paths else {}
 
-    all_groups = Group.query.order_by(Group.name.asc()).all()
-    group_by_id = {g.id: g for g in all_groups}
+    every_group = Group.query.order_by(Group.name.asc()).all()
+    group_by_id = {g.id: g for g in every_group}
+    all_groups = [g for g in every_group if g.is_active]
     member_ids = {a.member_id for a in articles if a.member_id}
     member_by_id = {m.id: m for m in Member.query.filter(Member.id.in_(member_ids)).all()} if member_ids else {}
     members_by_group = {}
     if all_groups:
-        for m in Member.query.filter(Member.group_id.in_(group_by_id.keys())).order_by(Member.name.asc()).all():
+        for m in Member.query.filter(Member.group_id.in_([g.id for g in all_groups]), Member.is_active.is_(True)).order_by(Member.name.asc()).all():
             members_by_group.setdefault(m.group_id, []).append(m)
     group_tag_map = {}
     article_tags = {}
@@ -908,10 +917,16 @@ def create_group():
     if not name:
         return jsonify({"ok": False, "error": "グループ名を入力してください"}), 400
     norm = _normalize_tag_name(name)
-    if Group.query.filter_by(normalized_name=norm).first():
+    group = Group.query.filter_by(normalized_name=norm).first()
+    if group and group.is_active:
         return jsonify({"ok": False, "error": "同名のグループが既に存在します"}), 400
-    group = Group(name=name, normalized_name=norm)
-    db.session.add(group)
+    if group:
+        # 名簿から外していた同名グループを復帰させる(過去の記事のタグはそのまま元のグループに紐づく)
+        group.is_active = True
+        group.name = name
+    else:
+        group = Group(name=name, normalized_name=norm)
+        db.session.add(group)
     db.session.commit()
     return jsonify({"ok": True, "id": group.id, "name": group.name})
 
@@ -942,10 +957,15 @@ def add_roster_member(id):
     if not name:
         return jsonify({"ok": False, "error": "メンバー名を入力してください"}), 400
     norm = _normalize_tag_name(name)
-    if Member.query.filter_by(group_id=group.id, normalized_name=norm).first():
+    member = Member.query.filter_by(group_id=group.id, normalized_name=norm).first()
+    if member and member.is_active:
         return jsonify({"ok": False, "error": "同名のメンバーが既に存在します"}), 400
-    member = Member(group_id=group.id, name=name, normalized_name=norm)
-    db.session.add(member)
+    if member:
+        member.is_active = True
+        member.name = name
+    else:
+        member = Member(group_id=group.id, name=name, normalized_name=norm)
+        db.session.add(member)
     db.session.commit()
     return jsonify({"ok": True, "id": member.id, "name": member.name})
 
@@ -970,39 +990,23 @@ def rename_member(id):
 
 @app.route("/api/members/<int:id>", methods=["DELETE"])
 def delete_member(id):
-    """ロースターからメンバーを削除する。このメンバーでタグ付けされている記事がある場合、
-    参照が壊れないよう member_id を NULL に戻してから削除する(グループ削除と同じ方針)。"""
+    """メンバーを名簿から外す(論理削除)。過去の記事のmember_idは残し、起動時の既定名簿投入でも復活させない。"""
     member = Member.query.get_or_404(id)
-    Article.query.filter_by(member_id=id).update({"member_id": None})
-    db.session.delete(member)
+    member.is_active = False
     db.session.commit()
     return jsonify({"ok": True})
 
 
 @app.route("/api/groups/<int:id>", methods=["DELETE"])
 def delete_group(id):
-    """groupsマスタから削除する。既にこのグループ(またはその所属メンバー)でタグ付けされている
-    記事がある場合、参照が壊れないよう group_id/member_id を NULL に戻してからグループを削除する
-    (ブロックではなくNULL化を選択: 単純な操作で済み、記事自体は失われないため)。"""
+    """グループを名簿から外す(論理削除)。過去の記事・成績・deleted_post_logのグループ情報は消さない。
+    is_active=False にすることで、グループ配分・ストック計画・チャンネル監視の候補・名簿から外れる。
+    所属メンバーも一緒に外す。グループ別の補正設定(group_plan_setting)は復帰に備えて残す。"""
     group = Group.query.get_or_404(id)
-    member_ids = [m.id for m in Member.query.filter_by(group_id=id).all()]
-
-    query = Article.query.filter(Article.group_id == id)
-    if member_ids:
-        query = Article.query.filter(
-            db.or_(Article.group_id == id, Article.member_id.in_(member_ids))
-        )
-    articles_to_clear = query.all()
-    for a in articles_to_clear:
-        if a.group_id == id:
-            a.group_id = None
-        if a.member_id in member_ids:
-            a.member_id = None
-
-    Member.query.filter_by(group_id=id).delete(synchronize_session=False)
-    db.session.delete(group)
+    group.is_active = False
+    Member.query.filter_by(group_id=id).update({"is_active": False})
     db.session.commit()
-    return jsonify({"ok": True, "cleared_articles": len(articles_to_clear)})
+    return jsonify({"ok": True})
 
 
 def _resolve_group_and_member(group_name: str, member_name: str) -> tuple:
@@ -1058,7 +1062,7 @@ def _guess_member_name(title: str, group_id: int) -> str | None:
     その名前を返す。0人、または複数人(グループショット等)含まれる場合はNoneを返す
     (無理に1人へ絞らず空欄のままにする)。"""
     from youtube_collector import _matches_target_artist
-    members = Member.query.filter_by(group_id=group_id).all()
+    members = Member.query.filter_by(group_id=group_id, is_active=True).all()
     matched = [m.name for m in members if _matches_target_artist(title, "", m.name)]
     return matched[0] if len(matched) == 1 else None
 
@@ -1077,7 +1081,7 @@ def _guess_group_id(chapter_title: str) -> int | None:
         if not name:
             continue
         norm = _normalize_tag_name(name)
-        group = Group.query.filter_by(normalized_name=norm).first()
+        group = Group.query.filter_by(normalized_name=norm, is_active=True).first()
         if group:
             return group.id
     return None
@@ -1226,7 +1230,7 @@ def guess_groups_for_posted():
     )
     articles = scoped.order_by(Article.posted_at.desc().nullslast()).all()
 
-    all_groups = Group.query.order_by(Group.name.asc()).all()
+    all_groups = Group.query.filter_by(is_active=True).order_by(Group.name.asc()).all()
 
     results = []
     for a in articles:
@@ -2028,11 +2032,11 @@ def settings():
     }
     accounts = ThreadsAccount.query.order_by(ThreadsAccount.id.asc()).all()
 
-    roster_groups = Group.query.order_by(Group.name.asc()).all()
+    roster_groups = Group.query.filter_by(is_active=True).order_by(Group.name.asc()).all()
     roster_members_by_group = {}
     if roster_groups:
         for m in Member.query.filter(
-            Member.group_id.in_([g.id for g in roster_groups])
+            Member.group_id.in_([g.id for g in roster_groups]), Member.is_active.is_(True)
         ).order_by(Member.name.asc()).all():
             roster_members_by_group.setdefault(m.group_id, []).append(m)
     roster = [
