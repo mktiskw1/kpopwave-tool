@@ -75,7 +75,7 @@ def get_my_follower_count(app, account_id: int = None) -> "int | None":
         logger.info("フォロワー数取得スキップ: 認証情報が未設定")
         return None
 
-    token_preview = f"{token[:12]}...{token[-4:]}" if len(token) > 20 else "***"
+    token_preview = f"****{token[-4:]}" if len(token) > 20 else "***"
     logger.info("フォロワー数取得開始: user_id=%s token=%s", user_id, token_preview)
 
     # 方法1: GET /me?fields=followers_count（ユーザーオブジェクトフィールド）

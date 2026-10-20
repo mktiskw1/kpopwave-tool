@@ -27,7 +27,7 @@
             <div class="mb-3">
               <label class="form-label" style="font-size:.85rem">App Secret</label>
               <input type="password" class="form-control" name="meta_app_secret"
-                     value="{{ settings.meta_app_secret }}" placeholder="abc123...">
+                     value="" autocomplete="new-password" placeholder="{{ settings.meta_app_secret or 'abc123...' }}">
               <div class="form-text" style="font-size:.75rem">
                 Meta Developer Portal のアプリシークレット
               </div>
@@ -92,7 +92,7 @@
                 </a>
               </label>
               <input type="password" class="form-control" name="threads_access_token"
-                     value="{{ settings.threads_access_token }}" placeholder="THR...">
+                     value="" autocomplete="new-password" placeholder="{{ settings.threads_access_token or 'THR...' }}">
               {% if settings.threads_token_expires_in_days is not none %}
                 {% if settings.threads_token_expires_in_days <= 0 %}
                   <div class="form-text" style="font-size:.75rem;color:var(--accent);font-weight:700">
@@ -231,7 +231,7 @@
         <div class="mb-3">
           <label class="form-label" style="font-size:.85rem">API キー</label>
           <input type="password" class="form-control" name="anthropic_api_key"
-                 value="{{ settings.anthropic_api_key }}" placeholder="sk-ant-...">
+                 value="" autocomplete="new-password" placeholder="{{ settings.anthropic_api_key or 'sk-ant-...' }}">
           <div class="form-text" style="font-size:.75rem">
             要約生成に使用。Claude Haiku モデルを利用します。
           </div>
@@ -248,7 +248,7 @@
         <div class="mb-3">
           <label class="form-label" style="font-size:.85rem">API キー</label>
           <input type="password" class="form-control" name="youtube_api_key"
-                 value="{{ settings.youtube_api_key }}" placeholder="AIza...">
+                 value="" autocomplete="new-password" placeholder="{{ settings.youtube_api_key or 'AIza...' }}">
           <div class="form-text" style="font-size:.75rem">
             Google Cloud Console で取得。fancam検索・音楽番組検索・チャンネル監視で使用します。
           </div>

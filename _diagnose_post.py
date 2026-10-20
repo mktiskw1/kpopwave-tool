@@ -21,7 +21,7 @@ print("  Threads 投稿診断")
 print("=" * 60)
 print(f"  test_mode  : {test_mode}")
 print(f"  user_id    : {user_id}")
-print(f"  token (先頭): {token[:30]}..." if token else "  token: (未設定)")
+print(f"  token (末尾4文字): ****{token[-4:]}" if token else "  token: (未設定)")
 print()
 
 if not token or not user_id:

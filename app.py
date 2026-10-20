@@ -13,7 +13,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, flash, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from flask import Flask, flash as _flask_flash, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
 
@@ -29,13 +29,38 @@ from database import (
 
 load_dotenv()
 
+# URLのクエリ(…?access_token=xxxx)や sk-ant- キーなど、秘密の値が文字列に混ざったときに末尾4文字だけ残して伏せる。
+# requests の例外メッセージは URL ごと(access_token 付き)入るため、flash・JSON応答・ログに出る前に通す。
+_SECRET_IN_TEXT_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])(access_token|client_secret|api_key|apikey|key|token)=([A-Za-z0-9_\-\.]{12,})"
+    r"|(sk-ant-[A-Za-z0-9_\-]{12,})"
+)
+
+
+def _scrub_secrets(text):
+    def _sub(m):
+        if m.group(3):
+            return "****" + m.group(3)[-4:]
+        return f"{m.group(1)}=****{m.group(2)[-4:]}"
+    return _SECRET_IN_TEXT_RE.sub(_sub, str(text))
+
+
+def flash(message, category="message"):
+    return _flask_flash(_scrub_secrets(message), category)
+
+
+class _ScrubFormatter(logging.Formatter):
+    def format(self, record):
+        return _scrub_secrets(super().format(record))
+
+
 # ログはコンソールに加え logs/scheduler.log にもローテーション付きで残す。
 # コンソールのみだと、ターミナルを閉じた時点でジョブ失敗などの記録が完全に失われるため
 # (2026-09の日次ジョブ欠落調査で、DBの記録パターンからの逆算でしか原因究明できなかった経緯がある)。
 _LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 os.makedirs(_LOG_DIR, exist_ok=True)
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-_log_formatter = logging.Formatter(_LOG_FORMAT)
+_log_formatter = _ScrubFormatter(_LOG_FORMAT)
 _console_handler = logging.StreamHandler()
 _console_handler.setFormatter(_log_formatter)
 _file_handler = RotatingFileHandler(
@@ -1804,7 +1829,43 @@ def api_group_plan_manual():
     return jsonify({"ok": True, "plan": group_balance.compute_stock_plan(app, _plan_account_id())})
 
 
+@app.after_request
+def _scrub_response_secrets(resp):
+    """例外メッセージ等に混ざった access_token=… 形式の秘密を、応答を返す直前に伏せる(最終防衛線)。"""
+    try:
+        if (resp.mimetype in ("text/html", "application/json") and not resp.direct_passthrough
+                and resp.status_code != 304):
+            body = resp.get_data(as_text=True)
+            scrubbed = _scrub_secrets(body)
+            if scrubbed != body:
+                resp.set_data(scrubbed)
+    except Exception:  # 応答の加工で本来の処理を壊さない
+        pass
+    return resp
+
+
 # ── 設定 ───────────────────────────────────────────────────────────────────
+
+# 画面・APIの応答に値そのものを出さない秘密の設定項目(保存は「入力されたときだけ更新」)
+SECRET_SETTING_KEYS = ("anthropic_api_key", "youtube_api_key",
+                       "meta_app_secret", "threads_access_token")
+
+
+def _mask_secret(value):
+    """秘密の値を末尾4文字だけ見せる形にする(例: ••••lQAA)。未設定なら空文字。"""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    return "••••" + value[-4:] if len(value) > 8 else "••••"
+
+
+def _redact(text, *secrets):
+    """例外メッセージなどに URL 経由で混ざった秘密の値を伏せる。"""
+    text = str(text)
+    for s in secrets:
+        if s and len(s) > 8:
+            text = text.replace(s, _mask_secret(s))
+    return text
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -1859,13 +1920,18 @@ def settings():
             Setting.set(_key, _val)
         Setting.set("group_balance_enabled", "true" if request.form.get("group_balance_enabled") else "false")
 
-        for key in ("anthropic_api_key",
-                    "youtube_api_key",
-                    "meta_app_id", "meta_app_secret", "app_base_url",
+        for key in ("meta_app_id", "app_base_url",
                     "buzz_requeue_interval_days",
                     "buzz_fasttrack_interval_days", "buzz_fasttrack_min_likes",
                     "buzz_threshold_likes", "buzz_repost_kill_likes"):
             Setting.set(key, (request.form.get(key) or "").strip())
+
+        # 秘密の項目は画面に値を出さない(入力欄は空)ので、空送信では既存の値を変えない。
+        # 新しい値が入力されたときだけ更新する。
+        for key in SECRET_SETTING_KEYS:
+            _new_secret = (request.form.get(key) or "").strip()
+            if _new_secret:
+                Setting.set(key, _new_secret)
 
         # Threads 認証情報は「手動で上書き」欄。空送信では絶対に消さない
         # (OAuth 済みの値をフォーム保存のたびに空で潰す事故を防ぐ)。
@@ -1929,10 +1995,10 @@ def settings():
 
     current = {
         "threads_user_id": panel_user_id,
-        "threads_access_token": panel_token,
+        "threads_access_token": _mask_secret(panel_token),
         "threads_token_expires_in_days": threads_token_expires_in_days,
-        "anthropic_api_key": Setting.get("anthropic_api_key"),
-        "youtube_api_key": Setting.get("youtube_api_key"),
+        "anthropic_api_key": _mask_secret(Setting.get("anthropic_api_key")),
+        "youtube_api_key": _mask_secret(Setting.get("youtube_api_key")),
         "test_mode": Setting.get("test_mode", "true") == "true",
         "early_advance_enabled": Setting.get("early_advance_enabled", "true") == "true",
         "buzz_requeue_interval_days": Setting.get("buzz_requeue_interval_days", "60"),
@@ -1952,7 +2018,7 @@ def settings():
         "highlight_padding_seconds": Setting.get("highlight_padding_seconds", "1.5"),
         "youtube_channels": json.loads(Setting.get("youtube_channels", "[]") or "[]"),
         "meta_app_id": Setting.get("meta_app_id"),
-        "meta_app_secret": Setting.get("meta_app_secret"),
+        "meta_app_secret": _mask_secret(Setting.get("meta_app_secret")),
         "app_base_url": base_url,
         "callback_url": base_url + "/auth/threads/callback",
     }
@@ -4679,11 +4745,11 @@ def debug_threads_search():
         )
         payload = {
             "status": r.status_code,
-            "url": r.url,
+            "url": _redact(r.url, token),
             "body": r.json(),
         }
     except Exception as e:
-        payload = {"error": str(e)}
+        payload = {"error": _redact(e, token)}
 
     return Response(
         _json.dumps(payload, ensure_ascii=False, indent=2),
@@ -4713,7 +4779,7 @@ def debug_threads_api():
     if not token or not user_id:
         return jsonify({"error": "threads_access_token / threads_user_id が未設定です"})
 
-    token_preview = f"{token[:12]}...{token[-4:]}" if len(token) > 20 else "短いトークン"
+    token_preview = _mask_secret(token) or "未設定"
     now_ts   = int(_time.time())
     since_ts = now_ts - 86400 * 3
 
@@ -4761,7 +4827,7 @@ def debug_threads_api():
                 "body": r.json(),
             }
         except Exception as e:
-            results[label] = {"url": url, "params": safe_params, "error": str(e)}
+            results[label] = {"url": url, "params": safe_params, "error": _redact(e, token)}
 
     import json as _json
     from flask import Response
@@ -4796,7 +4862,7 @@ def debug_threads_video():
             content_type="application/json; charset=utf-8",
         )
 
-    token_preview = f"{token[:12]}...{token[-4:]}" if len(token) > 20 else token
+    token_preview = _mask_secret(token) or "未設定"
 
     try:
         res = requests.post(
@@ -4822,7 +4888,7 @@ def debug_threads_video():
             "response": res.json(),
         }
     except Exception as e:
-        payload = {"error": str(e)}
+        payload = {"error": _redact(e, token)}
 
     return Response(
         _json.dumps(payload, ensure_ascii=False, indent=2),
@@ -4878,4 +4944,4 @@ if __name__ == "__main__":
         _recover_orphaned_jobs()
     yt_queue.start_worker(app)   # YouTubeの待ち行列(処理中のまま残ったジョブは待ちに戻す)
     setup_scheduler(app)
-    app.run(debug=False, use_reloader=False, host="0.0.0.0", port=5000, threaded=True)
+    app.run(debug=False, use_reloader=False, host="127.0.0.1", port=5000, threaded=True)
