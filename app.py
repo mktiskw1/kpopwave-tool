@@ -1287,14 +1287,18 @@ def _article_from_snapshot(snapshot):
     return Article(**kwargs)
 
 
-def _cleanup_article_related_records(article_id: int) -> None:
+def _cleanup_article_related_records(article_id: int, keep_trim_job_id=None) -> None:
     """記事削除前に、その記事を参照する子レコードの整合性を保つ。PostStat・VideoTrimJob
     (source側、そのジョブが「この記事を切り取る」ジョブである場合)は記事と一対で意味を持つ
     データのため一緒に削除する。VideoTrimJob(result側、このarticle_idが切り取り結果として
     生成されたクリップの場合)は、元の切り取りジョブの完了履歴自体は残す意味があるため
     削除はせずresult_article_idをNULL化するに留める。"""
     PostStat.query.filter_by(article_id=article_id).delete(synchronize_session=False)
-    VideoTrimJob.query.filter_by(source_article_id=article_id).delete(synchronize_session=False)
+    _src_jobs = VideoTrimJob.query.filter_by(source_article_id=article_id)
+    if keep_trim_job_id is not None:
+        # 「追加して元を削除」: 実行中のジョブ自身は、画面が結果を確認できるよう残す
+        _src_jobs = _src_jobs.filter(VideoTrimJob.id != keep_trim_job_id)
+    _src_jobs.delete(synchronize_session=False)
     VideoTrimJob.query.filter_by(result_article_id=article_id).update(
         {"result_article_id": None}, synchronize_session=False
     )
@@ -3183,7 +3187,45 @@ def _ffmpeg_trim_clip(source_path: str, dest_path: str, start: float, end: float
         raise RuntimeError(err)
 
 
-def _run_trim_job(app, job_id):
+def _delete_source_after_trim(job, new_article_id, clip_rel_path, static_dir):
+    """「追加して元を削除」: クリップの記事とファイルがDBとディスクに揃ったことを確認してから、
+    元の記事(承認待ちのものだけ)と、他の記事が使っていない元動画ファイルを削除する。
+    削除しなかった場合はその理由(画面に出す文)を返し、削除できた(または元がすでに無い)場合は None を返す。
+    元の記事を消す前にクリップの記事が commit 済みなので、元動画由来のファイル(<元ID>_clip_*)の
+    うちクリップの記事が参照しているものは video_files の参照チェックで消えない。"""
+    new_article = db.session.get(Article, new_article_id)
+    clip_path = os.path.join(static_dir, clip_rel_path)
+    if not new_article or new_article.video_file_path != clip_rel_path             or not os.path.exists(clip_path) or os.path.getsize(clip_path) <= 0:
+        return "クリップの保存を確認できなかったため、元の動画は削除しませんでした"
+
+    source = db.session.get(Article, job.source_article_id)
+    if not source:
+        return None
+    if source.status != "pending":
+        return "元の記事が承認待ちではなくなったため、削除しませんでした"
+    if source.is_favorite:
+        return "元の記事はお気に入り登録済みのため、削除しませんでした"
+
+    source_id = source.id
+    source_video = source.video_file_path
+    try:
+        _cleanup_article_related_records(source_id, keep_trim_job_id=job.id)
+        db.session.delete(source)
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        logger.exception("元の記事の削除に失敗: job_id=%d article_id=%d", job.id, source_id)
+        return f"元の記事の削除に失敗しました: {str(exc)[:200]}"
+
+    try:
+        n = _delete_video_files(source_video, static_dir, exclude_article_ids=[source_id])
+        logger.info("元の動画を削除: article_id=%d files=%d (クリップ %s は保持)", source_id, n, clip_rel_path)
+    except Exception:
+        logger.exception("元の動画ファイルの削除に失敗(記事は削除済み): article_id=%d", source_id)
+    return None
+
+
+def _run_trim_job(app, job_id, delete_source=False):
     import shutil as _shutil
     import time as _time
 
@@ -3252,6 +3294,14 @@ def _run_trim_job(app, job_id):
 
             logger.info("動画クリップ作成完了: job_id=%d 元article_id=%d -> new_article_id=%d clip=%s",
                         job_id, job.source_article_id, new_article.id, clip_filename)
+
+            if delete_source:
+                # クリップの作成・保存が成功したあとにだけ元を削除する(失敗時は元を消さない)
+                note = _delete_source_after_trim(job, new_article.id, clip_rel_path, static_dir)
+                if note:
+                    job.error_message = note  # status は done のまま。画面に「削除しなかった理由」として出す
+                    db.session.commit()
+                    logger.warning("元の記事を削除しませんでした: job_id=%d %s", job_id, note)
         except Exception as exc:
             logger.exception("動画トリミング失敗(例外): job_id=%d", job_id)
             db.session.rollback()
@@ -3306,6 +3356,12 @@ def trim_video(article_id):
     if not article.video_file_path:
         return jsonify({"ok": False, "error": "動画ファイルがありません"}), 400
 
+    delete_source = bool(data.get("delete_source"))
+    if delete_source and article.status != "pending":
+        return jsonify({"ok": False, "error": "「追加して元を削除」は承認待ちの記事でのみ使えます"}), 400
+    if delete_source and article.is_favorite:
+        return jsonify({"ok": False, "error": "お気に入り登録済みの記事は削除できません。先にお気に入りを解除してください"}), 400
+
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
     video_path = os.path.join(static_dir, article.video_file_path)
     if not os.path.exists(video_path):
@@ -3334,7 +3390,7 @@ def trim_video(article_id):
     db.session.add(job)
     db.session.commit()
 
-    threading.Thread(target=_run_trim_job, args=(app, job.id), daemon=True).start()
+    threading.Thread(target=_run_trim_job, args=(app, job.id, delete_source), daemon=True).start()
 
     return jsonify({"ok": True, "job_id": job.id})
 
@@ -3350,11 +3406,16 @@ def trim_job_status(job_id):
         )
         db.session.commit()
         logger.warning("動画トリミングタイムアウト(ポーリング時に検知): job_id=%d", job_id)
-    return jsonify({
+    result = {
         "status": job.status,
         "error": job.error_message,
         "new_article_id": job.result_article_id,
-    })
+    }
+    if job.status == "done":
+        # 「追加して元を削除」で元の記事が消えたか。消さなかった理由は error に入っている
+        result["source_deleted"] = db.session.get(Article, job.source_article_id) is None
+        result["note"] = job.error_message
+    return jsonify(result)
 
 
 @app.route("/api/articles/<int:article_id>/requeue", methods=["POST"])

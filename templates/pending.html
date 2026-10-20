@@ -423,6 +423,7 @@
             </button>
           </div>
           <!-- 切り取りボタン -->
+          <div class="d-flex align-items-center gap-2 flex-wrap">
           <button type="button" id="trim-btn-{{ a.id }}"
                   onclick="trimVideo({{ a.id }}, this)"
                   {% if active_trim_jobs.get(a.id) %}disabled{% endif %}
@@ -435,6 +436,20 @@
             ✂️ 切り取って別投稿として追加
             {% endif %}
           </button>
+          {% if a.status == 'pending' %}
+          <!-- 追加したあと、元の動画(この記事)を削除する。1本の元動画から複数クリップを作るときは左の「別投稿として追加」を使う -->
+          <button type="button" id="trim-del-btn-{{ a.id }}"
+                  data-title="{{ a.title }}"
+                  onclick="trimVideo({{ a.id }}, this, true)"
+                  {% if active_trim_jobs.get(a.id) %}disabled{% endif %}
+                  title="クリップを追加できたことを確認してから、元の動画の記事を削除します"
+                  style="padding:4px 14px;border-radius:6px;border:1px solid #c62828;
+                         background:#fff;color:#c62828;font-size:.82rem;
+                         cursor:pointer;font-weight:700">
+            ✂️ 追加して元を削除
+          </button>
+          {% endif %}
+          </div>
           <div id="trim-msg-{{ a.id }}" style="display:none;margin-top:6px;padding:4px 10px;
                border-radius:6px;background:#e8f5ed;color:#2e7d32;font-weight:700;font-size:.82rem">
             ✅ 承認待ちに追加しました！
@@ -1973,7 +1988,7 @@ function seekToTrim(type, id) {
 }
 
 // ── 動画切り取り（別投稿として追加） ────────────────────────────────────────
-function trimVideo(id, btn) {
+function trimVideo(id, btn, deleteSource) {
   const start = getTrimSeconds('start', id);
   if (start === null || isNaN(start)) {
     alert('開始時間の入力が正しくありません（分・秒を確認してください。秒は0〜59の範囲で入力してください）');
@@ -1988,34 +2003,54 @@ function trimVideo(id, btn) {
     alert('終了時間は開始時間より大きい値を入力してください');
     return;
   }
+  if (deleteSource) {
+    const title = btn.dataset.title || '';
+    if (!confirm('元の動画（' + title + '）を削除します。' + String.fromCharCode(10) + '切り取ったクリップを承認待ちに追加できたあとに削除します。よろしいですか？')) {
+      return;
+    }
+  }
   const orig = btn.innerHTML;
+  const otherId = btn.id.indexOf('trim-del-btn-') === 0 ? 'trim-btn-' + id : 'trim-del-btn-' + id;
+  const other = document.getElementById(otherId);
   btn.disabled = true;
+  if (other) other.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 処理中...';
+  const restore = function() {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+    if (other) other.disabled = false;
+  };
   fetch('/api/videos/' + id + '/trim', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({start: start, end: end})
+    body: JSON.stringify({start: start, end: end, delete_source: !!deleteSource})
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {
     if (d.ok) {
-      pollTrimJob(id, d.job_id, btn, orig);
+      pollTrimJob(id, d.job_id, btn, orig, other);
     } else {
-      btn.disabled = false;
-      btn.innerHTML = orig;
+      restore();
       alert('切り取り失敗: ' + (d.error || '不明なエラー'));
     }
   })
   .catch(function() {
-    btn.disabled = false;
-    btn.innerHTML = orig;
+    restore();
     alert('通信エラーが発生しました。もう一度お試しください。');
   });
 }
 
-function pollTrimJob(articleId, jobId, btn, origBtnHtml) {
+function pollTrimJob(articleId, jobId, btn, origBtnHtml, otherBtn) {
   btn = btn || document.getElementById('trim-btn-' + articleId);
+  otherBtn = otherBtn || document.getElementById('trim-del-btn-' + articleId);
   origBtnHtml = origBtnHtml || '✂️ 切り取って別投稿として追加';
+  const enable = function() {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origBtnHtml;
+    }
+    if (otherBtn) otherBtn.disabled = false;
+  };
   const check = function() {
     fetch('/api/videos/trim-jobs/' + jobId)
       .then(function(r) {
@@ -2031,29 +2066,30 @@ function pollTrimJob(articleId, jobId, btn, origBtnHtml) {
           setTimeout(check, 3000);
         } else if (d.status === 'done') {
           var msg = document.getElementById('trim-msg-' + articleId);
+          if (d.source_deleted) {
+            // 元の記事を削除した: 新しいクリップが承認待ちに並んだ状態で画面を読み込み直す
+            if (msg) {
+              msg.innerHTML = '✅ 完了！新しいクリップを追加し、元の動画を削除しました。一覧を更新します…';
+              msg.style.display = 'block';
+            }
+            setTimeout(function() { location.reload(); }, 1200);
+            return;
+          }
           if (msg) {
             msg.innerHTML = '✅ 完了！新しいクリップが承認待ちに追加されました　' +
               '<a href="/pending?tab=video" style="color:#2e7d32;text-decoration:underline;font-weight:700">一覧を更新</a>';
             msg.style.display = 'block';
           }
-          if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = origBtnHtml;
-          }
+          enable();
+          if (d.note) alert('クリップは追加しました。' + String.fromCharCode(10) + d.note);
         } else {
-          if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = origBtnHtml;
-          }
+          enable();
           alert('切り取り失敗: ' + (d.error || '不明なエラー'));
         }
       })
       .catch(function(e) {
         if (e && e.stopPolling) {
-          if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = origBtnHtml;
-          }
+          enable();
           alert('トリミングジョブが見つかりませんでした。');
         } else {
           setTimeout(check, 3000);
