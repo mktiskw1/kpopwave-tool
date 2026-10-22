@@ -624,6 +624,26 @@
         🆕 カムバック曲（新曲・カムバック関連の投稿）
       </label>
     </div>
+    <div class="mb-3 d-none" id="tag-caption-wrap">
+      <div class="d-flex align-items-center gap-2 mb-1">
+        <button type="button" id="tag-caption-btn" class="btn btn-sm btn-outline-primary" onclick="generateCaptions(false)">✨ 候補を生成</button>
+        <span id="tag-caption-status" style="font-size:.78rem;color:#666"></span>
+      </div>
+      <div id="tag-caption-song-wrap" class="d-none mb-2 p-2" style="background:#fff8e1;border-radius:8px">
+        <div style="font-size:.8rem;color:#8a6d00" class="mb-1">曲名が分かりません。曲名を入力して生成してください（空のまま生成すると曲名は書きません）</div>
+        <div class="input-group input-group-sm">
+          <input type="text" id="tag-caption-song-input" class="form-control" placeholder="曲名">
+          <button type="button" class="btn btn-outline-primary" onclick="generateCaptions(false)">この曲名で生成</button>
+        </div>
+      </div>
+      <div id="tag-caption-error" class="d-none mb-2" style="font-size:.8rem;color:#c62828;white-space:pre-wrap"></div>
+      <div id="tag-caption-list" class="d-none mb-2"></div>
+      <textarea id="tag-caption-text" class="form-control form-control-sm d-none" rows="3"
+                placeholder="選んだ候補がここに入ります。手直しできます"></textarea>
+      <div id="tag-caption-note" class="d-none" style="font-size:.72rem;color:#888">
+        この本文は手動の本文として保存され、承認時に自動で組み立て直されません。
+      </div>
+    </div>
     {% endif %}
     <div class="mb-3" id="tag-reply-wrap">
       <div class="form-check form-switch">
@@ -1363,7 +1383,7 @@ function syncMemberFieldWithGroupInput() {
 function deleteGroupSuggestion(id) {
   var g = ALL_GROUPS.find(function(x) { return x.id === id; });
   if (!g) return;
-  if (!confirm('グループ「' + g.name + '」を削除しますか？\nこのグループでタグ付けされている投稿がある場合、タグは解除されます。')) return;
+  if (!confirm(g.name + 'を名簿から削除します。過去の投稿データは残ります。よろしいですか？')) return;
 
   fetch('/api/groups/' + id, { method: 'DELETE' })
     .then(function(r) { return r.json(); })
@@ -1411,6 +1431,8 @@ function setApproveOnlyControls(approveMode, isVideo) {
   var ng = document.getElementById('tag-nogroup-input');
   if (ng) { ng.checked = false; }
   onNoGroupToggle();
+  var cw = document.getElementById('tag-caption-wrap');
+  if (cw) cw.classList.toggle('d-none', !(approveMode && isVideo));
 }
 
 // 「グループなし」を選ぶと、グループ・メンバー欄を無効にする
@@ -1490,6 +1512,7 @@ function approveArticle(id, btn) {
     resetOptionalFields();
     setOptionalFieldsVisible(true);
     resetTagModalPreview();
+    resetCaptionUi();
     modal.classList.remove('d-none');
     return;
   }
@@ -1517,6 +1540,126 @@ function editTag(id, btn) {
   setOptionalFieldsVisible(false);
   resetTagModalPreview();
   modal.classList.remove('d-none');
+}
+
+// ── 投稿文の候補生成(Claude Code CLI。ボタンを押したときだけ動く) ───────────────────
+var captionPollTimer = null;
+var captionRunId = 0;
+
+function resetCaptionUi() {
+  captionRunId++;
+  if (captionPollTimer) { clearTimeout(captionPollTimer); captionPollTimer = null; }
+  var ids = ['tag-caption-song-wrap', 'tag-caption-error', 'tag-caption-list', 'tag-caption-text', 'tag-caption-note'];
+  ids.forEach(function(i) { var el = document.getElementById(i); if (el) el.classList.add('d-none'); });
+  var t = document.getElementById('tag-caption-text'); if (t) t.value = '';
+  var l = document.getElementById('tag-caption-list'); if (l) l.innerHTML = '';
+  var s = document.getElementById('tag-caption-song-input'); if (s) s.value = '';
+  var st = document.getElementById('tag-caption-status'); if (st) st.textContent = '';
+  var b = document.getElementById('tag-caption-btn'); if (b) { b.disabled = false; b.textContent = '✨ 候補を生成'; }
+}
+
+function showCaptionError(msg) {
+  var e = document.getElementById('tag-caption-error');
+  if (e) { e.textContent = msg; e.classList.remove('d-none'); }
+}
+
+function generateCaptions() {
+  if (!pendingApproveId) return;
+  var id = pendingApproveId;
+  var groupInput = getTagGroupInputEl();
+  var groupName = groupInput ? groupInput.value.trim() : '';
+  var noGroupEl = document.getElementById('tag-nogroup-input');
+  var noGroup = !!(noGroupEl && noGroupEl.checked);
+  var btn = document.getElementById('tag-caption-btn');
+  var status = document.getElementById('tag-caption-status');
+  var errEl = document.getElementById('tag-caption-error');
+  var songWrap = document.getElementById('tag-caption-song-wrap');
+  var songInput = document.getElementById('tag-caption-song-input');
+  var songShown = songWrap && !songWrap.classList.contains('d-none');
+  var typedSong = songShown && songInput ? songInput.value.trim() : '';
+  if (errEl) errEl.classList.add('d-none');
+  if (!groupName && !noGroup) {
+    showCaptionError('先にグループを選んでください');
+    return;
+  }
+  var runId = ++captionRunId;
+  if (captionPollTimer) { clearTimeout(captionPollTimer); captionPollTimer = null; }
+  btn.disabled = true;
+  btn.textContent = '生成中…';
+  status.textContent = '30秒ほどかかります';
+  fetch('/api/articles/' + id + '/captions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      group_name: groupName, member_name: getMemberFieldValue(), no_group: noGroup,
+      song_title: typedSong, song_unknown: !!(songShown && !typedSong)
+    })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (runId !== captionRunId) return;
+    if (!d.ok) { captionDone(); showCaptionError(d.error || '生成を開始できませんでした'); return; }
+    if (d.needs_song) {
+      captionDone();
+      songWrap.classList.remove('d-none');
+      if (songInput) songInput.focus();
+      return;
+    }
+    pollCaptionJob(d.job_id, runId, 0);
+  })
+  .catch(function() { if (runId !== captionRunId) return; captionDone(); showCaptionError('通信エラーが発生しました'); });
+}
+
+function captionDone() {
+  var btn = document.getElementById('tag-caption-btn');
+  var status = document.getElementById('tag-caption-status');
+  if (btn) { btn.disabled = false; btn.textContent = '✨ 候補を生成'; }
+  if (status) status.textContent = '';
+}
+
+function pollCaptionJob(jobId, runId, n) {
+  captionPollTimer = setTimeout(function() {
+    fetch('/api/caption-jobs/' + jobId)
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (runId !== captionRunId) return;
+        if (!d.ok) { captionDone(); showCaptionError(d.error || '結果を取得できませんでした'); return; }
+        if (d.status === 'running') {
+          if (n > 100) { captionDone(); showCaptionError('時間がかかりすぎています。もう一度生成してください'); return; }
+          pollCaptionJob(jobId, runId, n + 1);
+          return;
+        }
+        captionDone();
+        if (d.status === 'failed') { showCaptionError(d.error || '生成に失敗しました'); return; }
+        renderCaptionCandidates(d.candidates || [], d.seconds);
+      })
+      .catch(function() { if (runId !== captionRunId) return; captionDone(); showCaptionError('通信エラーが発生しました'); });
+  }, 1500);
+}
+
+function renderCaptionCandidates(cands, seconds) {
+  var list = document.getElementById('tag-caption-list');
+  var ta = document.getElementById('tag-caption-text');
+  var btn = document.getElementById('tag-caption-btn');
+  list.innerHTML = '';
+  cands.forEach(function(c) {
+    var label = document.createElement('label');
+    label.className = 'd-block border rounded p-2 mb-1';
+    label.style.cssText = 'cursor:pointer;font-size:.85rem;white-space:pre-wrap;color:#000';
+    var radio = document.createElement('input');
+    radio.type = 'radio'; radio.name = 'tag-caption-choice'; radio.className = 'form-check-input me-2';
+    radio.addEventListener('change', function() {
+      ta.value = c.text;
+      ta.classList.remove('d-none');
+      document.getElementById('tag-caption-note').classList.remove('d-none');
+    });
+    label.appendChild(radio);
+    label.appendChild(document.createTextNode(c.text));
+    list.appendChild(label);
+  });
+  list.classList.remove('d-none');
+  btn.textContent = '🔁 もう一度生成';
+  var st = document.getElementById('tag-caption-status');
+  if (st && seconds) st.textContent = seconds + '秒で生成しました';
 }
 
 function resetTagModalPreview() {
@@ -1561,8 +1704,10 @@ function confirmTagModal(withPriority) {
     var replyOn = !!(replyToggle && replyToggle.checked);
     var replyText = replyOn && replyTextEl ? replyTextEl.value.trim() : '';
     var replyUrl = replyOn && replyUrlEl ? replyUrlEl.value.trim() : '';
+    var captionEl = document.getElementById('tag-caption-text');
+    var chosenSummary = captionEl && !captionEl.classList.contains('d-none') ? captionEl.value.trim() : '';
     doApprove(pendingApproveId, pendingApproveBtn, groupName, memberName, isComeback, replyText, replyUrl,
-              noGroup, !!withPriority);
+              noGroup, !!withPriority, chosenSummary);
   }
   // doApprove/doSaveTagへは値渡し済みなので、ここでグローバル変数をリセットしても
   // 実行中の処理には影響しない。リセットし忘れると、モーダルを閉じずに終えた場合に
@@ -1781,7 +1926,7 @@ function applyBulkGuess() {
   next();
 }
 
-function doApprove(id, btn, groupName, memberName, isComeback, replyText, replyUrl, noGroup, priority) {
+function doApprove(id, btn, groupName, memberName, isComeback, replyText, replyUrl, noGroup, priority, chosenSummary) {
   btn.disabled = true;
   const orig = btn.innerHTML;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
@@ -1794,6 +1939,7 @@ function doApprove(id, btn, groupName, memberName, isComeback, replyText, replyU
       is_comeback: !!isComeback,
       thread_reply_text: replyText || '',
       thread_reply_url: replyUrl || '',
+      summary: chosenSummary || '',
     })
   })
   .then(function(r) { return r.json(); })

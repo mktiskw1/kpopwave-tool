@@ -418,6 +418,22 @@
     </div>
   </div>
 
+  <!-- 投稿文の候補生成(Claude Code CLI) -->
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header"><i class="bi bi-stars me-2"></i>投稿文の候補生成のルール</div>
+      <div class="card-body">
+        <div class="form-text mb-2" style="font-size:.75rem">
+          承認画面の「候補を生成」で、このルールを使って6案を作ります。このPCの Claude Code のログインで動きます（APIキーは不要）。
+          空にして保存すると初期値に戻ります。
+        </div>
+        <textarea class="form-control" name="caption_rules" id="caption-rules-input" rows="16"
+                  style="font-size:.8rem;font-family:monospace">{{ caption_rules }}</textarea>
+        <button type="button" class="btn btn-sm btn-outline-secondary mt-2" onclick="resetCaptionRules()">初期値に戻す（保存で確定）</button>
+      </div>
+    </div>
+  </div>
+
   <!-- yt-dlp 動画収集チャンネル -->
   <div class="col-md-6">
     <div class="card">
@@ -670,6 +686,11 @@ function addChannel() {
 }
 
 // ── グループ・メンバー ロースター管理 ──────────────────────────────────────
+var CAPTION_RULES_DEFAULT = {{ caption_rules_default | tojson }};
+function resetCaptionRules() {
+  document.getElementById('caption-rules-input').value = CAPTION_RULES_DEFAULT;
+}
+
 var ROSTER_DATA = {{ (roster or []) | tojson }};  // [{id, name, members:[{id,name},...]}, ...]
 
 function escHtmlRoster(s) {

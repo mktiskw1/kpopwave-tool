@@ -1087,6 +1087,67 @@ def _guess_group_id(chapter_title: str) -> int | None:
     return None
 
 
+@app.route("/api/articles/<int:id>/captions", methods=["POST"])
+def api_generate_captions(id):
+    """承認モーダルの「候補を生成」: 投稿文の候補6案を Claude Code CLI で作る(ボタンを押したときだけ)。
+    生成は別スレッドで走り、画面は /api/caption-jobs/<job_id> をポーリングして結果を受け取る。"""
+    import caption_ai
+    from summarizer import _extract_song_title
+    article = Article.query.get_or_404(id)
+    data = request.get_json(silent=True) or {}
+    group_name = (data.get("group_name") or "").strip()
+    member_name = (data.get("member_name") or "").strip()
+    no_group = bool(data.get("no_group"))
+    typed_song = (data.get("song_title") or "").strip()
+    song_unknown = bool(data.get("song_unknown"))
+
+    # グループ: 承認モーダルで選ばれている値を使う。未選択なら生成しない。
+    # 「グループなし」「その他」のときだけ、タイトルから読み取れた名前を使い、読めなければ「書かない」と指示する。
+    active_groups = Group.query.filter_by(is_active=True).order_by(Group.name.asc()).all()
+    if not group_name and not no_group:
+        return jsonify({"ok": False, "error": "先にグループを選んでください"}), 400
+    group_mode = "named"
+    if no_group or group_name == "その他":
+        guessed = _guess_group(article.title, [g for g in active_groups if g.name != "その他"])
+        if guessed:
+            group_name, member_name = guessed.name, ""
+        else:
+            group_name, member_name, group_mode = "", "", "none"
+
+    # 曲名: タイトルの引用符 → (取り込み済みの)説明文 → 入力欄。YouTubeへは新たにアクセスしない。
+    song_title, song_mode = "", "named"
+    if typed_song:
+        song_title = typed_song
+    elif song_unknown:
+        song_mode = "none"
+    else:
+        song_title = _extract_song_title(article.title, group_name)
+        if not song_title:
+            song_title = caption_ai.find_song_in_description(article.raw_content or "", group_name)
+        if not song_title:
+            return jsonify({"ok": True, "needs_song": True})
+
+    recent = (Article.query.filter(Article.summary.isnot(None), Article.summary != "", Article.id != id,
+                                   Article.status.in_(("posted", "queued", "pending")))
+              .order_by(Article.id.desc()).limit(caption_ai.RECENT_POSTS_LIMIT).all())
+    rules = (Setting.get("caption_rules", "") or "").strip() or caption_ai.DEFAULT_CAPTION_RULES
+    prompt = caption_ai.build_user_prompt(
+        group_name=group_name, member_name=member_name, song_title=song_title, video_title=article.title,
+        recent_texts=[a.summary for a in recent], group_mode=group_mode, song_mode=song_mode)
+    job_id = caption_ai.start_job(rules, prompt)
+    return jsonify({"ok": True, "job_id": job_id, "group": group_name, "song": song_title})
+
+
+@app.route("/api/caption-jobs/<job_id>")
+def api_caption_job(job_id):
+    import caption_ai
+    job = caption_ai.get_job(job_id)
+    if not job:
+        return jsonify({"ok": False, "error": "生成ジョブが見つかりません(サーバーが再起動した可能性があります)"}), 404
+    return jsonify({"ok": True, "status": job["status"], "candidates": job["candidates"], "error": job["error"],
+                    "seconds": job["seconds"]})
+
+
 @app.route("/articles/<int:id>/approve", methods=["POST"])
 def approve_article(id):
     from scheduler import next_post_slot
@@ -1123,6 +1184,13 @@ def approve_article(id):
                 return _reject("グループを入力してください（グループが無い場合は「グループなし」を選んでください）。")
 
     article.status = "queued"
+
+    # 「候補を生成」で選んで(手直しして)決めた本文。手動の本文として扱い、承認時の自動組み立てで上書きしない。
+    chosen_summary = (tag_data.get("summary") or "").strip()
+    if chosen_summary:
+        article.summary = chosen_summary
+        article.summary_is_manual = True
+        article.error_message = None
 
     if group_name:
         group_id, member_id = _resolve_group_and_member(group_name, member_name)
@@ -1928,6 +1996,8 @@ def settings():
             Setting.set(_key, _val)
         Setting.set("group_balance_enabled", "true" if request.form.get("group_balance_enabled") else "false")
 
+        Setting.set("caption_rules", (request.form.get("caption_rules") or "").strip())
+
         for key in ("meta_app_id", "app_base_url",
                     "buzz_requeue_interval_days",
                     "buzz_fasttrack_interval_days", "buzz_fasttrack_min_likes",
@@ -2053,7 +2123,10 @@ def settings():
         kpop_account_id, serialize_watched_channels,
     )
     watch_account_id = kpop_account_id()
+    import caption_ai
     return render_template("settings.html", settings=current, accounts=accounts, roster=roster,
+                           caption_rules=(Setting.get("caption_rules", "") or "").strip() or caption_ai.DEFAULT_CAPTION_RULES,
+                           caption_rules_default=caption_ai.DEFAULT_CAPTION_RULES,
                            watch_channels=serialize_watched_channels(watch_account_id),
                            watch_state=get_run_state(),
                            watch_account_id=watch_account_id,
