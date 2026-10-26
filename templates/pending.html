@@ -1568,7 +1568,7 @@ function generateCaptions() {
   if (captionPollTimer) { clearTimeout(captionPollTimer); captionPollTimer = null; }
   btn.disabled = true;
   btn.textContent = '生成中…';
-  status.textContent = '30秒ほどかかります';
+  status.textContent = '1分ほどかかります';
   fetch('/api/articles/' + id + '/captions', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1606,19 +1606,21 @@ function pollCaptionJob(jobId, runId, n) {
         if (runId !== captionRunId) return;
         if (!d.ok) { captionDone(); showCaptionError(d.error || '結果を取得できませんでした'); return; }
         if (d.status === 'running') {
-          if (n > 100) { captionDone(); showCaptionError('時間がかかりすぎています。もう一度生成してください'); return; }
+          var st0 = document.getElementById('tag-caption-status');
+          if (st0 && d.note) st0.textContent = d.note + '（1分ほどかかります）';
+          if (n > 400) { captionDone(); showCaptionError('時間がかかりすぎています。もう一度生成してください'); return; }
           pollCaptionJob(jobId, runId, n + 1);
           return;
         }
         captionDone();
         if (d.status === 'failed') { showCaptionError(d.error || '生成に失敗しました'); return; }
-        renderCaptionCandidates(d.candidates || [], d.seconds);
+        renderCaptionCandidates(d.candidates || [], d.seconds, d.shortfall);
       })
       .catch(function() { if (runId !== captionRunId) return; captionDone(); showCaptionError('通信エラーが発生しました'); });
   }, 1500);
 }
 
-function renderCaptionCandidates(cands, seconds) {
+function renderCaptionCandidates(cands, seconds, shortfall) {
   var list = document.getElementById('tag-caption-list');
   var ta = document.getElementById('tag-caption-text');
   var btn = document.getElementById('tag-caption-btn');
@@ -1642,6 +1644,7 @@ function renderCaptionCandidates(cands, seconds) {
   btn.textContent = '🔁 もう一度生成';
   var st = document.getElementById('tag-caption-status');
   if (st && seconds) st.textContent = seconds + '秒で生成しました';
+  if (shortfall) showCaptionError(shortfall + '。「もう一度生成」で作り直せます');
 }
 
 function closeTagModal() {

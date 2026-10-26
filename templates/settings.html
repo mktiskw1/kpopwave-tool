@@ -427,6 +427,14 @@
           承認画面の「候補を生成」で、このルールを使って6案を作ります。このPCの Claude Code のログインで動きます（APIキーは不要）。
           空にして保存すると初期値に戻ります。
         </div>
+        <div class="mb-2">
+          <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">使うモデル</label>
+          <select class="form-select form-select-sm" name="caption_model" style="max-width:200px">
+            {% for mname in caption_model_choices %}
+            <option value="{{ mname }}" {% if mname == caption_model %}selected{% endif %}>{{ mname }}{% if mname == 'opus' %}（初期値・高品質）{% elif mname == 'sonnet' %}（速い・安い）{% else %}（最速）{% endif %}</option>
+            {% endfor %}
+          </select>
+        </div>
         <textarea class="form-control" name="caption_rules" id="caption-rules-input" rows="16"
                   style="font-size:.8rem;font-family:monospace">{{ caption_rules }}</textarea>
         <button type="button" class="btn btn-sm btn-outline-secondary mt-2" onclick="resetCaptionRules()">初期値に戻す（保存で確定）</button>

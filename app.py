@@ -1131,10 +1131,12 @@ def api_generate_captions(id):
                                    Article.status.in_(("posted", "queued", "pending")))
               .order_by(Article.id.desc()).limit(caption_ai.RECENT_POSTS_LIMIT).all())
     rules = (Setting.get("caption_rules", "") or "").strip() or caption_ai.DEFAULT_CAPTION_RULES
-    prompt = caption_ai.build_user_prompt(
-        group_name=group_name, member_name=member_name, song_title=song_title, video_title=article.title,
-        recent_texts=[a.summary for a in recent], group_mode=group_mode, song_mode=song_mode)
-    job_id = caption_ai.start_job(rules, prompt)
+    ctx = {
+        "group_name": group_name, "member_name": member_name, "song_title": song_title, "video_title": article.title,
+        "recent_texts": [a.summary for a in recent], "group_mode": group_mode, "song_mode": song_mode,
+        "exemplars": caption_ai.pick_exemplars(), "generated": caption_ai.recent_generated(),
+    }
+    job_id = caption_ai.start_job(app, rules, caption_ai.get_model(), ctx)
     return jsonify({"ok": True, "job_id": job_id, "group": group_name, "song": song_title})
 
 
@@ -1145,7 +1147,7 @@ def api_caption_job(job_id):
     if not job:
         return jsonify({"ok": False, "error": "生成ジョブが見つかりません(サーバーが再起動した可能性があります)"}), 404
     return jsonify({"ok": True, "status": job["status"], "candidates": job["candidates"], "error": job["error"],
-                    "seconds": job["seconds"]})
+                    "seconds": job["seconds"], "shortfall": job.get("shortfall"), "note": job.get("note")})
 
 
 @app.route("/articles/<int:id>/approve", methods=["POST"])
@@ -1952,6 +1954,9 @@ def settings():
         Setting.set("group_balance_enabled", "true" if request.form.get("group_balance_enabled") else "false")
 
         Setting.set("caption_rules", (request.form.get("caption_rules") or "").strip())
+        import caption_ai as _cai
+        _model = (request.form.get("caption_model") or "").strip().lower()
+        Setting.set(_cai.SETTING_MODEL, _model if _model in _cai.MODEL_CHOICES else _cai.DEFAULT_MODEL)
 
         for key in ("meta_app_id", "app_base_url",
                     "buzz_requeue_interval_days",
@@ -2082,6 +2087,7 @@ def settings():
     return render_template("settings.html", settings=current, accounts=accounts, roster=roster,
                            caption_rules=(Setting.get("caption_rules", "") or "").strip() or caption_ai.DEFAULT_CAPTION_RULES,
                            caption_rules_default=caption_ai.DEFAULT_CAPTION_RULES,
+                           caption_model=caption_ai.get_model(), caption_model_choices=caption_ai.MODEL_CHOICES,
                            watch_channels=serialize_watched_channels(watch_account_id),
                            watch_state=get_run_state(),
                            watch_account_id=watch_account_id,
