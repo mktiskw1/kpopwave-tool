@@ -1232,7 +1232,7 @@ def approve_article(id):
     db.session.commit()
 
     # 動画投稿は、承認時点で確定したグループ・メンバー名を反映した投稿文を必ず(再)組み立てる。
-    # 承認前に「要約を生成」済みでも、タグ付け前の内容のまま投稿されてしまわないようにするため、
+    # 承認前に組み立て済みでも、タグ付け前の内容のまま投稿されてしまわないようにするため、
     # 承認のたびに組み立て直す(AI呼び出し不要・決定的な組み立てのため無料・高速)。
     # ただし本文が手動編集済み(summary_is_manual)の場合は、この自動再組み立てで
     # 手入力した内容を上書きしてしまうため、その場合はスキップして手動編集内容を尊重する。
@@ -1599,51 +1599,6 @@ def update_article_images(id):
     article.image_urls = json.dumps(urls[1:], ensure_ascii=False) if len(urls) > 1 else None
     db.session.commit()
     return jsonify({"ok": True, "count": len(urls)})
-
-
-@app.route("/articles/<int:id>/resummary", methods=["POST"])
-def resummary_article(id):
-    from summarizer import summarize_article
-
-    style = (request.form.get("style") or "つぶやき型").strip()
-    scheduled_at = (request.form.get("scheduled_at") or "").strip() or None
-    # group_name/member_name: 承認モーダル入力中のプレビュー用(任意)。キー自体が無ければ
-    # DBのgroup_id/member_idをこれまで通り使う。キーがあれば(空文字含め)そちらを優先する
-    # ── DBへは保存しない、その場限りの組み立てにのみ使う。
-    preview_group_name = request.form.get("group_name")
-    preview_member_name = request.form.get("member_name")
-    logger.info(
-        "[resummary] article=%d style=%r scheduled_at=%r preview_group=%r preview_member=%r",
-        id, style, scheduled_at, preview_group_name, preview_member_name,
-    )
-    try:
-        success = summarize_article(
-            app, id, style=style, scheduled_at=scheduled_at,
-            preview_group_name=preview_group_name, preview_member_name=preview_member_name,
-        )
-        # summarize_article は内部で別 app_context を開くため、セッションを明示的にリフレッシュ
-        db.session.expire_all()
-        article = db.session.get(Article, id)
-        logger.info(
-            "resummary article=%d success=%s error_message=%r",
-            id, success, article.error_message if article else None,
-        )
-        # article is None のケース: 実行中に他リクエスト(削除操作等、threaded=Trueで並行実行され得る)
-        # によって記事が削除された場合。success=Trueでもここでは記事本体を参照できないため、
-        # article.summary への素通しアクセスで落ちないようにガードする。
-        if success and article is not None:
-            return jsonify({"success": True, "summary": article.summary, "length": len(article.summary or "")})
-        if article is None:
-            error_msg = "対象の記事が見つかりません(処理中に削除された可能性があります)。"
-        else:
-            error_msg = article.error_message or "要約の生成に失敗しました（サーバーログを確認してください）"
-        return jsonify({"success": False, "error": error_msg})
-    except Exception:
-        # ここで確実にトレースバックをログへ残す(想定外の例外はFlaskの既定の500 HTMLページを
-        # 返してしまい、フロント側はJSONパースに失敗して原因不明の「通信エラー」としか
-        # 表示できなくなるため、必ずJSONで理由を返す)。
-        logger.exception("resummary article=%d で予期しない例外が発生しました", id)
-        return jsonify({"success": False, "error": "サーバー内部エラーが発生しました（サーバーログを確認してください）"}), 500
 
 
 # ── 動画配信（ngrokブラウザ警告バイパス） ──────────────────────────────────

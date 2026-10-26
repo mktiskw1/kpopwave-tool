@@ -114,7 +114,7 @@
         </div>
         {% else %}
         <div class="summary-preview" style="font-size:.78rem;color:var(--text-muted);margin-top:.3rem;opacity:.5">
-          未生成
+          投稿文なし
         </div>
         {% endif %}
 
@@ -187,8 +187,8 @@
           👁 プレビュー
         </button>
         <button class="btn btn-outline-secondary btn-sm" style="font-size:.8rem"
-                onclick="openAndGenerate({{ a.id }}, this)">
-          ✍️ 投稿文を生成
+                onclick="toggleSummaryPanel({{ a.id }})">
+          ✍️ 投稿文を編集
         </button>
         <form action="{{ url_for('unqueue_article', id=a.id) }}" method="post">
           <button type="submit" class="btn btn-outline-secondary btn-sm w-100" style="font-size:.8rem">
@@ -214,12 +214,8 @@
     <div id="summary-form-{{ a.id }}" class="d-none mt-2">
       <textarea id="queue-ta-{{ a.id }}" class="form-control form-control-sm" rows="4"
                 style="font-size:.82rem;resize:vertical"
-                placeholder="まだ投稿文が生成されていません">{{ a.summary or '' }}</textarea>
+                placeholder="まだ投稿文がありません">{{ a.summary or '' }}</textarea>
       <div class="d-flex gap-2 mt-1 justify-content-end">
-        <button class="btn btn-outline-secondary btn-sm" style="font-size:.8rem"
-                onclick="generateQueueSummary({{ a.id }}, this)">
-          ✍️ 生成
-        </button>
         <button class="btn btn-sm btn-accent" style="font-size:.8rem"
                 onclick="saveQueueSummary({{ a.id }}, this)">
           💾 保存
@@ -352,52 +348,6 @@ function toggleSchedule(id) {
 
 function toggleSummaryPanel(id) {
   document.getElementById('summary-form-' + id).classList.toggle('d-none');
-}
-
-function openAndGenerate(id, _btn) {
-  const panel = document.getElementById('summary-form-' + id);
-  panel.classList.remove('d-none');
-  const ta = document.getElementById('queue-ta-' + id);
-  if (ta && ta.value.trim()) return;
-  // スピナーをパネル内の「生成」ボタンに表示する
-  const innerBtn = panel.querySelector('button');
-  generateQueueSummary(id, innerBtn || _btn);
-}
-
-function generateQueueSummary(id, btn) {
-  // data-scheduled-at（サーバー値）優先、ユーザーが変更した場合は dt-{id} を使用
-  const card = document.getElementById('qcard-' + id);
-  const scheduledAt = document.getElementById('dt-' + id)?.value
-                   || card?.dataset.scheduledAt
-                   || '';
-  const orig = btn.innerHTML;
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
-  let body = 'style=' + encodeURIComponent('つぶやき型');
-  if (scheduledAt) body += '&scheduled_at=' + encodeURIComponent(scheduledAt);
-  fetch('/articles/' + id + '/resummary', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-    body: body
-  }).then(r => r.json()).then(d => {
-    btn.disabled = false;
-    btn.innerHTML = orig;
-    if (d.success) {
-      const ta = document.getElementById('queue-ta-' + id);
-      if (ta) ta.value = d.summary;
-      const preview = document.querySelector('#qcard-' + id + ' .summary-preview');
-      if (preview) {
-        preview.textContent = d.summary.slice(0, 120) + (d.summary.length > 120 ? '…' : '');
-        preview.style.opacity = '1';
-      }
-    } else {
-      alert('生成失敗: ' + d.error);
-    }
-  }).catch(() => {
-    btn.disabled = false;
-    btn.innerHTML = orig;
-    alert('通信エラーが発生しました');
-  });
 }
 
 function saveQueueSummary(id, btn) {

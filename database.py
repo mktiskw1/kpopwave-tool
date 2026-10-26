@@ -79,7 +79,7 @@ class Article(db.Model):
     is_comeback = db.Column(db.Boolean, nullable=False, default=False)
     # summaryが手動編集されたかどうか。Trueの間は承認時の自動再組み立て(動画投稿文の
     # グループ名→メンバー名→曲名→フック組み立て)をスキップし、手動編集内容を尊重する。
-    # 「要約を生成」(summarize_article)が成功するたびFalseに戻る(自動生成に戻った扱い)。
+    # 承認時の自動組み立て(summarize_article)が成功するたびFalseに戻る(自動生成に戻った扱い)。
     summary_is_manual = db.Column(db.Boolean, nullable=False, default=False)
     # YouTube由来の動画の元チャンネル(取り込み時に保存。X等YouTube以外はNone)。
     # チャンネル別の成績集計・削除記録(DeletedPostLog)で使う。

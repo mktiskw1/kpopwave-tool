@@ -175,23 +175,14 @@ def _save_error(app, article_id: int, message: str) -> None:
 
 
 def summarize_article(
-    app, article_id: int, style: str = "つぶやき型", scheduled_at: str | None = None,
-    preview_group_name: str | None = None, preview_member_name: str | None = None,
+    app, article_id: int, style: str = "つぶやき型",
 ) -> bool:
     """動画投稿の投稿文を「グループ名→メンバー名→曲名→フック」で組み立てて DB に保存する。成功なら True。
 
     動画以外(ニュース記事など)のAI要約・投稿文生成は廃止したため、動画以外の記事に対してはエラー
-    メッセージを保存して False を返す(投稿文は手入力する)。scheduled_at は互換のために残している(未使用)。
-
-    preview_group_name/preview_member_name: 承認前プレビュー用の一時的なタグ指定
-    (Noneでなければ、article.group_id/member_idの代わりにこちらを使って動画投稿文を
-    組み立てる。DBのgroup_id/member_idは変更しない — 承認モーダル入力中の「要約を生成」
-    プレビュー専用)。
+    メッセージを保存して False を返す(投稿文は手入力する)。承認時の自動組み立てから呼ばれる。
     """
-    logger.info(
-        "[summarize_article] article=%d style=%r preview_group=%r preview_member=%r",
-        article_id, style, preview_group_name, preview_member_name,
-    )
+    logger.info("[summarize_article] article=%d style=%r", article_id, style)
 
     with app.app_context():
         article = db.session.get(Article, article_id)
@@ -203,29 +194,24 @@ def summarize_article(
         article_account_id = article.account_id
         tagged_group_name  = ""
         tagged_member_name = ""
-        if preview_group_name is not None:
-            # 承認モーダル入力中のプレビュー: DBのgroup_id/member_idは参照・変更しない。
-            tagged_group_name = preview_group_name.strip()
-            tagged_member_name = (preview_member_name or "").strip() if tagged_group_name else ""
-        else:
-            if article.group_id:
-                g = db.session.get(Group, article.group_id)
-                if g:
-                    tagged_group_name = g.name
-                else:
-                    logger.warning(
-                        "article=%d: group_id=%d が groups マスタに存在しません(削除済み参照?)。"
-                        "グループ名なしで組み立てます。", article_id, article.group_id,
-                    )
-            if article.member_id:
-                m = db.session.get(Member, article.member_id)
-                if m:
-                    tagged_member_name = m.name
-                else:
-                    logger.warning(
-                        "article=%d: member_id=%d が members マスタに存在しません(削除済み参照?)。"
-                        "メンバー名なしで組み立てます。", article_id, article.member_id,
-                    )
+        if article.group_id:
+            g = db.session.get(Group, article.group_id)
+            if g:
+                tagged_group_name = g.name
+            else:
+                logger.warning(
+                    "article=%d: group_id=%d が groups マスタに存在しません(削除済み参照?)。"
+                    "グループ名なしで組み立てます。", article_id, article.group_id,
+                )
+        if article.member_id:
+            m = db.session.get(Member, article.member_id)
+            if m:
+                tagged_member_name = m.name
+            else:
+                logger.warning(
+                    "article=%d: member_id=%d が members マスタに存在しません(削除済み参照?)。"
+                    "メンバー名なしで組み立てます。", article_id, article.member_id,
+                )
 
     if content_type != "video":
         msg = "ニュース記事のAI要約は廃止されました。投稿文は手入力してください（動画投稿のみ自動で組み立てます）。"

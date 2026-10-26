@@ -461,9 +461,9 @@ def post_to_threads(app, article_id: int, test_mode: bool = False, account_id: i
             # ここに来る時点で status は 'posting'(このメソッド or 呼び出し元が設定済み)。
             # マークしないと 'posting' のまま固まるため failed にする。
             article.status = "failed"
-            article.error_message = "要約がありません。先に要約を生成してください"
+            article.error_message = "投稿文がありません。承認画面の「候補を生成」などで投稿文を入れてください"
             db.session.commit()
-            return False, "要約がありません。先に要約を生成してください"
+            return False, "投稿文がありません。承認画面の「候補を生成」などで投稿文を入れてください"
         post_text      = article.summary
         thumbnail_url  = article.thumbnail_url or ""
         content_type   = (getattr(article, "content_type", None) or "article")
