@@ -124,8 +124,17 @@ _NO_CHAIN_RE = re.compile(r"の[^の、。？！!?\n]{1,14}の")
 # ログイン切れなどを見分ける語(画面には元のメッセージをそのまま出し、案内を1行足す)
 _LOGIN_HINTS = ("login", "log in", "authenticat", "unauthorized", "401", "oauth", "credential", "api key", "expired")
 
-# 例文のうち、ルールから自動で拾えない(短すぎる)けれど必ず除外する言い回し
-_EXTRA_FORBIDDEN = ("…いや、",)
+# 例文のうち、ルールから自動で拾えない言い回し(短い言い回しや一般的な語は落とさないため、今は空)
+_EXTRA_FORBIDDEN = ()
+
+# グループ名のカタカナ表記(「エンミックス」など)。本文にこれが入っていればグループ名ありとみなす
+GROUP_ALIASES = {
+    "nmixx": ("エンミックス",), "ive": ("アイヴ", "アイブ"), "illit": ("アイリット",), "aespa": ("エスパ",),
+    "newjeans": ("ニュージーンズ",), "lesserafim": ("ルセラフィム",), "babymonster": ("ベビーモンスター", "ベビモン"),
+    "twice": ("トゥワイス",), "hearts2hearts": ("ハーツトゥハーツ", "ハツハ"), "izone": ("アイズワン",),
+    "blackpink": ("ブラックピンク",), "triples": ("トリプルエス",), "kiiikiii": ("キィキィ", "キキ"),
+    "rescene": ("リセンヌ",), "itzy": ("イッジ",), "stayc": ("ステイシー",), "fromis9": ("プロミスナイン",),
+}
 
 
 # ───────────── 設定 ─────────────
@@ -232,6 +241,21 @@ def save_generated(texts: list) -> None:
 
 def build_system_prompt(rules: str) -> str:
     return (rules or DEFAULT_CAPTION_RULES).rstrip() + _FIXED_INSTRUCTIONS
+
+
+def prefer_latin_song(video_title: str, song_title: str, exclude: tuple = ()) -> str:
+    """曲名がハングルだけのとき、タイトル中の別の引用符(例: 'Birthday Wish')に英字の曲名があればそれを返す。
+    見つからなければ元の曲名をそのまま返す。"""
+    if not song_title or not _HANGUL_RE.search(song_title) or re.search(r"[A-Za-z]", song_title):
+        return song_title
+    from summarizer import _SONG_TITLE_QUOTE_PATTERNS
+    skip = {_norm(x) for x in exclude if x}
+    for pat in _SONG_TITLE_QUOTE_PATTERNS:
+        for m in pat.finditer(video_title or ""):
+            cand = m.group(1).strip()
+            if cand and re.search(r"[A-Za-z]", cand) and not _HANGUL_RE.search(cand) and _norm(cand) not in skip:
+                return cand
+    return song_title
 
 
 def _prepare_song(song_title: str) -> tuple:
@@ -386,16 +410,64 @@ def _debug_dump(lines: list) -> None:
         pass
 
 
-def filter_candidates(items: list, *, group_name: str, group_mode: str, song_title: str, song_mode: str,
-                      forbidden: list, avoid_texts: list, accepted: list = ()) -> tuple:
-    """書き出しの比較は、グループ名・曲名そのもので始まる案(名前で始めるのは自然)には使わない。
-    items(順序つき)を {text, stop_type, reply_type} に整える。(採用, 除外[(理由, 本文)]) を返す。
-    除外: 韓国語・URL・タグ・絵文字 / 例文と同じ言い回し / 「の」の重ね / 曲名にThe付加 / グループ名・曲名が無い /
-    直近と同じ書き出し / 重複。"""
-    song_p = _prepare_song(song_title)[0] if song_mode == "named" else ""
+# 違反の重さ。これらを含む案は、全部の案が落ちたときの注意つき表示でも、できるだけ後回しにする
+_HARD_REASONS = ("1行目か2行目が空", "韓国語・URL・タグ・絵文字を含む")
+
+
+def _name_alternatives(group_name: str, member_name: str) -> list:
+    """本文にあれば「グループ名(かメンバー名)が入っている」とみなす表記の一覧(正規化済み)。"""
+    alts = [group_name, member_name]
+    alts += list(GROUP_ALIASES.get(_norm(group_name), ()))
+    return [a for a in (_norm(x) for x in alts) if a]
+
+
+def evaluate_candidate(it: dict, *, group_name: str, member_name: str, group_mode: str, song_title: str,
+                       song_mode: str, forbidden: list, avoid_heads: set, seen: set) -> tuple:
+    """1案の違反を全部数える。(本文, 違反の理由のリスト) を返す。リストが空なら合格。"""
+    stop = str(it.get("stop") or "").strip()
+    reply = str(it.get("reply") or "").strip()
+    text = stop + "\n" + reply
+    reasons = []
+    if not stop or not reply:
+        reasons.append("1行目か2行目が空")
+    if _HANGUL_RE.search(text) or _URL_RE.search(text) or "#" in text or "＃" in text or _EMOJI_RE.search(text):
+        reasons.append("韓国語・URL・タグ・絵文字を含む")
+    ntext = _norm(text)
+    hit = next((p for p in forbidden if _norm(p) and _norm(p) in ntext), None)
+    if hit:
+        reasons.append(f"例文と同じ言い回し({hit})")
+    # 「の」の重ね: グループ名・メンバー名・曲名のあとに「の」が続き、さらに短い間隔で「の」が来る(〇〇の△△の□□)
+    song_p, song_ko = _prepare_song(song_title) if song_mode == "named" else ("", False)
+    names = [n for n in (group_name if group_mode == "named" else "", member_name if group_mode == "named" else "",
+                         song_p if not song_ko else "") if n]
+    if names:
+        pat = r"(?:" + "|".join(re.escape(n) for n in names) + r")の[^の、。？！!?\n]{1,14}の"
+        if re.search(pat, text):
+            reasons.append("「の」を重ねている")
+    if song_p and not song_ko and not song_p.lower().startswith("the ") \
+            and re.search(r"(?i)(?<![A-Za-z])the\s+" + re.escape(song_p.strip()), text):
+        reasons.append("曲名の前に The を付けている")
+    if group_mode == "named" and group_name:
+        if not any(a in ntext for a in _name_alternatives(group_name, member_name)):
+            reasons.append("グループ名が入っていない")
+    # 曲名がハングルだけのときは、本文に入っているか確かめられないので判定しない
+    if song_mode == "named" and song_p and not song_ko and _norm(song_p) not in ntext:
+        reasons.append("曲名が入っていない")
     n_group = _norm(group_name) if group_mode == "named" else ""
-    n_song = _norm(song_p) if song_mode == "named" else ""
-    forb = [(p, _norm(p)) for p in forbidden]
+    n_song = _norm(song_p) if (song_mode == "named" and not song_ko) else ""
+    head = _norm(stop)[:7]
+    if head and head in avoid_heads and not ((n_group and _norm(stop).startswith(n_group))
+                                             or (n_song and _norm(stop).startswith(n_song))):
+        reasons.append("直近の投稿・案と書き出しが同じ")
+    if ntext in seen:
+        reasons.append("重複")
+    return text, reasons
+
+
+def filter_candidates(items: list, *, group_name: str, group_mode: str, song_title: str, song_mode: str,
+                      forbidden: list, avoid_texts: list, accepted: list = (), member_name: str = "") -> tuple:
+    """items(順序つき)を評価する。(採用[{text, stop_type, reply_type}], 除外[(理由の文字列, 本文, 理由のリスト)]) を返す。
+    書き出しの比較は、グループ名・曲名そのもので始まる案(名前で始めるのは自然)には使わない。"""
     avoid_heads = {_norm(t.split("\n")[0])[:7] for t in avoid_texts if t}
     avoid_heads.discard("")
     seen = {_norm(t) for t in accepted}
@@ -403,38 +475,31 @@ def filter_candidates(items: list, *, group_name: str, group_mode: str, song_tit
     for it in items:
         if not isinstance(it, dict):
             continue
-        stop = str(it.get("stop") or "").strip()
-        reply = str(it.get("reply") or "").strip()
-        text = stop + "\n" + reply
-        reason = None
-        if not stop or not reply:
-            reason = "1行目か2行目が空"
-        elif _HANGUL_RE.search(text) or _URL_RE.search(text) or "#" in text or "＃" in text or _EMOJI_RE.search(text):
-            reason = "韓国語・URL・タグ・絵文字を含む"
-        else:
-            hit = next((p for p, n in forb if n and n in _norm(text)), None)
-            if hit:
-                reason = f"例文と同じ言い回し({hit})"
-            elif _NO_CHAIN_RE.search(stop) or _NO_CHAIN_RE.search(reply):
-                reason = "「の」を重ねている"
-            elif n_song and not song_p.lower().startswith("the ") \
-                    and re.search(r"(?i)(?<![A-Za-z])the\s+" + re.escape(song_p.strip()), text):
-                reason = "曲名の前に The を付けている"
-            elif n_group and n_group not in _norm(text):
-                reason = "グループ名が入っていない"
-            elif n_song and n_song not in _norm(text):
-                reason = "曲名が入っていない"
-            elif _norm(stop)[:7] in avoid_heads and not (
-                    (n_group and _norm(stop).startswith(n_group)) or (n_song and _norm(stop).startswith(n_song))):
-                reason = "直近の投稿・案と書き出しが同じ"
-            elif _norm(text) in seen:
-                reason = "重複"
-        if reason:
-            dropped.append((reason, text))
+        text, reasons = evaluate_candidate(
+            it, group_name=group_name, member_name=member_name, group_mode=group_mode, song_title=song_title,
+            song_mode=song_mode, forbidden=forbidden, avoid_heads=avoid_heads, seen=seen)
+        if reasons:
+            dropped.append((reasons[0], text, reasons))
             continue
         seen.add(_norm(text))
         kept.append({"text": text, "stop_type": str(it.get("stop_type") or ""), "reply_type": str(it.get("reply_type") or "")})
     return kept, dropped
+
+
+def pick_least_violating(pool: list, limit: int = CANDIDATE_COUNT) -> list:
+    """全部の案が除外されたときの救済。違反の少ない順に最大 limit 案を、注意(warnings)つきで返す。
+    韓国語・URL・タグ・絵文字・空行を含む案は、他に選べる案があるかぎり後回しにする。"""
+    seen, uniq = set(), []
+    for text, reasons in pool:
+        k = _norm(text)
+        if k in seen:
+            continue
+        seen.add(k)
+        hard = sum(1 for r in reasons if _reason_key(r) in _HARD_REASONS)
+        uniq.append((hard, len(reasons), text, reasons))
+    uniq.sort(key=lambda x: (x[0] > 0, x[1], x[0]))
+    return [{"text": t, "stop_type": "", "reply_type": "", "warnings": [_reason_key(r) for r in rs]}
+            for _, _, t, rs in uniq[:limit]]
 
 
 # ───────────── 生成の本体・ジョブ(ポーリング用) ─────────────
@@ -451,6 +516,7 @@ def generate_candidates(rules: str, model: str, ctx: dict, on_progress=None) -> 
     forbidden = example_phrases_from_rules(rules)
     avoid = list(ctx.get("recent_texts") or []) + list(ctx.get("generated") or [])
     accepted: list = []
+    pool: list = []          # 除外された案(違反の理由つき)。全部落ちたときの救済に使う
     total_cost, total_secs, rounds = 0.0, 0.0, 0
     drop_counts: dict = {}
     for rnd in range(1 + MAX_EXTRA_ROUNDS):
@@ -484,19 +550,30 @@ def generate_candidates(rules: str, model: str, ctx: dict, on_progress=None) -> 
             picked = drafts[:select_n]
         kept, dropped = filter_candidates(
             picked, group_name=ctx["group_name"], group_mode=ctx["group_mode"], song_title=ctx["song_title"],
-            song_mode=ctx["song_mode"], forbidden=forbidden, avoid_texts=avoid, accepted=[c["text"] for c in accepted])
+            song_mode=ctx["song_mode"], forbidden=forbidden, avoid_texts=avoid, accepted=[c["text"] for c in accepted],
+            member_name=ctx.get("member_name") or "")
         accepted = (accepted + kept)[:CANDIDATE_COUNT]
         round_counts: dict = {}
-        for reason, _ in dropped:
-            k = _reason_key(reason)
-            round_counts[k] = round_counts.get(k, 0) + 1
-            drop_counts[k] = drop_counts.get(k, 0) + 1
+        for _, text, reasons in dropped:
+            pool.append((text, reasons))
+            for reason in reasons:
+                k = _reason_key(reason)
+                round_counts[k] = round_counts.get(k, 0) + 1
+                drop_counts[k] = drop_counts.get(k, 0) + 1
         logger.info("caption_ai: round=%d 選定=%d 採用=%d 除外=%d %s", rnd + 1, len(picked), len(kept), len(dropped),
                     json.dumps(round_counts, ensure_ascii=False))
-        _debug_dump([f"[round {rnd + 1}] 除外 {reason}: " + text.replace("\n", " / ") for reason, text in dropped])
-    if not accepted:
-        raise CaptionError("ルールに合う候補を作れませんでした。もう一度生成してください")
+        _debug_dump([f"[round {rnd + 1}] 除外 {' + '.join(reasons)}: " + text.replace("\n", " / ")
+                     for _, text, reasons in dropped])
     shortfall = None
+    if not accepted:
+        # 0案では終わらせない: 違反の一番少ない案を、注意つきで最大6案まで出す(手直しできる)
+        accepted = pick_least_violating(pool)
+        if not accepted:
+            raise CaptionError("候補を作れませんでした。もう一度生成してください")
+        shortfall = "ルールに合わない部分があります。各案の注意を見て、手直ししてください"
+        logger.warning("caption_ai: 全案が除外されたため、違反の少ない%d案を注意つきで表示", len(accepted))
+        return {"candidates": accepted, "shortfall": shortfall, "cost": round(total_cost, 4),
+                "seconds": round(total_secs, 1), "rounds": rounds, "dropped": drop_counts, "fallback": True}
     if len(accepted) < CANDIDATE_COUNT:
         shortfall = f"{len(accepted)}案しか作れませんでした"
         logger.warning("caption_ai: %s (追加生成%d回後)", shortfall, rounds - 1)

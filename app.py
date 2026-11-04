@@ -1126,6 +1126,8 @@ def api_generate_captions(id):
             song_title = caption_ai.find_song_in_description(article.raw_content or "", group_name)
         if not song_title:
             return jsonify({"ok": True, "needs_song": True})
+        # 曲名がハングルだけなら、タイトル中の英字の曲名(別の引用符)があればそれを使う
+        song_title = caption_ai.prefer_latin_song(article.title, song_title, exclude=(group_name, member_name))
 
     recent = (Article.query.filter(Article.summary.isnot(None), Article.summary != "", Article.id != id,
                                    Article.status.in_(("posted", "queued", "pending")))

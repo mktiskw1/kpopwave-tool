@@ -1638,6 +1638,12 @@ function renderCaptionCandidates(cands, seconds, shortfall) {
     });
     label.appendChild(radio);
     label.appendChild(document.createTextNode(c.text));
+    if (c.warnings && c.warnings.length) {
+      var warn = document.createElement('div');
+      warn.style.cssText = 'font-size:.72rem;color:#c62828;margin-top:2px';
+      warn.textContent = '注意: ' + c.warnings.join(' / ');
+      label.appendChild(warn);
+    }
     list.appendChild(label);
   });
   list.classList.remove('d-none');
