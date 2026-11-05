@@ -73,118 +73,142 @@
   </form>
 </div>
 
-<!-- グループ別・メンバー別 -->
-{% if has_fallback_data %}
-<div class="alert alert-warning py-2 px-3 mb-3" style="font-size:.8rem">
-  <i class="bi bi-info-circle-fill me-1"></i>
-  ※ <span title="track_post_statsの一時的な空白期間・再投稿直後などで7日時点ちょうどの記録が無い投稿は、代わりにその投稿の最新の記録を使用しています">*</span>印のグループ・メンバーは、一部のデータが7日時点ではなく最新の記録を使用しています。
+<!-- グループ別・メンバー別・時間帯別・曜日別(切り替え付き) -->
+{% set cycle_label = {'initial': '初回投稿のみ', 'repost': 'バズ再投稿のみ', 'all': '初回＋再投稿'}[view_cycle] %}
+{% set scope_label = cycle_label ~ '・' ~ ('削除した投稿を含む' if view_deleted else '削除した投稿を含まない') %}
+{% macro stat_head(first_cols) %}
+<tr>{{ first_cols }}<th class="text-end">投稿数</th><th class="text-end">平均いいね</th><th class="text-end">中央値いいね</th><th class="text-end">平均閲覧数</th><th class="text-end">中央値閲覧数</th></tr>
+{% endmacro %}
+{% macro stat_cells(row) %}
+<td class="text-end">{{ row.post_count }}{% if row.deleted_count %}<span class="text-muted" style="font-size:.72rem" title="うち削除済みの投稿 {{ row.deleted_count }} 本(削除時の最終値)"> (削除{{ row.deleted_count }})</span>{% endif %}{% if row.low %}<span class="badge bg-secondary ms-1" style="font-size:.65rem" title="{{ min_posts }}本未満のため参考値です">本数少</span>{% endif %}</td>
+<td class="text-end">{{ "%.1f"|format(row.avg_likes) }}</td>
+<td class="text-end">{{ "%.1f"|format(row.median_likes) }}</td>
+<td class="text-end">{{ "%.1f"|format(row.avg_views) }}</td>
+<td class="text-end">{{ "%.1f"|format(row.median_views) }}</td>
+{% endmacro %}
+
+<div class="card p-3 mb-3">
+  <div class="d-flex flex-wrap align-items-center gap-3" style="font-size:.82rem">
+    <div class="d-flex align-items-center gap-1">
+      <span class="text-muted">対象:</span>
+      <div class="btn-group btn-group-sm" role="group">
+        <a class="btn {{ 'btn-accent' if view_cycle == 'initial' else 'btn-outline-secondary' }}" href="{{ url_for('analytics', cycle='initial', deleted=1 if view_deleted else 0) }}">初回投稿</a>
+        <a class="btn {{ 'btn-accent' if view_cycle == 'repost' else 'btn-outline-secondary' }}" href="{{ url_for('analytics', cycle='repost', deleted=1 if view_deleted else 0) }}">バズ再投稿</a>
+        <a class="btn {{ 'btn-accent' if view_cycle == 'all' else 'btn-outline-secondary' }}" href="{{ url_for('analytics', cycle='all', deleted=1 if view_deleted else 0) }}">両方</a>
+      </div>
+    </div>
+    <div class="d-flex align-items-center gap-1">
+      <span class="text-muted">削除した投稿:</span>
+      <div class="btn-group btn-group-sm" role="group">
+        <a class="btn {{ 'btn-accent' if view_deleted else 'btn-outline-secondary' }}" href="{{ url_for('analytics', cycle=view_cycle, deleted=1) }}">含める</a>
+        <a class="btn {{ 'btn-accent' if not view_deleted else 'btn-outline-secondary' }}" href="{{ url_for('analytics', cycle=view_cycle, deleted=0) }}">含めない</a>
+      </div>
+    </div>
+    <div class="text-muted">表示中: {{ report.sample_count }}件{% if report.deleted_count %}（うち削除済み {{ report.deleted_count }}件）{% endif %}</div>
+  </div>
 </div>
-{% endif %}
-<div class="row g-3 mb-4">
+
+<div class="row g-3 mb-2">
   <div class="col-md-6">
     <div class="card p-3 h-100">
-      <h6 class="fw-bold mb-3">グループ別平均パフォーマンス（7日確定値）</h6>
+      <h6 class="fw-bold mb-1">グループ別パフォーマンス</h6>
+      <div class="mb-2" style="font-size:.72rem;color:var(--text-muted)">{{ scope_label }}（7日確定値）</div>
       {% if group_rows %}
       <div class="table-responsive">
         <table class="table table-hover mb-0" style="font-size:.85rem">
-          <thead>
-            <tr><th>グループ</th><th class="text-end">投稿数</th><th class="text-end">平均いいね</th><th class="text-end">平均閲覧数</th></tr>
-          </thead>
+          <thead>{{ stat_head('<th>グループ</th>'|safe) }}</thead>
           <tbody>
             {% for row in group_rows %}
-            <tr>
-              <td>{{ row.name }}{% if row.fallback_count %}<span class="text-warning" title="{{ row.fallback_count }}件は最新記録を代用">*</span>{% endif %}</td>
-              <td class="text-end">{{ row.post_count }}</td>
-              <td class="text-end">{{ "%.1f"|format(row.avg_likes or 0) }}</td>
-              <td class="text-end">{{ "%.1f"|format(row.avg_views or 0) }}</td>
+            <tr{% if row.low %} class="text-muted" style="opacity:.6"{% endif %}>
+              <td>{{ row.name or '(グループなし)' }}{% if row.fallback_count %}<span class="text-warning" title="{{ row.fallback_count }}件は最新記録を代用">*</span>{% endif %}</td>
+              {{ stat_cells(row) }}
             </tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
       {% else %}
-      <p class="text-muted mb-0">7日確定値のあるグループ付き投稿がまだありません。</p>
+      <p class="text-muted mb-0">この条件のグループ付き投稿がまだありません。</p>
       {% endif %}
     </div>
   </div>
   <div class="col-md-6">
     <div class="card p-3 h-100">
-      <h6 class="fw-bold mb-3">メンバー別平均パフォーマンス（7日確定値）</h6>
+      <h6 class="fw-bold mb-1">メンバー別パフォーマンス</h6>
+      <div class="mb-2" style="font-size:.72rem;color:var(--text-muted)">{{ scope_label }}（7日確定値）</div>
       {% if member_rows %}
       <div class="table-responsive">
         <table class="table table-hover mb-0" style="font-size:.85rem">
-          <thead>
-            <tr><th>グループ</th><th>メンバー</th><th class="text-end">投稿数</th><th class="text-end">平均いいね</th><th class="text-end">平均閲覧数</th></tr>
-          </thead>
+          <thead>{{ stat_head('<th>グループ</th><th>メンバー</th>'|safe) }}</thead>
           <tbody>
             {% for row in member_rows %}
-            <tr>
+            <tr{% if row.low %} class="text-muted" style="opacity:.6"{% endif %}>
               <td>{{ row.group_name }}</td>
               <td>{{ row.member_name }}{% if row.fallback_count %}<span class="text-warning" title="{{ row.fallback_count }}件は最新記録を代用">*</span>{% endif %}</td>
-              <td class="text-end">{{ row.post_count }}</td>
-              <td class="text-end">{{ "%.1f"|format(row.avg_likes or 0) }}</td>
-              <td class="text-end">{{ "%.1f"|format(row.avg_views or 0) }}</td>
+              {{ stat_cells(row) }}
             </tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
       {% else %}
-      <p class="text-muted mb-0">7日確定値のあるメンバー付き投稿がまだありません。</p>
+      <p class="text-muted mb-0">この条件のメンバー付き投稿がまだありません。</p>
       {% endif %}
     </div>
   </div>
+</div>
+<div class="mb-4" style="font-size:.75rem;color:var(--text-muted)">
+  * 印: 7日時点ちょうどの記録が無く、その投稿の最新の確定記録で代用した投稿を含むグループ・メンバーです（トラッキングの空白期間や、再投稿直後などで起こります）。
+  グレーの行(本数少): 投稿数が{{ min_posts }}本未満のため、参考値です。
+  削除した投稿の値は、削除時の最終値です。
 </div>
 
 <!-- 時間帯別 -->
 <div class="card p-3 mb-4">
-  <h6 class="fw-bold mb-3">投稿時刻の時間帯別平均パフォーマンス（JST、7日確定値）</h6>
+  <h6 class="fw-bold mb-1">投稿時刻の時間帯別パフォーマンス（JST）</h6>
+  <div class="mb-2" style="font-size:.72rem;color:var(--text-muted)">{{ scope_label }}（7日確定値）</div>
   {% if hour_rows %}
   <div class="table-responsive">
     <table class="table table-hover mb-0" style="font-size:.85rem">
-      <thead>
-        <tr><th>時間帯</th><th class="text-end">投稿数</th><th class="text-end">平均いいね</th><th class="text-end">平均閲覧数</th></tr>
-      </thead>
+      <thead>{{ stat_head('<th>時間帯</th>'|safe) }}</thead>
       <tbody>
         {% for row in hour_rows %}
-        <tr>
+        <tr{% if row.low %} class="text-muted" style="opacity:.6"{% endif %}>
           <td>{{ "%02d"|format(row.hour) }}時台</td>
-          <td class="text-end">{{ row.post_count }}</td>
-          <td class="text-end">{{ "%.1f"|format(row.avg_likes or 0) }}</td>
-          <td class="text-end">{{ "%.1f"|format(row.avg_views or 0) }}</td>
+          {{ stat_cells(row) }}
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
   {% else %}
-  <p class="text-muted mb-0">7日確定値のある投稿がまだありません。</p>
+  <p class="text-muted mb-0">この条件の投稿がまだありません。</p>
+  {% endif %}
+  {% if view_cycle != 'initial' and report.no_time_count %}
+  <div class="mt-2" style="font-size:.72rem;color:var(--text-muted)">※ 再投稿された記事の過去の投稿サイクルは、投稿時刻の記録が残っていないため、時間帯別・曜日別には入っていません。</div>
   {% endif %}
 </div>
 
 <!-- 曜日別 -->
 <div class="card p-3 mb-4">
-  <h6 class="fw-bold mb-3">投稿曜日別平均パフォーマンス（JST、7日確定値）</h6>
+  <h6 class="fw-bold mb-1">投稿曜日別パフォーマンス（JST）</h6>
+  <div class="mb-2" style="font-size:.72rem;color:var(--text-muted)">{{ scope_label }}（7日確定値）</div>
   {% if weekday_rows %}
   <div class="table-responsive">
     <table class="table table-hover mb-0" style="font-size:.85rem">
-      <thead>
-        <tr><th>曜日</th><th class="text-end">投稿数</th><th class="text-end">平均いいね</th><th class="text-end">平均閲覧数</th></tr>
-      </thead>
+      <thead>{{ stat_head('<th>曜日</th>'|safe) }}</thead>
       <tbody>
         {% for row in weekday_rows %}
-        <tr>
+        <tr{% if row.low %} class="text-muted" style="opacity:.6"{% endif %}>
           <td>{{ row.weekday_label }}</td>
-          <td class="text-end">{{ row.post_count }}</td>
-          <td class="text-end">{{ "%.1f"|format(row.avg_likes or 0) }}</td>
-          <td class="text-end">{{ "%.1f"|format(row.avg_views or 0) }}</td>
+          {{ stat_cells(row) }}
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
   {% else %}
-  <p class="text-muted mb-0">7日確定値のある投稿がまだありません。</p>
+  <p class="text-muted mb-0">この条件の投稿がまだありません。</p>
   {% endif %}
 </div>
 

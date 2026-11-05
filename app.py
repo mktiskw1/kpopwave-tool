@@ -24,7 +24,7 @@ from database import (
     YoutubeJob,
     Article, BuzzPost, ChapterClip, ChapterJob, Comment, DailyStat, EarlyAdvanceLog, Group, Hook, Member,
     PostStat, Setting, TextPostStock, ThreadsAccount, VideoTrimJob, WatchedCandidate, WatchedChannel, get_active_account, db,
-    DELETE_REASON_MANUAL, DELETE_REASON_MANUAL_BULK, record_deleted_post,
+    DELETE_REASON_MANUAL, DELETE_REASON_MANUAL_BULK, DeletedPostLog, record_deleted_post,
 )
 
 load_dotenv()
@@ -2706,85 +2706,18 @@ def analytics():
     daily_followers = [d.followers_count for d in daily_rows]
     daily_views = [d.views_count for d in daily_rows]
 
-    # 記事ごとに「代表とするpost_stats行」を1件だけ選ぶ共通CTE。
-    # is_final=1は必ずday_index>=7を意味する(analytics_tracker.track_post_stats参照)ため、
-    # day_index=7の行が「7日時点ちょうど」の記録。それが無い記事(track_post_statsの
-    # 空白期間・再投稿直後でまだ7日経っていない等)は、代わりに最新のis_final記録
-    # (day_indexが7を超えていても可)を採用する。day_index=7の行がある記事の選択結果は
-    # 従来のday_index<=7フィルタと完全に一致するため、既存データの集計値には影響しない。
-    _RANKED_FINAL_STATS_CTE = """
-        WITH ranked AS (
-            SELECT ps.article_id, ps.likes, ps.views, ps.day_index,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY ps.article_id
-                       ORDER BY (ps.day_index <> 7), ps.fetched_at DESC
-                   ) AS rn
-            FROM post_stats ps
-            WHERE ps.is_final = 1
-        )
-    """
-
-    group_rows = [
-        dict(row) for row in db.session.execute(text(_RANKED_FINAL_STATS_CTE + """
-            SELECT g.name AS name, COUNT(*) AS post_count,
-                   AVG(r.likes) AS avg_likes, AVG(r.views) AS avg_views,
-                   SUM(CASE WHEN r.day_index <> 7 THEN 1 ELSE 0 END) AS fallback_count
-            FROM ranked r
-            JOIN articles a ON a.id = r.article_id
-            JOIN groups g ON g.id = a.group_id
-            WHERE r.rn = 1 AND a.account_id = :account_id
-            GROUP BY g.id
-            ORDER BY avg_likes DESC
-        """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
-    ]
-
-    member_rows = [
-        dict(row) for row in db.session.execute(text(_RANKED_FINAL_STATS_CTE + """
-            SELECT g.name AS group_name, m.name AS member_name, COUNT(*) AS post_count,
-                   AVG(r.likes) AS avg_likes, AVG(r.views) AS avg_views,
-                   SUM(CASE WHEN r.day_index <> 7 THEN 1 ELSE 0 END) AS fallback_count
-            FROM ranked r
-            JOIN articles a ON a.id = r.article_id
-            JOIN members m ON m.id = a.member_id
-            JOIN groups g ON g.id = m.group_id
-            WHERE r.rn = 1 AND a.account_id = :account_id AND a.member_id IS NOT NULL
-            GROUP BY m.id
-            ORDER BY avg_likes DESC
-        """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
-    ]
-
-    has_fallback_data = (
-        any(row["fallback_count"] for row in group_rows)
-        or any(row["fallback_count"] for row in member_rows)
-    )
-
-    hour_rows = [
-        dict(row) for row in db.session.execute(text("""
-            SELECT CAST(strftime('%H', datetime(a.posted_at, '+9 hours')) AS INTEGER) AS hour,
-                   COUNT(*) AS post_count,
-                   AVG(ps.likes) AS avg_likes, AVG(ps.views) AS avg_views
-            FROM post_stats ps
-            JOIN articles a ON a.id = ps.article_id
-            WHERE ps.is_final = 1 AND ps.day_index <= 7 AND a.account_id = :account_id AND a.posted_at IS NOT NULL
-            GROUP BY hour
-            ORDER BY hour ASC
-        """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
-    ]
-
-    _WEEKDAY_LABELS = {0: "日", 1: "月", 2: "火", 3: "水", 4: "木", 5: "金", 6: "土"}
-    weekday_rows = [
-        {**dict(row), "weekday_label": _WEEKDAY_LABELS[row["weekday"]]}
-        for row in db.session.execute(text("""
-            SELECT CAST(strftime('%w', datetime(a.posted_at, '+9 hours')) AS INTEGER) AS weekday,
-                   COUNT(*) AS post_count,
-                   AVG(ps.likes) AS avg_likes, AVG(ps.views) AS avg_views
-            FROM post_stats ps
-            JOIN articles a ON a.id = ps.article_id
-            WHERE ps.is_final = 1 AND ps.day_index <= 7 AND a.account_id = :account_id AND a.posted_at IS NOT NULL
-            GROUP BY weekday
-            ORDER BY CASE weekday WHEN 0 THEN 7 ELSE weekday END ASC
-        """), {"account_id": _ANALYTICS_ACCOUNT_ID}).mappings().all()
-    ]
+    # グループ別・メンバー別・時間帯別・曜日別の表。初回投稿/再投稿(cycle)と削除分を含めるか(deleted)を切り替えられる。
+    # 集計の中身は analytics_report.py を参照。
+    import analytics_report
+    view_cycle = request.args.get("cycle", "initial")
+    if view_cycle not in analytics_report.CYCLE_CHOICES:
+        view_cycle = "initial"
+    view_deleted = request.args.get("deleted", "1") != "0"
+    report = analytics_report.build_report(
+        analytics_report.build_samples(
+            db, {"Article": Article, "PostStat": PostStat, "Group": Group, "Member": Member,
+                 "DeletedPostLog": DeletedPostLog}, _ANALYTICS_ACCOUNT_ID),
+        view_cycle, view_deleted)
 
     early_advance_logs = (
         EarlyAdvanceLog.query
@@ -2801,11 +2734,15 @@ def analytics():
         daily_followers=daily_followers,
         daily_views=daily_views,
         daily_rows=daily_rows,
-        group_rows=group_rows,
-        member_rows=member_rows,
-        has_fallback_data=has_fallback_data,
-        hour_rows=hour_rows,
-        weekday_rows=weekday_rows,
+        group_rows=report["group_rows"],
+        member_rows=report["member_rows"],
+        has_fallback_data=report["has_fallback"],
+        hour_rows=report["hour_rows"],
+        weekday_rows=report["weekday_rows"],
+        report=report,
+        view_cycle=view_cycle,
+        view_deleted=view_deleted,
+        min_posts=analytics_report.MIN_POSTS,
         early_advance_logs=early_advance_logs,
         early_advance_info=early_advance_info,
     )
