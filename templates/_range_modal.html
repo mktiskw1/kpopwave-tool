@@ -1,4 +1,5 @@
 <!-- 範囲を指定して取り込む: YouTubeの埋め込みプレーヤーで再生しながら、開始・終了を自分で決めるモーダル。
+     操作部分(再生・現在時刻 / ここから開始・ここで終了 / 手入力の分:秒+移動)は、承認待ちの切り取り画面と同じ並び・同じ見た目。
      使い方: rgOpen({key, video_id, title}, onConfirm)  onConfirm({key, video_id, method:'manual', start, end, chart:null}) -->
 <div id="rg-modal" class="d-none"
      style="position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;"
@@ -7,23 +8,83 @@
        onclick="event.stopPropagation()">
     <button type="button" onclick="rgClose()"
             style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:1.3rem;cursor:pointer;color:#888;line-height:1;padding:0">✕</button>
-    <h6 class="fw-bold mb-1">範囲を指定して取り込む</h6>
-    <div id="rg-title" class="mb-2" style="font-size:.8rem;color:#555"></div>
+    <h6 class="fw-bold mb-1" style="padding-right:24px">範囲を指定して取り込む</h6>
+    <div id="rg-title" class="mb-2" style="font-size:.8rem;color:#555;overflow-wrap:anywhere"></div>
     <div style="position:relative;width:100%;padding-top:56.25%;background:#000;border-radius:8px;overflow:hidden">
       <div id="rg-player" style="position:absolute;inset:0;width:100%;height:100%"></div>
     </div>
     <div id="rg-player-msg" class="mt-1" style="font-size:.78rem;color:#c62828"></div>
-    <div class="d-flex align-items-center gap-2 flex-wrap mt-2" style="font-size:.85rem">
-      <button type="button" class="btn btn-sm btn-outline-primary" onclick="rgMark('start')">ここを開始</button>
-      <label class="mb-0">開始（秒）</label>
-      <input type="number" id="rg-start" class="form-control form-control-sm" min="0" step="0.1" style="width:100px" oninput="rgUpdate()">
-      <button type="button" class="btn btn-sm btn-outline-primary" onclick="rgMark('end')">ここを終了</button>
-      <label class="mb-0">終了（秒）</label>
-      <input type="number" id="rg-end" class="form-control form-control-sm" min="0" step="0.1" style="width:100px" oninput="rgUpdate()">
+
+    <div class="mt-2" style="font-size:.82rem;background:var(--surface2,#f5f6f8);border-radius:10px;
+         border:1px solid var(--border,#dde1e6);padding:10px 12px">
+      <!-- 1行目: 再生コントロール & 現在時刻 -->
+      <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
+        <button type="button" onclick="rgPlay()"
+                style="padding:3px 11px;border-radius:6px;border:1px solid var(--border,#dde1e6);
+                       background:#fff;color:var(--text,#222);font-size:.82rem;cursor:pointer">
+          ▶ 再生
+        </button>
+        <button type="button" onclick="rgPause()"
+                style="padding:3px 11px;border-radius:6px;border:1px solid var(--border,#dde1e6);
+                       background:#fff;color:var(--text,#222);font-size:.82rem;cursor:pointer">
+          ⏸ 一時停止
+        </button>
+        <span style="color:var(--text-muted,#666);margin-left:4px">現在時刻:
+          <span id="rg-time"
+                style="color:var(--accent,#e91e63);font-weight:700;font-family:monospace;min-width:3ch;display:inline-block">0:00</span>
+        </span>
+      </div>
+      <!-- 2行目: マーク記録ボタン -->
+      <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
+        <button type="button" onclick="rgMark('start')"
+                style="padding:3px 11px;border-radius:6px;border:1px solid var(--accent-light,#f8bbd0);
+                       background:var(--accent-soft,#fce4ec);color:var(--accent,#e91e63);font-size:.82rem;
+                       cursor:pointer;font-weight:700">
+          📍 ここから開始
+        </button>
+        <span style="color:var(--text-muted,#666)">開始:
+          <span id="rg-start-display" style="color:var(--accent2,#3949ab);font-weight:700;font-family:monospace">--:--</span>
+        </span>
+        <button type="button" onclick="rgMark('end')"
+                style="padding:3px 11px;border-radius:6px;border:1px solid var(--accent-light,#f8bbd0);
+                       background:var(--accent-soft,#fce4ec);color:var(--accent,#e91e63);font-size:.82rem;
+                       cursor:pointer;font-weight:700">
+          📍 ここで終了
+        </button>
+        <span style="color:var(--text-muted,#666)">終了:
+          <span id="rg-end-display" style="color:var(--accent2,#3949ab);font-weight:700;font-family:monospace">--:--</span>
+        </span>
+      </div>
+      <!-- 3行目: 手入力(分:秒)。この欄の値がそのまま開始・終了になる -->
+      <div class="d-flex align-items-center gap-2 flex-wrap" style="font-size:.78rem;color:var(--text-muted,#666)">
+        <span>手入力(分:秒):</span>
+        <label style="margin:0">開始</label>
+        <input id="rg-start-min" type="number" min="0" step="1" placeholder="分" oninput="rgUpdate()" title="分"
+               style="width:48px;padding:2px 4px;border-radius:6px;border:1px solid var(--border,#dde1e6);
+                      background:#fff;color:var(--text,#222);font-size:.78rem">
+        <span>:</span>
+        <input id="rg-start-sec" type="number" min="0" max="59.9" step="0.1" placeholder="秒" oninput="rgUpdate()" title="秒"
+               style="width:56px;padding:2px 4px;border-radius:6px;border:1px solid var(--border,#dde1e6);
+                      background:#fff;color:var(--text,#222);font-size:.78rem">
+        <button type="button" onclick="rgSeek('start')"
+                style="padding:2px 9px;border-radius:6px;border:1px solid var(--border,#dde1e6);
+                       background:#fff;color:var(--text,#222);font-size:.78rem;cursor:pointer">移動</button>
+        <label style="margin:0">終了</label>
+        <input id="rg-end-min" type="number" min="0" step="1" placeholder="分" oninput="rgUpdate()" title="分"
+               style="width:48px;padding:2px 4px;border-radius:6px;border:1px solid var(--border,#dde1e6);
+                      background:#fff;color:var(--text,#222);font-size:.78rem">
+        <span>:</span>
+        <input id="rg-end-sec" type="number" min="0" max="59.9" step="0.1" placeholder="秒" oninput="rgUpdate()" title="秒"
+               style="width:56px;padding:2px 4px;border-radius:6px;border:1px solid var(--border,#dde1e6);
+                      background:#fff;color:var(--text,#222);font-size:.78rem">
+        <button type="button" onclick="rgSeek('end')"
+                style="padding:2px 9px;border-radius:6px;border:1px solid var(--border,#dde1e6);
+                       background:#fff;color:var(--text,#222);font-size:.78rem;cursor:pointer">移動</button>
+      </div>
     </div>
+
     <div class="mt-2" style="font-size:.85rem">
       長さ: <b id="rg-length">-</b>
-      <span id="rg-range-label" class="text-muted ms-2"></span>
       <span id="rg-duration" class="text-muted ms-2"></span>
     </div>
     <div id="rg-hint" class="mt-1" style="font-size:.76rem;color:#666"></div>
@@ -39,11 +100,14 @@
 </div>
 
 <script>
-var RG = { item: null, onConfirm: null, player: null, ready: false, duration: 0, apiLoading: false, apiCbs: [] };
+var RG = { item: null, onConfirm: null, player: null, ready: false, duration: 0, apiLoading: false, apiCbs: [], timer: null };
 
-function rgFmt(sec) {
-  var m = Math.floor(sec / 60), s = (sec - m * 60).toFixed(1);
-  return m + ':' + (parseFloat(s) < 10 ? '0' : '') + s;
+// 分:秒の表示。小数があるときだけ0.1秒まで出す(現在時刻の表示は整数秒でよいので whole=true)
+function rgFmt(sec, whole) {
+  var t = whole ? Math.floor(sec) : Math.round(sec * 10) / 10;
+  var m = Math.floor(t / 60), r = Math.round((t - m * 60) * 10) / 10;
+  var str = Number.isInteger(r) ? String(r) : r.toFixed(1);
+  return m + ':' + (r < 10 ? '0' : '') + str;
 }
 
 function rgLoadApi(cb) {
@@ -58,20 +122,31 @@ function rgLoadApi(cb) {
   };
   var tag = document.createElement('script');
   tag.src = 'https://www.youtube.com/iframe_api';
-  tag.onerror = function () { document.getElementById('rg-player-msg').textContent = 'プレーヤーを読み込めませんでした。秒数を手で入力してください。'; };
+  tag.onerror = function () { document.getElementById('rg-player-msg').textContent = 'プレーヤーを読み込めませんでした。分:秒を手で入力してください。'; };
   document.head.appendChild(tag);
 }
 
-function rgNum(id) {
-  var v = document.getElementById(id).value;
-  return v === '' ? null : parseFloat(v);
+// 手入力の欄(分・秒)の値を秒にする。どちらも空なら null。欄の値がそのまま開始・終了になる
+function rgGet(type) {
+  var mv = document.getElementById('rg-' + type + '-min').value;
+  var sv = document.getElementById('rg-' + type + '-sec').value;
+  if (mv === '' && sv === '') return null;
+  return (mv === '' ? 0 : parseFloat(mv)) * 60 + (sv === '' ? 0 : parseFloat(sv));
+}
+
+function rgSet(type, sec) {
+  var t = Math.round(sec * 10) / 10;
+  var m = Math.floor(t / 60);
+  document.getElementById('rg-' + type + '-min').value = m;
+  document.getElementById('rg-' + type + '-sec').value = Math.round((t - m * 60) * 10) / 10;
 }
 
 function rgUpdate() {
-  var s = rgNum('rg-start'), e = rgNum('rg-end');
+  var s = rgGet('start'), e = rgGet('end');
   var err = '';
   var lenEl = document.getElementById('rg-length');
-  document.getElementById('rg-range-label').textContent = (s != null && e != null) ? '（' + rgFmt(s) + ' 〜 ' + rgFmt(e) + '）' : '';
+  document.getElementById('rg-start-display').textContent = (s == null || isNaN(s)) ? '--:--' : rgFmt(s);
+  document.getElementById('rg-end-display').textContent = (e == null || isNaN(e)) ? '--:--' : rgFmt(e);
   if (s == null || e == null || isNaN(s) || isNaN(e)) {
     lenEl.textContent = '-';
     err = '開始と終了を入れてください';
@@ -81,7 +156,6 @@ function rgUpdate() {
     else if (e <= s) err = '終了は開始より後にしてください';
     else if (e - s < 1) err = '範囲は1秒以上にしてください';
     else if (RG.duration && e > RG.duration + 0.05) err = '終了が動画の長さ（' + rgFmt(RG.duration) + '）を超えています';
-    else if (e - s > 300) err = '';
   }
   var warn = (s != null && e != null && e - s > 300) ? '※5分を超えています。Threadsに投稿できない長さの場合があります' : '';
   var box = document.getElementById('rg-error');
@@ -90,21 +164,47 @@ function rgUpdate() {
   document.getElementById('rg-go').disabled = !!err;
 }
 
-function rgMark(which) {
-  if (!RG.player || !RG.ready) { document.getElementById('rg-player-msg').textContent = 'プレーヤーが使えないため、秒数を手で入力してください'; return; }
-  var t = Math.round(RG.player.getCurrentTime() * 10) / 10;
-  document.getElementById(which === 'start' ? 'rg-start' : 'rg-end').value = t;
+function rgNeedPlayer() {
+  if (RG.player && RG.ready) return true;
+  document.getElementById('rg-player-msg').textContent = 'プレーヤーが使えないため、分:秒を手で入力してください';
+  return false;
+}
+
+function rgPlay() { if (rgNeedPlayer()) RG.player.playVideo(); }
+function rgPause() { if (rgNeedPlayer()) RG.player.pauseVideo(); }
+
+// 再生位置を開始・終了に入れる(手入力の欄にも反映される)
+function rgMark(type) {
+  if (!rgNeedPlayer()) return;
+  rgSet(type, RG.player.getCurrentTime());
   rgUpdate();
+}
+
+// 手入力の欄の位置へプレーヤーを移動する
+function rgSeek(type) {
+  if (!rgNeedPlayer()) return;
+  var v = rgGet(type);
+  if (v == null || isNaN(v) || v < 0) return;
+  RG.player.seekTo(v, true);
+  rgTick();
+}
+
+function rgTick() {
+  if (!RG.player || !RG.ready) return;
+  try { document.getElementById('rg-time').textContent = rgFmt(RG.player.getCurrentTime(), true); } catch (e) {}
 }
 
 function rgOpen(item, onConfirm) {
   RG.item = item; RG.onConfirm = onConfirm; RG.ready = false; RG.duration = 0;
   document.getElementById('rg-title').textContent = (item.title || item.video_id).slice(0, 90);
-  document.getElementById('rg-start').value = '';
-  document.getElementById('rg-end').value = '';
+  ['start', 'end'].forEach(function (t) {
+    document.getElementById('rg-' + t + '-min').value = '';
+    document.getElementById('rg-' + t + '-sec').value = '';
+  });
   document.getElementById('rg-hint').textContent = '';
   document.getElementById('rg-player-msg').textContent = '';
   document.getElementById('rg-duration').textContent = '';
+  document.getElementById('rg-time').textContent = '0:00';
   document.getElementById('rg-modal').classList.remove('d-none');
   rgUpdate();
   var holder = document.getElementById('rg-player');
@@ -119,10 +219,12 @@ function rgOpen(item, onConfirm) {
           RG.ready = true;
           RG.duration = RG.player.getDuration() || 0;
           if (RG.duration) document.getElementById('rg-duration').textContent = '動画全体 ' + rgFmt(RG.duration);
+          if (RG.timer) clearInterval(RG.timer);
+          RG.timer = setInterval(rgTick, 250);   // 現在時刻は再生中に更新し続ける
           rgUpdate();
         },
         onError: function () {
-          document.getElementById('rg-player-msg').textContent = 'この動画は埋め込みで再生できません。秒数を手で入力してください。';
+          document.getElementById('rg-player-msg').textContent = 'この動画は埋め込みで再生できません。分:秒を手で入力してください。';
         }
       }
     });
@@ -136,9 +238,9 @@ function rgOpen(item, onConfirm) {
   .then(function (d) {
     if (RG.item !== item || !d.ok) return;
     if (d.duration && !RG.duration) { RG.duration = d.duration; document.getElementById('rg-duration').textContent = '動画全体 ' + rgFmt(d.duration); }
-    if (d.start != null && d.end != null && rgNum('rg-start') == null && rgNum('rg-end') == null) {
-      document.getElementById('rg-start').value = d.start;
-      document.getElementById('rg-end').value = d.end;
+    if (d.start != null && d.end != null && rgGet('start') == null && rgGet('end') == null) {
+      rgSet('start', d.start);
+      rgSet('end', d.end);
       document.getElementById('rg-hint').textContent = '見どころの自動判定（' + (d.method_label || '') + '）の範囲を入れています。変更できます。';
     }
     rgUpdate();
@@ -148,14 +250,15 @@ function rgOpen(item, onConfirm) {
 
 function rgClose() {
   document.getElementById('rg-modal').classList.add('d-none');
+  if (RG.timer) { clearInterval(RG.timer); RG.timer = null; }
   if (RG.player && RG.player.destroy) { try { RG.player.destroy(); } catch (e) {} }
   RG.player = null; RG.ready = false; RG.item = null; RG.onConfirm = null;
   document.getElementById('rg-player').innerHTML = '';
 }
 
 function rgConfirm() {
-  var s = rgNum('rg-start'), e = rgNum('rg-end'), cb = RG.onConfirm, item = RG.item;
-  if (s == null || e == null || e - s < 1) return;
+  var s = rgGet('start'), e = rgGet('end'), cb = RG.onConfirm, item = RG.item;
+  if (s == null || e == null || isNaN(s) || isNaN(e) || e - s < 1) return;
   rgClose();
   if (cb) cb({ key: item.key, video_id: item.video_id, method: 'manual', start: Math.round(s * 10) / 10, end: Math.round(e * 10) / 10, chart: null });
 }
