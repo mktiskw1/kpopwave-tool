@@ -3825,7 +3825,9 @@ def _parse_highlight_meta(raw):
         start, end = float(raw.get("start")), float(raw.get("end"))
     except (TypeError, ValueError):
         return None
-    if method not in ("heatmap", "audio") or not (0 <= start < end <= 86400) or end - start < 5:
+    # manual: 画面で自分で決めた範囲(余白は付けず、そのまま使う)。1秒以上ならよい
+    min_len = 1 if method == "manual" else 5
+    if method not in ("heatmap", "audio", "manual") or not (0 <= start < end <= 86400) or end - start < min_len:
         return None
     chart = raw.get("chart") if isinstance(raw.get("chart"), dict) else None
     if chart is not None:
@@ -3833,6 +3835,23 @@ def _parse_highlight_meta(raw):
         if not isinstance(vals, list) or len(vals) > 400 or chart.get("kind") not in ("heatmap", "audio"):
             chart = None
     return {"method": method, "start": round(start, 1), "end": round(end, 1), "chart": chart}
+
+
+@app.route("/api/highlight/range-hint", methods=["POST"])
+def api_highlight_range_hint():
+    """「範囲を指定して取り込む」の初期値: 見どころの自動判定がキャッシュにあれば、その範囲を返す。
+    キャッシュだけで答える(このためにYouTubeへはアクセスしない)。無ければ範囲は空のまま。"""
+    import highlight
+    data = request.get_json(silent=True) or {}
+    video_id = (data.get("video_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        return jsonify({"ok": False, "error": "動画IDが不正です"}), 400
+    try:
+        res = highlight.decide(video_id, cache_only=True)
+    except Exception:   # NeedNetwork(キャッシュに無い)を含む: 範囲は空のまま
+        return jsonify({"ok": True, "start": None, "end": None})
+    return jsonify({"ok": True, "start": res.get("start"), "end": res.get("end"), "duration": res.get("duration") or None,
+                    "method_label": highlight.METHOD_LABELS.get(res.get("method"), "")})
 
 
 @app.route("/api/highlight/preview", methods=["POST"])
@@ -3983,8 +4002,12 @@ def _job_add_manual(payload):
     # 範囲指定時は動画IDのみでは同一動画の別範囲と衝突するため、範囲をファイル名・URLに含めて一意化する
     range_suffix = ""
     if has_range:
-        start_label = int(start_time or 0)
-        end_label = int(end_time) if end_time is not None else ""
+        if hl_meta and hl_meta.get("method") == "manual":   # 自分で決めた範囲: 0.1秒まで区別する
+            start_label = f"{round(float(start_time or 0), 1):g}"
+            end_label = f"{round(float(end_time), 1):g}" if end_time is not None else ""
+        else:
+            start_label = int(start_time or 0)
+            end_label = int(end_time) if end_time is not None else ""
         range_suffix = f"_{start_label}-{end_label}"
 
     try:

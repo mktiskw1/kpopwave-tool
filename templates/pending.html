@@ -165,6 +165,8 @@
       <button type="button" class="btn btn-primary btn-sm cand-act" onclick="candImport([{{ c.id }}])">取り込む</button>
       <button type="button" class="btn btn-outline-primary btn-sm cand-act" onclick="candImportHl([{{ c.id }}])"
               title="YouTubeでよく再生されている部分(無ければサビ推定)だけをダウンロードします">✂ 見どころだけ取り込む</button>
+      <button type="button" class="btn btn-outline-primary btn-sm cand-act" onclick="candImportRange({{ c.id }})"
+              title="動画を再生しながら開始・終了を自分で決めて、その部分だけをダウンロードします">🎯 範囲を指定して取り込む</button>
       <button type="button" class="btn btn-outline-secondary btn-sm cand-act" onclick="candSkip([{{ c.id }}])">見送る</button>
     </div>
   </div>
@@ -721,6 +723,7 @@
 
 {% block scripts %}
 {% include '_highlight_modal.html' %}
+{% include '_range_modal.html' %}
 {% if active_tab == 'candidate' %}
 <script>
 // ── 監視候補の一覧操作 ──
@@ -941,6 +944,19 @@ function candImportHl(ids) {
       if (sel.method) highlights[sel.key] = { method: sel.method, start: sel.start, end: sel.end, chart: sel.chart };
     });
     candImport(items.map(function (it) { return it.key; }), highlights);
+  });
+}
+
+// 範囲を指定して取り込む: プレーヤーで開始・終了を決めて、その区間だけをダウンロードする
+function candImportRange(id) {
+  var row = candRow(id);
+  var thumb = row ? row.querySelector('.cand-thumb') : null;
+  var link = row ? row.querySelector('.fw-bold a') : null;
+  if (!thumb || !thumb.dataset.videoId) { alert('動画IDを取得できません'); return; }
+  rgOpen({ key: id, video_id: thumb.dataset.videoId, title: link ? link.textContent.trim() : '' }, function (sel) {
+    var highlights = {};
+    highlights[id] = { method: 'manual', start: sel.start, end: sel.end, chart: null };
+    candImport([id], highlights);
   });
 }
 

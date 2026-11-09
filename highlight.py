@@ -329,7 +329,8 @@ def download_section(video_id: str, start: float, end: float) -> str:
                        specs.get("duration", 0), expected, video_id)
     dest_dir = os.path.join(_BASE_DIR, "static", "videos")
     os.makedirs(dest_dir, exist_ok=True)
-    name = f"{video_id}_hl_{int(start)}-{int(end)}.{ext}"
+    # 自分で決めた範囲は小数(0.1秒)まで違う場合があるので、名前にも小数を含めて別の範囲と重ならないようにする
+    name = f"{video_id}_hl_{round(float(start), 1):g}-{round(float(end), 1):g}.{ext}"
     shutil.copy2(local_path, os.path.join(dest_dir, name))
     try:
         os.remove(local_path)

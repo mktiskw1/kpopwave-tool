@@ -58,6 +58,10 @@
               title="YouTubeでよく再生されている部分(無ければサビ推定)だけをダウンロードします">
         <i class="bi bi-scissors me-1"></i>見どころだけ
       </button>
+      <button class="btn btn-outline-primary px-3 flex-shrink-0" onclick="addVideoRange()" id="add-video-range-btn"
+              title="動画を再生しながら開始・終了を自分で決めて、その部分だけをダウンロードします">
+        <i class="bi bi-bullseye me-1"></i>範囲を指定して取り込む
+      </button>
     </div>
     <div class="d-flex align-items-center gap-2 mt-2" style="font-size:.82rem;color:var(--text-muted)">
       <span>長尺動画は範囲指定（任意）:</span>
@@ -207,6 +211,7 @@
 
 {% block scripts %}
 {% include '_highlight_modal.html' %}
+{% include '_range_modal.html' %}
 <script>
 var CURRENT_ACCOUNT_ID = {{ nav_active_account_id | tojson }};
 
@@ -388,6 +393,18 @@ function addVideoHighlight() {
     var sel = sels[0];
     if (!sel.method) { submitAddVideoManual(url, '', ''); return; }   // 範囲を決められなかった: 丸ごと
     submitAddVideoManual(url, '', '', { method: sel.method, start: sel.start, end: sel.end, chart: sel.chart });
+  });
+}
+
+// 範囲を指定して取り込む(URL貼り付け): プレーヤーで開始・終了を決めて、その区間だけをダウンロードする
+function addVideoRange() {
+  var input = document.getElementById('add-video-input');
+  var result = document.getElementById('add-video-result');
+  var url = input.value.trim();
+  var m = url.match(/(?:v=|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})/);
+  if (!m) { result.innerHTML = '<span style="color:var(--accent)">YouTube動画のURLを入力してください</span>'; input.focus(); return; }
+  rgOpen({ key: 0, video_id: m[1], title: url }, function (sel) {
+    submitAddVideoManual(url, '', '', { method: 'manual', start: sel.start, end: sel.end, chart: null });
   });
 }
 

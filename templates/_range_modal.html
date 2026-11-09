@@ -1,0 +1,162 @@
+<!-- 範囲を指定して取り込む: YouTubeの埋め込みプレーヤーで再生しながら、開始・終了を自分で決めるモーダル。
+     使い方: rgOpen({key, video_id, title}, onConfirm)  onConfirm({key, video_id, method:'manual', start, end, chart:null}) -->
+<div id="rg-modal" class="d-none"
+     style="position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;"
+     onclick="if(event.target===this)rgClose()">
+  <div style="background:#fff;border-radius:16px;width:min(720px,95vw);max-height:92vh;overflow-y:auto;padding:20px;position:relative;color:#222"
+       onclick="event.stopPropagation()">
+    <button type="button" onclick="rgClose()"
+            style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:1.3rem;cursor:pointer;color:#888;line-height:1;padding:0">✕</button>
+    <h6 class="fw-bold mb-1">範囲を指定して取り込む</h6>
+    <div id="rg-title" class="mb-2" style="font-size:.8rem;color:#555"></div>
+    <div style="position:relative;width:100%;padding-top:56.25%;background:#000;border-radius:8px;overflow:hidden">
+      <div id="rg-player" style="position:absolute;inset:0;width:100%;height:100%"></div>
+    </div>
+    <div id="rg-player-msg" class="mt-1" style="font-size:.78rem;color:#c62828"></div>
+    <div class="d-flex align-items-center gap-2 flex-wrap mt-2" style="font-size:.85rem">
+      <button type="button" class="btn btn-sm btn-outline-primary" onclick="rgMark('start')">ここを開始</button>
+      <label class="mb-0">開始（秒）</label>
+      <input type="number" id="rg-start" class="form-control form-control-sm" min="0" step="0.1" style="width:100px" oninput="rgUpdate()">
+      <button type="button" class="btn btn-sm btn-outline-primary" onclick="rgMark('end')">ここを終了</button>
+      <label class="mb-0">終了（秒）</label>
+      <input type="number" id="rg-end" class="form-control form-control-sm" min="0" step="0.1" style="width:100px" oninput="rgUpdate()">
+    </div>
+    <div class="mt-2" style="font-size:.85rem">
+      長さ: <b id="rg-length">-</b>
+      <span id="rg-range-label" class="text-muted ms-2"></span>
+      <span id="rg-duration" class="text-muted ms-2"></span>
+    </div>
+    <div id="rg-hint" class="mt-1" style="font-size:.76rem;color:#666"></div>
+    <div id="rg-error" class="mt-1" style="font-size:.8rem;color:#c62828"></div>
+    <div class="form-text mb-3" style="font-size:.74rem">
+      指定した範囲そのまま（余白は付けません）でダウンロードします。開始・終了の位置がずれないよう、切り口だけ再エンコードします。
+    </div>
+    <div class="d-flex justify-content-end gap-2">
+      <button type="button" class="btn btn-sm btn-outline-secondary" onclick="rgClose()">キャンセル</button>
+      <button type="button" class="btn btn-sm btn-success" id="rg-go" onclick="rgConfirm()" disabled>この範囲で取り込む</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var RG = { item: null, onConfirm: null, player: null, ready: false, duration: 0, apiLoading: false, apiCbs: [] };
+
+function rgFmt(sec) {
+  var m = Math.floor(sec / 60), s = (sec - m * 60).toFixed(1);
+  return m + ':' + (parseFloat(s) < 10 ? '0' : '') + s;
+}
+
+function rgLoadApi(cb) {
+  if (window.YT && window.YT.Player) { cb(); return; }
+  RG.apiCbs.push(cb);
+  if (RG.apiLoading) return;
+  RG.apiLoading = true;
+  var prev = window.onYouTubeIframeAPIReady;
+  window.onYouTubeIframeAPIReady = function () {
+    if (typeof prev === 'function') prev();
+    var cbs = RG.apiCbs; RG.apiCbs = []; cbs.forEach(function (f) { f(); });
+  };
+  var tag = document.createElement('script');
+  tag.src = 'https://www.youtube.com/iframe_api';
+  tag.onerror = function () { document.getElementById('rg-player-msg').textContent = 'プレーヤーを読み込めませんでした。秒数を手で入力してください。'; };
+  document.head.appendChild(tag);
+}
+
+function rgNum(id) {
+  var v = document.getElementById(id).value;
+  return v === '' ? null : parseFloat(v);
+}
+
+function rgUpdate() {
+  var s = rgNum('rg-start'), e = rgNum('rg-end');
+  var err = '';
+  var lenEl = document.getElementById('rg-length');
+  document.getElementById('rg-range-label').textContent = (s != null && e != null) ? '（' + rgFmt(s) + ' 〜 ' + rgFmt(e) + '）' : '';
+  if (s == null || e == null || isNaN(s) || isNaN(e)) {
+    lenEl.textContent = '-';
+    err = '開始と終了を入れてください';
+  } else {
+    lenEl.textContent = (e - s).toFixed(1) + '秒';
+    if (s < 0) err = '開始は0秒以上にしてください';
+    else if (e <= s) err = '終了は開始より後にしてください';
+    else if (e - s < 1) err = '範囲は1秒以上にしてください';
+    else if (RG.duration && e > RG.duration + 0.05) err = '終了が動画の長さ（' + rgFmt(RG.duration) + '）を超えています';
+    else if (e - s > 300) err = '';
+  }
+  var warn = (s != null && e != null && e - s > 300) ? '※5分を超えています。Threadsに投稿できない長さの場合があります' : '';
+  var box = document.getElementById('rg-error');
+  box.textContent = err || warn;
+  box.style.color = err ? '#c62828' : '#8a6d00';
+  document.getElementById('rg-go').disabled = !!err;
+}
+
+function rgMark(which) {
+  if (!RG.player || !RG.ready) { document.getElementById('rg-player-msg').textContent = 'プレーヤーが使えないため、秒数を手で入力してください'; return; }
+  var t = Math.round(RG.player.getCurrentTime() * 10) / 10;
+  document.getElementById(which === 'start' ? 'rg-start' : 'rg-end').value = t;
+  rgUpdate();
+}
+
+function rgOpen(item, onConfirm) {
+  RG.item = item; RG.onConfirm = onConfirm; RG.ready = false; RG.duration = 0;
+  document.getElementById('rg-title').textContent = (item.title || item.video_id).slice(0, 90);
+  document.getElementById('rg-start').value = '';
+  document.getElementById('rg-end').value = '';
+  document.getElementById('rg-hint').textContent = '';
+  document.getElementById('rg-player-msg').textContent = '';
+  document.getElementById('rg-duration').textContent = '';
+  document.getElementById('rg-modal').classList.remove('d-none');
+  rgUpdate();
+  var holder = document.getElementById('rg-player');
+  holder.innerHTML = '<div id="rg-player-inner"></div>';
+  rgLoadApi(function () {
+    if (RG.item !== item) return;
+    RG.player = new YT.Player('rg-player-inner', {
+      width: '100%', height: '100%', videoId: item.video_id,
+      playerVars: { playsinline: 1, rel: 0 },
+      events: {
+        onReady: function () {
+          RG.ready = true;
+          RG.duration = RG.player.getDuration() || 0;
+          if (RG.duration) document.getElementById('rg-duration').textContent = '動画全体 ' + rgFmt(RG.duration);
+          rgUpdate();
+        },
+        onError: function () {
+          document.getElementById('rg-player-msg').textContent = 'この動画は埋め込みで再生できません。秒数を手で入力してください。';
+        }
+      }
+    });
+  });
+  // 初期値: 見どころの自動判定がキャッシュにあるときだけ入れる(このためにYouTubeへはアクセスしない)
+  fetch('/api/highlight/range-hint', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ video_id: item.video_id })
+  })
+  .then(function (r) { return r.json(); })
+  .then(function (d) {
+    if (RG.item !== item || !d.ok) return;
+    if (d.duration && !RG.duration) { RG.duration = d.duration; document.getElementById('rg-duration').textContent = '動画全体 ' + rgFmt(d.duration); }
+    if (d.start != null && d.end != null && rgNum('rg-start') == null && rgNum('rg-end') == null) {
+      document.getElementById('rg-start').value = d.start;
+      document.getElementById('rg-end').value = d.end;
+      document.getElementById('rg-hint').textContent = '見どころの自動判定（' + (d.method_label || '') + '）の範囲を入れています。変更できます。';
+    }
+    rgUpdate();
+  })
+  .catch(function () {});
+}
+
+function rgClose() {
+  document.getElementById('rg-modal').classList.add('d-none');
+  if (RG.player && RG.player.destroy) { try { RG.player.destroy(); } catch (e) {} }
+  RG.player = null; RG.ready = false; RG.item = null; RG.onConfirm = null;
+  document.getElementById('rg-player').innerHTML = '';
+}
+
+function rgConfirm() {
+  var s = rgNum('rg-start'), e = rgNum('rg-end'), cb = RG.onConfirm, item = RG.item;
+  if (s == null || e == null || e - s < 1) return;
+  rgClose();
+  if (cb) cb({ key: item.key, video_id: item.video_id, method: 'manual', start: Math.round(s * 10) / 10, end: Math.round(e * 10) / 10, chart: null });
+}
+</script>
