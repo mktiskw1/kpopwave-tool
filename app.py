@@ -1156,6 +1156,8 @@ def api_generate_captions(id):
         return jsonify({"ok": False, "error": built["error"]}), 400
     if built.get("needs_song"):
         return jsonify({"ok": True, "needs_song": True})
+    # 「もう一度生成」: いま画面に出している案を渡し、これらと違う案を作らせる
+    built["ctx"]["shown"] = [str(t) for t in (data.get("shown_texts") or []) if str(t).strip()][:12]
     rules = (Setting.get("caption_rules", "") or "").strip() or caption_ai.DEFAULT_CAPTION_RULES
     job_id = caption_ai.start_job(app, rules, caption_ai.get_model(), built["ctx"])
     return jsonify({"ok": True, "job_id": job_id, "group": built["group"], "song": built["song"]})

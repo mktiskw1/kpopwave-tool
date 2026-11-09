@@ -268,7 +268,7 @@ def _prepare_song(song_title: str) -> tuple:
 
 def build_user_prompt(*, group_name: str, member_name: str, song_title: str, video_title: str,
                       recent_texts: list, group_mode: str, song_mode: str,
-                      exemplars: list = (), generated: list = (), accepted: list = (),
+                      exemplars: list = (), generated: list = (), accepted: list = (), shown: list = (),
                       select_n: int = CANDIDATE_COUNT) -> str:
     """group_mode: 'named'(グループ名あり) / 'none'(書かない)。 song_mode: 'named'(曲名あり) / 'none'(書かない)。"""
     lines = [f"次の動画の投稿文を{DRAFT_COUNT}案作り、その中から良い{select_n}案を選んでください。", "",
@@ -303,6 +303,11 @@ def build_user_prompt(*, group_name: str, member_name: str, song_title: str, vid
     if generated:
         lines.append("【直近に生成した案(選ばれなかったものを含む)。動画が違っても、同じ書き出し・同じ言い回し・同じ型の組み合わせを避ける】")
         for i, t in enumerate(generated, 1):
+            lines.append(f"{i}. " + t.replace("\n", " / "))
+        lines.append("")
+    if shown:
+        lines.append("【いま画面に出している案。これらとは違う案にする。同じ書き出し・同じ言い回し・同じ型の組み合わせを避ける】")
+        for i, t in enumerate(shown, 1):
             lines.append(f"{i}. " + t.replace("\n", " / "))
         lines.append("")
     if accepted:
@@ -514,7 +519,7 @@ def generate_candidates(rules: str, model: str, ctx: dict, on_progress=None) -> 
     戻り値: {candidates, shortfall, cost, seconds, rounds, dropped}。1回目に失敗したら CaptionError。"""
     system_prompt = build_system_prompt(rules)
     forbidden = example_phrases_from_rules(rules)
-    avoid = list(ctx.get("recent_texts") or []) + list(ctx.get("generated") or [])
+    avoid = list(ctx.get("recent_texts") or []) + list(ctx.get("generated") or []) + list(ctx.get("shown") or [])
     accepted: list = []
     pool: list = []          # 除外された案(違反の理由つき)。全部落ちたときの救済に使う
     total_cost, total_secs, rounds = 0.0, 0.0, 0
@@ -531,6 +536,7 @@ def generate_candidates(rules: str, model: str, ctx: dict, on_progress=None) -> 
             group_name=ctx["group_name"], member_name=ctx["member_name"], song_title=ctx["song_title"],
             video_title=ctx["video_title"], recent_texts=ctx["recent_texts"], group_mode=ctx["group_mode"],
             song_mode=ctx["song_mode"], exemplars=ctx.get("exemplars") or [], generated=ctx.get("generated") or [],
+            shown=ctx.get("shown") or [],
             accepted=[c["text"] for c in accepted], select_n=select_n)
         try:
             drafts, selected, cost, secs = run_claude(system_prompt, prompt, model, select_n)

@@ -1531,6 +1531,7 @@ function editTag(id, btn) {
 // ── 投稿文の候補生成(Claude Code CLI。ボタンを押したときだけ動く) ───────────────────
 var captionPollTimer = null;
 var captionRunId = 0;
+var shownCaptionTexts = [];   // いま画面に出している案(「もう一度生成」で、これらと違う案を作らせる)
 
 function resetCaptionUi() {
   captionRunId++;
@@ -1539,6 +1540,7 @@ function resetCaptionUi() {
   ids.forEach(function(i) { var el = document.getElementById(i); if (el) el.classList.add('d-none'); });
   var t = document.getElementById('tag-caption-text'); if (t) t.value = '';
   var l = document.getElementById('tag-caption-list'); if (l) l.innerHTML = '';
+  shownCaptionTexts = [];
   var s = document.getElementById('tag-caption-song-input'); if (s) s.value = '';
   var st = document.getElementById('tag-caption-status'); if (st) st.textContent = '';
   var b = document.getElementById('tag-caption-btn'); if (b) { b.disabled = false; b.textContent = '✨ 候補を生成'; }
@@ -1578,7 +1580,8 @@ function generateCaptions() {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       group_name: groupName, member_name: getMemberFieldValue(), no_group: noGroup,
-      song_title: typedSong, song_unknown: !!(songShown && !typedSong)
+      song_title: typedSong, song_unknown: !!(songShown && !typedSong),
+      shown_texts: shownCaptionTexts.slice()
     })
   })
   .then(function(r) { return r.json(); })
@@ -1599,7 +1602,9 @@ function generateCaptions() {
 function captionDone() {
   var btn = document.getElementById('tag-caption-btn');
   var status = document.getElementById('tag-caption-status');
-  if (btn) { btn.disabled = false; btn.textContent = '✨ 候補を生成'; }
+  var listEl = document.getElementById('tag-caption-list');
+  var hasList = !!(listEl && listEl.children.length);
+  if (btn) { btn.disabled = false; btn.textContent = hasList ? '🔁 もう一度生成' : '✨ 候補を生成'; }
   if (status) status.textContent = '';
 }
 
@@ -1630,6 +1635,7 @@ function renderCaptionCandidates(cands, seconds, shortfall) {
   var ta = document.getElementById('tag-caption-text');
   var btn = document.getElementById('tag-caption-btn');
   list.innerHTML = '';
+  shownCaptionTexts = cands.map(function(c) { return c.text; });
   cands.forEach(function(c) {
     var label = document.createElement('label');
     label.className = 'd-block border rounded p-2 mb-1';
@@ -1671,7 +1677,11 @@ function captionFieldsKey() {
 function checkPrefetchStale() {
   if (prefetchSnapshot === null || captionFieldsKey() === prefetchSnapshot) return;
   prefetchSnapshot = null;
-  resetCaptionUi();   // 先読みの候補は使わない。ボタンは「候補を生成」に戻る
+  // 作成済みの候補は出したままにする(「もう一度生成」を押すと、変えた値で作り直す)。生成中の待ちだけやめる
+  var btn = document.getElementById('tag-caption-btn');
+  if (btn && btn.disabled && captionPollTimer) {
+    captionRunId++; clearTimeout(captionPollTimer); captionPollTimer = null; captionDone();
+  }
 }
 
 function loadPrefetchedCaptions(id, runId, n) {
