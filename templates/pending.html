@@ -224,6 +224,9 @@
           <span class="badge bg-primary-subtle text-primary-emphasis" style="font-size:.72rem" title="チャンネル監視で自動取り込みした動画">📡 監視：{{ a.channel_name or '' }}</span>
           {% endif %}
           <span id="group-badge-{{ a.id }}" class="badge bg-info-subtle text-info-emphasis{% if not (group_tag_map and group_tag_map.get(a.id)) %} d-none{% endif %}" style="font-size:.72rem">{{ group_tag_map.get(a.id) if group_tag_map else '' }}</span>
+          <span id="cap-badge-{{ a.id }}" class="badge cap-badge{% if not (caption_prefetch_map and caption_prefetch_map.get(a.id)) %} d-none{% endif %}"
+                data-status="{{ caption_prefetch_map.get(a.id) if caption_prefetch_map else '' }}"
+                style="font-size:.7rem;background:#ede7f6;color:#5e35b1"></span>
           {% if a.is_comeback %}
           <span class="badge bg-danger-subtle text-danger-emphasis" style="font-size:.72rem" title="カムバック曲としてタグ付け済み">🆕 カムバック</span>
           {% endif %}
@@ -1497,6 +1500,7 @@ function approveArticle(id, btn) {
     setOptionalFieldsVisible(true);
     resetCaptionUi();
     modal.classList.remove('d-none');
+    loadPrefetchedCaptions(id);
     return;
   }
   doApprove(id, btn, '', '');
@@ -1564,6 +1568,7 @@ function generateCaptions() {
     showCaptionError('先にグループを選んでください');
     return;
   }
+  prefetchSnapshot = null;   // 手動で作り直すので、先読みの候補の扱いはここまで
   var runId = ++captionRunId;
   if (captionPollTimer) { clearTimeout(captionPollTimer); captionPollTimer = null; }
   btn.disabled = true;
@@ -1652,6 +1657,85 @@ function renderCaptionCandidates(cands, seconds, shortfall) {
   if (st && seconds) st.textContent = seconds + '秒で生成しました';
   if (shortfall) showCaptionError(shortfall + '。「もう一度生成」で作り直せます');
 }
+
+// ── 取り込み時に裏で作っておいた候補の表示 ───────────────────
+// 先読みの候補は「作ったときのグループ・メンバー」のまま使う。モーダルでそれらを変えたら使わず、「候補を生成」で作り直す。
+var prefetchSnapshot = null;   // 先読みの候補を出している間の {group, member, noGroup}
+
+function captionFieldsKey() {
+  var gi = getTagGroupInputEl();
+  var ng = document.getElementById('tag-nogroup-input');
+  return JSON.stringify([gi ? gi.value.trim() : '', getMemberFieldValue(), !!(ng && ng.checked)]);
+}
+
+function checkPrefetchStale() {
+  if (prefetchSnapshot === null || captionFieldsKey() === prefetchSnapshot) return;
+  prefetchSnapshot = null;
+  resetCaptionUi();   // 先読みの候補は使わない。ボタンは「候補を生成」に戻る
+}
+
+function loadPrefetchedCaptions(id, runId, n) {
+  if (runId === undefined) { prefetchSnapshot = null; runId = captionRunId; n = 0; }
+  var firstSnapshot = captionFieldsKey();
+  fetch('/api/articles/' + id + '/caption-prefetch')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (runId !== captionRunId || pendingApproveId !== id) return;
+      var btn = document.getElementById('tag-caption-btn');
+      var st = document.getElementById('tag-caption-status');
+      if (!d.ok || (d.status !== 'running' && d.status !== 'done')) return;
+      if (prefetchSnapshot === null) prefetchSnapshot = firstSnapshot;
+      else if (captionFieldsKey() !== prefetchSnapshot) { prefetchSnapshot = null; return; }
+      if (d.status === 'running') {
+        btn.disabled = true; btn.textContent = '生成中…';
+        if (st) st.textContent = '取り込み時から作っています。できしだい表示します';
+        if (n > 400) { captionDone(); return; }
+        captionPollTimer = setTimeout(function() { loadPrefetchedCaptions(id, runId, n + 1); }, 2000);
+        return;
+      }
+      // 作成済み: 作ったときのグループ・メンバーを入れて(まだ触っていなければ)表示する
+      if (d.group) {
+        var gi = getTagGroupInputEl();
+        if (gi) { gi.value = d.group; updateMemberFieldForGroup(d.group, d.member || ''); }
+      }
+      prefetchSnapshot = captionFieldsKey();
+      captionDone();
+      renderCaptionCandidates(d.candidates || [], d.seconds, d.shortfall);
+    })
+    .catch(function() {});
+}
+
+(function() {
+  var modal = document.getElementById('tag-modal');
+  if (!modal) return;
+  ['input', 'change', 'click'].forEach(function(ev) {
+    modal.addEventListener(ev, function() { setTimeout(checkPrefetchStale, 0); });
+  });
+})();
+
+// ── 承認待ち一覧の「候補生成中」「候補あり」の印 ───────────────────
+function paintCapBadge(b, status) {
+  if (status === 'running') { b.textContent = '✨ 候補生成中…'; b.title = '投稿文の候補を裏で作っています'; b.classList.remove('d-none'); }
+  else if (status === 'done') { b.textContent = '✨ 候補あり'; b.title = '投稿文の候補が作成済みです'; b.classList.remove('d-none'); }
+  else { b.classList.add('d-none'); }
+  b.dataset.status = status || '';
+}
+
+function pollCapBadges() {
+  var badges = Array.prototype.slice.call(document.querySelectorAll('.cap-badge'));
+  badges.forEach(function(b) { if (b.dataset.status) paintCapBadge(b, b.dataset.status); });
+  var running = badges.filter(function(b) { return b.dataset.status === 'running'; });
+  if (!running.length) return;
+  var ids = running.map(function(b) { return b.id.replace('cap-badge-', ''); }).join(',');
+  fetch('/api/caption-prefetch/status?ids=' + ids)
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) running.forEach(function(b) { paintCapBadge(b, d.map[b.id.replace('cap-badge-', '')] || ''); });
+    })
+    .catch(function() {})
+    .then(function() { setTimeout(pollCapBadges, 5000); });
+}
+pollCapBadges();
 
 function closeTagModal() {
   document.getElementById('tag-modal').classList.add('d-none');

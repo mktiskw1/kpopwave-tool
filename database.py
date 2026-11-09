@@ -555,3 +555,23 @@ class YoutubeJob(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     started_at = db.Column(db.DateTime, nullable=True)
     finished_at = db.Column(db.DateTime, nullable=True)
+
+
+class CaptionPrefetch(db.Model):
+    """承認待ちの動画について、取り込み時に裏で作っておいた投稿文の候補(caption_prefetch参照)。
+    status: running(待ち・生成中) / done / failed。承認・削除された記事の分は消す。
+    group_name / member_name / song_title は、この候補を作るときに使った値
+    (承認モーダルでこれらを変えたら、この候補は使わず作り直す)。"""
+    __tablename__ = "caption_prefetch"
+
+    article_id = db.Column(db.Integer, primary_key=True)
+    status = db.Column(db.String(12), nullable=False, default="running")
+    group_name = db.Column(db.String(200), nullable=True)
+    member_name = db.Column(db.String(200), nullable=True)
+    song_title = db.Column(db.String(300), nullable=True)
+    candidates = db.Column(db.Text, nullable=True)     # JSON
+    shortfall = db.Column(db.Text, nullable=True)
+    seconds = db.Column(db.Float, nullable=True)
+    error = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

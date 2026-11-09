@@ -17,12 +17,13 @@ from flask import Flask, flash as _flask_flash, jsonify, redirect, render_templa
 from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
 
+import caption_prefetch
 import group_balance
 import yt_queue
 from config import Config, YOUTUBE_DL_FORMAT
 from database import (
     YoutubeJob,
-    Article, BuzzPost, ChapterClip, ChapterJob, Comment, DailyStat, EarlyAdvanceLog, Group, Hook, Member,
+    Article, BuzzPost, CaptionPrefetch, ChapterClip, ChapterJob, Comment, DailyStat, EarlyAdvanceLog, Group, Hook, Member,
     PostStat, Setting, TextPostStock, ThreadsAccount, VideoTrimJob, WatchedCandidate, WatchedChannel, get_active_account, db,
     DELETE_REASON_MANUAL, DELETE_REASON_MANUAL_BULK, DeletedPostLog, record_deleted_post,
 )
@@ -846,13 +847,20 @@ def pending():
             "member": member_by_id[a.member_id].name if a.member_id and a.member_id in member_by_id else "",
         }
 
+    caption_prefetch_map = {}
+    if articles and tab != "posted":
+        caption_prefetch_map = {
+            r.article_id: r.status for r in CaptionPrefetch.query.filter(
+                CaptionPrefetch.article_id.in_([a.id for a in articles])).all()
+            if r.status in ("running", "done")}
+
     return render_template("pending.html", articles=articles, images_map=images_map,
                            active_tab=tab, counts=counts, now_utc=datetime.utcnow(),
                            active_trim_jobs=active_trim_jobs, active_chapter_jobs=active_chapter_jobs,
                            all_groups=all_groups, members_by_group=members_by_group,
                            group_tag_map=group_tag_map, article_tags=article_tags,
                            guessed_tags=guessed_tags, early_engagement_map=early_engagement_map,
-                           candidate_rows=candidate_rows)
+                           candidate_rows=candidate_rows, caption_prefetch_map=caption_prefetch_map)
 
 
 @app.route("/pending/bulk-delete", methods=["POST"])
@@ -905,6 +913,7 @@ def delete_all_pending():
     count = len(articles)
     Article.query.filter(Article.id.in_([a.id for a in articles])).delete(synchronize_session=False)
     db.session.commit()
+    caption_prefetch.purge_orphans()
     flash(f"承認待ち記事 {count} 件をすべて削除しました", "warning")
     return redirect(url_for("pending", account_id=account_id) if account_id else url_for("pending"))
 
@@ -1087,25 +1096,18 @@ def _guess_group_id(chapter_title: str) -> int | None:
     return None
 
 
-@app.route("/api/articles/<int:id>/captions", methods=["POST"])
-def api_generate_captions(id):
-    """承認モーダルの「候補を生成」: 投稿文の候補6案を Claude Code CLI で作る(ボタンを押したときだけ)。
-    生成は別スレッドで走り、画面は /api/caption-jobs/<job_id> をポーリングして結果を受け取る。"""
+def _build_caption_ctx(article, group_name: str, member_name: str, no_group: bool,
+                       typed_song: str = "", song_unknown: bool = False) -> dict:
+    """候補生成の材料(プロンプトに渡すctx)を作る。承認モーダルの「候補を生成」と、取り込み時の先読みの両方で使う。
+    戻り値: {"error": 文言} / {"needs_song": True} / {"ctx": ..., "group": ..., "song": ...}。"""
     import caption_ai
     from summarizer import _extract_song_title
-    article = Article.query.get_or_404(id)
-    data = request.get_json(silent=True) or {}
-    group_name = (data.get("group_name") or "").strip()
-    member_name = (data.get("member_name") or "").strip()
-    no_group = bool(data.get("no_group"))
-    typed_song = (data.get("song_title") or "").strip()
-    song_unknown = bool(data.get("song_unknown"))
 
     # グループ: 承認モーダルで選ばれている値を使う。未選択なら生成しない。
     # 「グループなし」「その他」のときだけ、タイトルから読み取れた名前を使い、読めなければ「書かない」と指示する。
     active_groups = Group.query.filter_by(is_active=True).order_by(Group.name.asc()).all()
     if not group_name and not no_group:
-        return jsonify({"ok": False, "error": "先にグループを選んでください"}), 400
+        return {"error": "先にグループを選んでください"}
     group_mode = "named"
     if no_group or group_name == "その他":
         guessed = _guess_group(article.title, [g for g in active_groups if g.name != "その他"])
@@ -1125,21 +1127,96 @@ def api_generate_captions(id):
         if not song_title:
             song_title = caption_ai.find_song_in_description(article.raw_content or "", group_name)
         if not song_title:
-            return jsonify({"ok": True, "needs_song": True})
+            return {"needs_song": True}
         # 曲名がハングルだけなら、タイトル中の英字の曲名(別の引用符)があればそれを使う
         song_title = caption_ai.prefer_latin_song(article.title, song_title, exclude=(group_name, member_name))
 
-    recent = (Article.query.filter(Article.summary.isnot(None), Article.summary != "", Article.id != id,
+    recent = (Article.query.filter(Article.summary.isnot(None), Article.summary != "", Article.id != article.id,
                                    Article.status.in_(("posted", "queued", "pending")))
               .order_by(Article.id.desc()).limit(caption_ai.RECENT_POSTS_LIMIT).all())
-    rules = (Setting.get("caption_rules", "") or "").strip() or caption_ai.DEFAULT_CAPTION_RULES
     ctx = {
         "group_name": group_name, "member_name": member_name, "song_title": song_title, "video_title": article.title,
         "recent_texts": [a.summary for a in recent], "group_mode": group_mode, "song_mode": song_mode,
         "exemplars": caption_ai.pick_exemplars(), "generated": caption_ai.recent_generated(),
     }
-    job_id = caption_ai.start_job(app, rules, caption_ai.get_model(), ctx)
-    return jsonify({"ok": True, "job_id": job_id, "group": group_name, "song": song_title})
+    return {"ctx": ctx, "group": group_name, "song": song_title}
+
+
+@app.route("/api/articles/<int:id>/captions", methods=["POST"])
+def api_generate_captions(id):
+    """承認モーダルの「候補を生成」: 投稿文の候補6案を Claude Code CLI で作る(ボタンを押したときだけ)。
+    生成は別スレッドで走り、画面は /api/caption-jobs/<job_id> をポーリングして結果を受け取る。"""
+    import caption_ai
+    article = Article.query.get_or_404(id)
+    data = request.get_json(silent=True) or {}
+    built = _build_caption_ctx(
+        article, (data.get("group_name") or "").strip(), (data.get("member_name") or "").strip(),
+        bool(data.get("no_group")), (data.get("song_title") or "").strip(), bool(data.get("song_unknown")))
+    if built.get("error"):
+        return jsonify({"ok": False, "error": built["error"]}), 400
+    if built.get("needs_song"):
+        return jsonify({"ok": True, "needs_song": True})
+    rules = (Setting.get("caption_rules", "") or "").strip() or caption_ai.DEFAULT_CAPTION_RULES
+    job_id = caption_ai.start_job(app, rules, caption_ai.get_model(), built["ctx"])
+    return jsonify({"ok": True, "job_id": job_id, "group": built["group"], "song": built["song"]})
+
+
+def _prefetch_builder(article):
+    """取り込み時の先読み用: 承認待ちの動画(KPOPアカウント)について、グループ・メンバー・曲名を決めて材料を返す。
+    グループは記事に付いているもの → タイトルからの推測の順。決められなければ(曲名も含め)None=作らない。"""
+    if (article.content_type or "article") != "video" or article.status != "pending":
+        return None
+    acc = db.session.get(ThreadsAccount, article.account_id) if article.account_id else None
+    if acc is not None and (acc.content_topic or "").strip():
+        return None
+    group = db.session.get(Group, article.group_id) if article.group_id else None
+    if group is not None and not group.is_active:
+        group = None
+    member_name = ""
+    if group is not None:
+        member = db.session.get(Member, article.member_id) if article.member_id else None
+        member_name = (member.name if member else "") or _guess_member_name(article.title, group.id) or ""
+    else:
+        active = Group.query.filter_by(is_active=True).order_by(Group.name.asc()).all()
+        group = _guess_group(article.title, active)
+        if group is None:
+            return None
+        member_name = _guess_member_name(article.title, group.id) or ""
+    built = _build_caption_ctx(article, group.name, member_name, False)
+    if not built.get("ctx"):
+        return None
+    return {"group_name": group.name, "member_name": member_name, "song_title": built["song"], "ctx": built["ctx"]}
+
+
+caption_prefetch.set_builder(_prefetch_builder)
+
+
+def _prefetch_captions(article_ids) -> None:
+    """人が操作した取り込みの直後に呼ぶ: 承認待ちに入った動画の候補を、裏で1本ずつ作らせる。"""
+    ids = [i for i in article_ids if i]
+    if ids:
+        caption_prefetch.enqueue(app, ids)
+
+
+@app.route("/api/articles/<int:id>/caption-prefetch")
+def api_caption_prefetch(id):
+    """承認モーダルを開いたときに、先読みで作っておいた候補(または生成中・なし)を返す。"""
+    row = db.session.get(CaptionPrefetch, id)
+    if row is None:
+        return jsonify({"ok": True, "status": "none"})
+    out = {"ok": True, "status": row.status, "group": row.group_name or "", "member": row.member_name or ""}
+    if row.status == "done":
+        out.update(candidates=json.loads(row.candidates or "[]"), seconds=row.seconds, shortfall=row.shortfall)
+    return jsonify(out)
+
+
+@app.route("/api/caption-prefetch/status")
+def api_caption_prefetch_status():
+    """承認待ち一覧の印用: {記事ID: running|done}。"""
+    ids = request.args.get("ids", "")
+    want = {int(i) for i in ids.split(",") if i.strip().isdigit()}
+    rows = CaptionPrefetch.query.filter(CaptionPrefetch.article_id.in_(want)).all() if want else []
+    return jsonify({"ok": True, "map": {r.article_id: r.status for r in rows if r.status in ("running", "done")}})
 
 
 @app.route("/api/caption-jobs/<job_id>")
@@ -1188,6 +1265,7 @@ def approve_article(id):
                 return _reject("グループを入力してください（グループが無い場合は「グループなし」を選んでください）。")
 
     article.status = "queued"
+    caption_prefetch.delete_for(article.id)   # 承認したので先読みの候補は不要(コミットは下で行う)
 
     # 「候補を生成」で選んで(手直しして)決めた本文。手動の本文として扱い、承認時の自動組み立てで上書きしない。
     chosen_summary = (tag_data.get("summary") or "").strip()
@@ -1322,6 +1400,7 @@ def guess_groups_for_posted():
 def reject_article(id):
     article = Article.query.get_or_404(id)
     article.status = "rejected"
+    caption_prefetch.delete_for(article.id)
     db.session.commit()
     flash(f"却下しました: {article.title[:50]}", "secondary")
     return redirect(request.referrer or url_for("pending"))
@@ -1370,6 +1449,7 @@ def _cleanup_article_related_records(article_id: int, keep_trim_job_id=None) -> 
     生成されたクリップの場合)は、元の切り取りジョブの完了履歴自体は残す意味があるため
     削除はせずresult_article_idをNULL化するに留める。"""
     PostStat.query.filter_by(article_id=article_id).delete(synchronize_session=False)
+    caption_prefetch.delete_for(article_id)   # 先読みの候補は記事と一緒に消す
     _src_jobs = VideoTrimJob.query.filter_by(source_article_id=article_id)
     if keep_trim_job_id is not None:
         # 「追加して元を削除」: 実行中のジョブ自身は、画面が結果を確認できるよう残す
@@ -3271,6 +3351,7 @@ def _run_trim_job(app, job_id, delete_source=False):
 
             logger.info("動画クリップ作成完了: job_id=%d 元article_id=%d -> new_article_id=%d clip=%s",
                         job_id, job.source_article_id, new_article.id, clip_filename)
+            _prefetch_captions([new_article.id])
 
             if delete_source:
                 # クリップの作成・保存が成功したあとにだけ元を削除する(失敗時は元を消さない)
@@ -3965,6 +4046,7 @@ def _job_add_manual(payload):
     db.session.commit()
 
     logger.info("動画手動追加: %s (%s)", title[:60], yt_url)
+    _prefetch_captions([article.id])   # 人が操作した取り込み: 候補を裏で作っておく
     return jsonify({"ok": True, "title": title})
 
 
@@ -4108,6 +4190,7 @@ def add_video_social():
         db.session.commit()
         added_titles.append(title)
         logger.info("X動画手動追加: %s (%s)", title[:60], article_url)
+        _prefetch_captions([article.id])
 
     if not added_titles:
         return jsonify({"ok": False, "error": last_error or "この投稿はすでに追加済みです"}), 400
@@ -4500,6 +4583,7 @@ def chapter_job_confirm(job_id):
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
     added = 0
+    new_articles = []
     paths_to_delete = []
     try:
         for clip in clips:
@@ -4526,6 +4610,7 @@ def chapter_job_confirm(job_id):
                     clip_method="chapter",
                 )
                 db.session.add(article)
+                new_articles.append(article)
                 added += 1
             elif clip.video_file_path:
                 paths_to_delete.append(os.path.join(static_dir, clip.video_file_path))
@@ -4551,6 +4636,7 @@ def chapter_job_confirm(job_id):
             except OSError:
                 pass
 
+    _prefetch_captions([a.id for a in new_articles])   # 人が操作した取り込み: 候補を裏で1本ずつ作っておく
     flash(f"{added} 件のクリップを承認待ちに追加しました", "success")
     return redirect(url_for("pending"))
 
@@ -4980,6 +5066,7 @@ if __name__ == "__main__":
     # failed化してしまうため)。
     with app.app_context():
         _recover_orphaned_jobs()
+    caption_prefetch.recover(app)   # 再起動で止まった候補の先読みを再開(承認・削除済みの分は消す)
     yt_queue.start_worker(app)   # YouTubeの待ち行列(処理中のまま残ったジョブは待ちに戻す)
     setup_scheduler(app)
     app.run(debug=False, use_reloader=False, host="127.0.0.1", port=5000, threaded=True)

@@ -618,6 +618,9 @@ def _import_one_candidate(app, cand_id: int, hl: dict = None) -> dict:
             cand.last_error = None
             db.session.commit()
             logger.info("[channel_watch] 候補を取り込み: %s / %s", cand.channel_name, cand.title[:60])
+            # 人が「取り込む」を押した取り込みだけがここを通る(毎朝の自動取得は通らない)。投稿文の候補を裏で作っておく
+            import caption_prefetch
+            caption_prefetch.enqueue(app, [article.id])
             return {"state": "done", "article_id": article.id}
     except Exception as exc:
         message = yt_queue.error_text(exc)[:1000] if str(exc).strip() else "不明なエラー"   # yt-dlpの元のエラー文
