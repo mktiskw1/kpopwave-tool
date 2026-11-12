@@ -103,6 +103,12 @@ class Article(db.Model):
     import_source = db.Column(db.String(20), nullable=True)
     orientation = db.Column(db.String(10), nullable=True)
     video_duration = db.Column(db.Float, nullable=True)
+    # 切り取りの記録(分析用): 画面が出した推定の開始・終了(秒)と、実際に切り取った開始・終了(秒)。
+    # 切り取りで作った記事にだけ入る。差が小さいほど、推定が誠さんの判断に近い。
+    cut_est_start = db.Column(db.Float, nullable=True)
+    cut_est_end = db.Column(db.Float, nullable=True)
+    cut_start = db.Column(db.Float, nullable=True)
+    cut_end = db.Column(db.Float, nullable=True)
 
     def to_dict(self):
         return {
@@ -124,6 +130,8 @@ class VideoTrimJob(db.Model):
     source_article_id = db.Column(db.Integer, db.ForeignKey("articles.id"), nullable=False, index=True)
     start = db.Column(db.Float, nullable=False)
     end = db.Column(db.Float, nullable=True)
+    est_start = db.Column(db.Float, nullable=True)   # 画面が出した推定(秒)。未使用ならNULL
+    est_end = db.Column(db.Float, nullable=True)
     status = db.Column(db.String(20), nullable=False, default="processing")
     result_article_id = db.Column(db.Integer, nullable=True)
     error_message = db.Column(db.Text, nullable=True)

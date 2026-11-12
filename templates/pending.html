@@ -427,6 +427,17 @@
               移動
             </button>
           </div>
+          <!-- 推定の開始・終了(ダウンロード済みの動画の音声・映像から。初期値として入る。誠さんが確認して直す) -->
+          <div id="trim-est-{{ a.id }}" class="trim-est d-flex align-items-center gap-2 flex-wrap mb-2" data-id="{{ a.id }}"
+               data-est-start="" data-est-end="" style="font-size:.78rem;color:var(--text-muted)">
+            <span title="曲が始まる前・曲が止まったあと・最後のチャンネル名の表示(エンドカード)を除いた範囲の推定です">推定:</span>
+            <span class="est-text">まだ取得していません</span>
+            <button type="button" onclick="runCutEstimate({{ a.id }}, true)"
+                    style="padding:2px 9px;border-radius:6px;border:1px solid var(--border);
+                           background:#fff;color:var(--text);font-size:.78rem;cursor:pointer">
+              推定を入れ直す
+            </button>
+          </div>
           <!-- 切り取りボタン -->
           <div class="d-flex align-items-center gap-2 flex-wrap">
           <button type="button" id="trim-btn-{{ a.id }}"
@@ -2177,7 +2188,95 @@ function seekToTrim(type, id) {
   vid.currentTime = val;
 }
 
+// ── 切り取り範囲の推定(初期値) ─────────────────────────────────────────────
+// 動画ファイルの音声・映像から、曲の開始・終了(エンドカードを除く)を推定して、切り取り欄に入れる。
+var cutEstQueue = [];
+var cutEstBusy = false;
+var cutEstSeen = {};
+
+function setTrimValue(type, id, t) {
+  var m = Math.floor(t / 60);
+  var s = t - m * 60;
+  document.getElementById('trim-' + type + '-min-' + id).value = m;
+  document.getElementById('trim-' + type + '-sec-' + id).value = s;
+  syncTrimDisplay(type, id);
+}
+
+function trimFieldsAreDefault(id) {
+  var s = getTrimSeconds('start', id);
+  var e = getTrimSeconds('end', id);
+  return (s === null || s === 0) && e === null;
+}
+
+function runCutEstimate(id, force, done) {
+  var box = document.getElementById('trim-est-' + id);
+  var finish = function() { if (done) done(); };
+  if (!box) { finish(); return; }
+  var txt = box.querySelector('.est-text');
+  txt.textContent = '推定中...';
+  fetch('/api/videos/' + id + '/cut-estimate')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok === true && d.start !== null && d.end !== null) {
+        var parts = [formatTime(d.start) + ' 〜 ' + formatTime(d.end)];
+        if (d.duration) parts.push('元の長さ ' + formatTime(d.duration));
+        if (d.card_start) parts.push('エンドカード ' + formatTime(d.card_start) + ' 〜');
+        txt.textContent = parts.join(' / ');
+        box.dataset.estStart = d.start;
+        box.dataset.estEnd = d.end;
+        if (force || trimFieldsAreDefault(id)) {
+          setTrimValue('start', id, d.start);
+          setTrimValue('end', id, d.end);
+        }
+      } else {
+        txt.textContent = '推定できませんでした' + ((d.notes && d.notes.length) ? '(' + d.notes.join('、') + ')' : '');
+      }
+      finish();
+    })
+    .catch(function() { txt.textContent = '推定を取得できませんでした'; finish(); });
+}
+
+function pumpCutEstimates() {
+  if (cutEstBusy || !cutEstQueue.length) return;
+  cutEstBusy = true;
+  var id = cutEstQueue.shift();
+  runCutEstimate(id, false, function() { cutEstBusy = false; pumpCutEstimates(); });
+}
+
+function enqueueCutEstimate(id) {
+  if (cutEstSeen[id]) return;
+  cutEstSeen[id] = true;
+  cutEstQueue.push(id);
+  pumpCutEstimates();
+}
+
+(function() {
+  var start = function() {
+    var els = document.querySelectorAll('.trim-est');
+    if (!els.length) return;
+    if ('IntersectionObserver' in window) {
+      var io = new IntersectionObserver(function(entries) {
+        entries.forEach(function(en) {
+          if (en.isIntersecting) { enqueueCutEstimate(en.target.dataset.id); io.unobserve(en.target); }
+        });
+      }, {rootMargin: '200px'});
+      els.forEach(function(el) { io.observe(el); });
+    } else {
+      els.forEach(function(el) { enqueueCutEstimate(el.dataset.id); });
+    }
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+})();
+
 // ── 動画切り取り（別投稿として追加） ────────────────────────────────────────
+function estNum(id, key) {
+  var box = document.getElementById('trim-est-' + id);
+  if (!box || box.dataset[key] === undefined || box.dataset[key] === '') return null;
+  var v = parseFloat(box.dataset[key]);
+  return isNaN(v) ? null : v;
+}
+
 function trimVideo(id, btn, deleteSource) {
   const start = getTrimSeconds('start', id);
   if (start === null || isNaN(start)) {
@@ -2213,7 +2312,8 @@ function trimVideo(id, btn, deleteSource) {
   fetch('/api/videos/' + id + '/trim', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({start: start, end: end, delete_source: !!deleteSource})
+    body: JSON.stringify({start: start, end: end, delete_source: !!deleteSource,
+                          est_start: estNum(id, 'estStart'), est_end: estNum(id, 'estEnd')})
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {

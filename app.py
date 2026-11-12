@@ -213,6 +213,10 @@ def _migrate_db():
         ("import_source", "VARCHAR(20)"),
         ("orientation", "VARCHAR(10)"),
         ("video_duration", "FLOAT"),
+        ("cut_est_start", "FLOAT"),
+        ("cut_est_end", "FLOAT"),
+        ("cut_start", "FLOAT"),
+        ("cut_end", "FLOAT"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -220,6 +224,15 @@ def _migrate_db():
                 conn.execute(text(f"ALTER TABLE articles ADD COLUMN {col} {typedef}"))
                 conn.commit()
                 logger.info("DB migration: articles.%s added", col)
+
+    # video_trim_jobs: 画面が出した推定の開始・終了(秒)を残す(実際の値との差を分析する)
+    existing_trim = {c["name"] for c in inspect(db.engine).get_columns("video_trim_jobs")}
+    with db.engine.connect() as conn:
+        for col in ("est_start", "est_end"):
+            if col not in existing_trim:
+                conn.execute(text(f"ALTER TABLE video_trim_jobs ADD COLUMN {col} FLOAT"))
+                conn.commit()
+                logger.info("DB migration: video_trim_jobs.%s added", col)
 
     # deleted_post_log: 承認基準の分析用に、取り込み経路・向き・長さ・切り方を残す
     existing_dpl = {c["name"] for c in inspect(db.engine).get_columns("deleted_post_log")}
@@ -1456,6 +1469,7 @@ _ARTICLE_RESTORE_FIELDS = [
     "channel_id", "channel_name", "watched_channel_id", "priority_requested_at",
     "clip_method", "highlight_start", "highlight_end", "highlight_heatmap",
     "import_source", "orientation", "video_duration",
+    "cut_est_start", "cut_est_end", "cut_start", "cut_end",
 ]
 _ARTICLE_DATETIME_FIELDS = {
     "published_at", "scheduled_at", "posted_at", "created_at", "engagement_fetched_at", "priority_requested_at",
@@ -3384,6 +3398,10 @@ def _run_trim_job(app, job_id, delete_source=False):
                 channel_name=article.channel_name,
                 clip_method="manual",
                 import_source="trim",
+                cut_est_start=job.est_start,
+                cut_est_end=job.est_end,
+                cut_start=job.start,
+                cut_end=job.end,
             )
             db.session.add(new_article)
             db.session.flush()  # new_article.id を確定させる（コミット前は未割当のため）
@@ -3486,13 +3504,47 @@ def trim_video(article_id):
         else:
             return jsonify({"ok": False, "error": "この動画は既にトリミング処理中です", "job_id": existing_job.id}), 409
 
-    job = VideoTrimJob(source_article_id=article_id, start=start, end=end, status="processing")
+    def _opt_seconds(key):
+        try:
+            v = data.get(key)
+            return round(float(v) * 2) / 2 if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    job = VideoTrimJob(source_article_id=article_id, start=start, end=end, status="processing",
+                       est_start=_opt_seconds("est_start"), est_end=_opt_seconds("est_end"))
     db.session.add(job)
     db.session.commit()
 
     threading.Thread(target=_run_trim_job, args=(app, job.id, delete_source), daemon=True).start()
 
     return jsonify({"ok": True, "job_id": job.id})
+
+
+_CUT_EST_CACHE = {}
+_CUT_EST_LOCK = threading.Lock()
+
+
+@app.route("/api/videos/<int:article_id>/cut-estimate")
+def cut_estimate_api(article_id):
+    """承認待ちの切り取り欄の初期値: ダウンロード済みの動画ファイルから、開始・終了の推定を返す(YouTubeには触れない)。
+    推定は同じファイルなら使い回す。ffmpegを使うので、同時には1本ずつ処理する。"""
+    import cut_estimate
+    article = db.session.get(Article, article_id)
+    if article is None or (article.content_type or "article") != "video" or not article.video_file_path:
+        return jsonify({"ok": False, "error": "動画ではありません"}), 404
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", article.video_file_path)
+    if not os.path.isfile(path):
+        return jsonify({"ok": False, "error": "動画ファイルが見つかりません"}), 404
+    key = (path, os.path.getmtime(path), os.path.getsize(path))
+    with _CUT_EST_LOCK:
+        res = _CUT_EST_CACHE.get(key)
+        if res is None:
+            res = cut_estimate.estimate(path)
+            if len(_CUT_EST_CACHE) > 200:
+                _CUT_EST_CACHE.clear()
+            _CUT_EST_CACHE[key] = res
+    return jsonify({"ok": True, **res})
 
 
 @app.route("/api/videos/trim-jobs/<int:job_id>")
