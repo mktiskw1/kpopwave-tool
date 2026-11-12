@@ -210,6 +210,9 @@ def _migrate_db():
         ("highlight_start", "FLOAT"),
         ("highlight_end", "FLOAT"),
         ("highlight_heatmap", "TEXT"),
+        ("import_source", "VARCHAR(20)"),
+        ("orientation", "VARCHAR(10)"),
+        ("video_duration", "FLOAT"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -217,6 +220,38 @@ def _migrate_db():
                 conn.execute(text(f"ALTER TABLE articles ADD COLUMN {col} {typedef}"))
                 conn.commit()
                 logger.info("DB migration: articles.%s added", col)
+
+    # deleted_post_log: 承認基準の分析用に、取り込み経路・向き・長さ・切り方を残す
+    existing_dpl = {c["name"] for c in inspect(db.engine).get_columns("deleted_post_log")}
+    with db.engine.connect() as conn:
+        for col, typedef in (("import_source", "VARCHAR(20)"), ("orientation", "VARCHAR(10)"),
+                             ("video_duration", "FLOAT"), ("clip_method", "VARCHAR(20)")):
+            if col not in existing_dpl:
+                conn.execute(text(f"ALTER TABLE deleted_post_log ADD COLUMN {col} {typedef}"))
+                conn.commit()
+                logger.info("DB migration: deleted_post_log.%s added", col)
+
+    # 既存の動画記事の補完: 取り込み経路(監視とX動画だけ確実に分かる)と、動画ファイルが残っているものの向き・長さ。
+    # import_source / orientation / video_duration が空の記事だけが対象なので、2回目以降の起動では何もしない。
+    try:
+        from video_collector import record_video_spec
+        with db.engine.connect() as conn:
+            # feed_sourceは監視もURL追加も「YouTube動画: ...」で区別できないため、監視は候補テーブルの取り込み先から判定する
+            conn.execute(text("UPDATE articles SET import_source = 'watch' WHERE import_source IS NULL "
+                              "AND id IN (SELECT imported_article_id FROM watched_candidate WHERE imported_article_id IS NOT NULL)"))
+            conn.execute(text("UPDATE articles SET import_source = 'x' WHERE import_source IS NULL "
+                              "AND content_type = 'video' AND feed_source LIKE 'X動画:%'"))
+            conn.commit()
+        todo = (Article.query.filter(Article.content_type == "video", Article.video_file_path.isnot(None),
+                                     Article.status.in_(("pending", "queued", "posted")))
+                .filter(db.or_(Article.orientation.is_(None), Article.video_duration.is_(None))).limit(500).all())
+        filled = sum(1 for a in todo if record_video_spec(a))
+        db.session.commit()
+        if filled:
+            logger.info("DB migration: 動画の向き・長さを %d件補完", filled)
+    except Exception:
+        db.session.rollback()
+        logger.exception("DB migration: 取り込み経路・向き・長さの補完に失敗(起動は続行)")
 
     # buzz_threshold_confirmed_at の初期バックフィル: バズ判定いいね数が設定可能になる前は
     # 200いいねがハードコードされた基準だったため、既にその基準を満たして永久保存されている
@@ -1267,6 +1302,9 @@ def approve_article(id):
                 return _reject("グループを入力してください（グループが無い場合は「グループなし」を選んでください）。")
 
     article.status = "queued"
+    if (article.content_type or "article") == "video":
+        from video_collector import record_video_spec
+        record_video_spec(article)   # 向き・長さを記録(失敗しても承認は続行)
     caption_prefetch.delete_for(article.id)   # 承認したので先読みの候補は不要(コミットは下で行う)
 
     # 「候補を生成」で選んで(手直しして)決めた本文。手動の本文として扱い、承認時の自動組み立てで上書きしない。
@@ -1417,6 +1455,7 @@ _ARTICLE_RESTORE_FIELDS = [
     "group_id", "member_id", "buzz_repost_count", "buzz_low_streak",
     "channel_id", "channel_name", "watched_channel_id", "priority_requested_at",
     "clip_method", "highlight_start", "highlight_end", "highlight_heatmap",
+    "import_source", "orientation", "video_duration",
 ]
 _ARTICLE_DATETIME_FIELDS = {
     "published_at", "scheduled_at", "posted_at", "created_at", "engagement_fetched_at", "priority_requested_at",
@@ -3344,6 +3383,7 @@ def _run_trim_job(app, job_id, delete_source=False):
                 channel_id=article.channel_id,
                 channel_name=article.channel_name,
                 clip_method="manual",
+                import_source="trim",
             )
             db.session.add(new_article)
             db.session.flush()  # new_article.id を確定させる（コミット前は未割当のため）
@@ -4058,6 +4098,7 @@ def _job_add_manual(payload):
         status="pending",
         content_type="video",
         video_file_path=f"videos/{dest_filename}",
+        import_source="url",
         view_count=full.get("view_count"),
         account_id=payload.get("account_id"),
         channel_id=full.get("channel_id"),
@@ -4208,6 +4249,7 @@ def add_video_social():
             status="pending",
             content_type="video",
             video_file_path=f"videos/{dest_filename}",
+            import_source="x",
             view_count=info.get("view_count") or full.get("view_count"),
             account_id=account_id,
         )
@@ -4633,6 +4675,7 @@ def chapter_job_confirm(job_id):
                     channel_id=job.channel_id,
                     channel_name=job.channel_name,
                     clip_method="chapter",
+                    import_source="chapter",
                 )
                 db.session.add(article)
                 new_articles.append(article)

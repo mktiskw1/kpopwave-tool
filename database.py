@@ -98,6 +98,11 @@ class Article(db.Model):
     highlight_start = db.Column(db.Float, nullable=True)
     highlight_end = db.Column(db.Float, nullable=True)
     highlight_heatmap = db.Column(db.Text, nullable=True)
+    # 承認基準の分析用: 取り込み経路(watch/url/x/chapter/trim/search)、動画の向き(portrait/landscape/square)、
+    # 実際に投稿する動画ファイルの長さ(秒)。向きと長さは承認時(と起動時の補完)にffprobeで記録する。
+    import_source = db.Column(db.String(20), nullable=True)
+    orientation = db.Column(db.String(10), nullable=True)
+    video_duration = db.Column(db.Float, nullable=True)
 
     def to_dict(self):
         return {
@@ -393,6 +398,10 @@ class DeletedPostLog(db.Model):
     final_views = db.Column(db.Integer, nullable=True)
     deleted_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     delete_reason = db.Column(db.String(40), nullable=False)
+    import_source = db.Column(db.String(20), nullable=True)
+    orientation = db.Column(db.String(10), nullable=True)
+    video_duration = db.Column(db.Float, nullable=True)
+    clip_method = db.Column(db.String(20), nullable=True)
 
 
 def _was_posted(article) -> bool:
@@ -441,6 +450,13 @@ def record_deleted_post(article, reason: str) -> bool:
                 likes = latest.likes if likes is None else likes
                 views = latest.views if views is None else views
 
+        if article.orientation is None or article.video_duration is None:
+            try:
+                from video_collector import record_video_spec
+                record_video_spec(article)
+            except Exception:
+                pass
+
         db.session.execute(DeletedPostLog.__table__.insert().values(
             article_id=article.id,
             account_id=article.account_id,
@@ -458,6 +474,10 @@ def record_deleted_post(article, reason: str) -> bool:
             final_views=views,
             deleted_at=datetime.utcnow(),
             delete_reason=reason,
+            import_source=article.import_source,
+            orientation=article.orientation,
+            video_duration=article.video_duration,
+            clip_method=article.clip_method,
         ))
         return True
     except Exception:

@@ -598,6 +598,7 @@ def _import_one_candidate(app, cand_id: int, hl: dict = None) -> dict:
                 status="pending",
                 content_type="video",
                 video_file_path=video_path,
+                import_source="watch",
                 is_fancam=_is_fancam(cand.title),
                 view_count=cand.view_count,
                 account_id=cand.account_id,

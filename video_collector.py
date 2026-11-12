@@ -90,6 +90,30 @@ def _probe_video(file_path: str) -> dict:
         return {}
 
 
+def record_video_spec(article, abs_path: str = None) -> bool:
+    """動画記事の向き(orientation)と長さ(video_duration)をffprobeで調べて記録する(コミットはしない)。
+    既に記録済み・動画ファイルが無い・調べられない場合は何もせずFalseを返す。失敗しても例外は投げない。"""
+    try:
+        if (article.content_type or "article") != "video" or not article.video_file_path:
+            return False
+        if article.orientation and article.video_duration:
+            return False
+        path = abs_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", article.video_file_path)
+        if not os.path.isfile(path):
+            return False
+        info = _probe_video(path)
+        w, h, dur = info.get("width") or 0, info.get("height") or 0, info.get("duration") or 0
+        if not w or not h:
+            return False
+        article.orientation = "portrait" if h > w * 1.05 else ("landscape" if w > h * 1.05 else "square")
+        if dur > 0:
+            article.video_duration = round(float(dur), 1)
+        return True
+    except Exception as exc:
+        logger.warning("動画スペックの記録に失敗(続行): article_id=%s %s", getattr(article, "id", None), exc)
+        return False
+
+
 _TARGET_VIDEO_SIZE_MB = 85   # 容量超過のとき、この大きさに収まるビットレートで変換する(上限95MBに余裕を持たせる)
 _AUDIO_KBPS = 128
 
@@ -794,6 +818,7 @@ def collect_youtube_videos(app) -> int:
                     status="pending",
                     content_type="video",
                     video_file_path=f"videos/{dest_filename}",
+                    import_source="search",
                     is_fancam=fancam,
                     view_count=video.get("view_count"),
                     channel_id=video.get("channel_id"),
