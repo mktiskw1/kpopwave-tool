@@ -118,12 +118,26 @@ _TARGET_VIDEO_SIZE_MB = 85   # 容量超過のとき、この大きさに収ま�
 _AUDIO_KBPS = 128
 
 
+def size_cap_args(duration_sec: float) -> list:
+    """再エンコードの出力が_TARGET_VIDEO_SIZE_MB(85MB)を大きく超えないようにする、ビットレートの上限の引数。
+    画質指定(crf)と組み合わせて使う: 小さい動画はcrfのまま(上限に届かない)、大きくなる動画だけが上限に収まる。
+    動画の長さが分からないとき(0以下)は何も付けない。
+    (以前は上限が無く、元がAV1の87.9MB・236秒の動画が、H.264へ変換されて439.9MBに膨れ、Threads側の
+    動画処理がタイムアウトした。2026-11-12)"""
+    if not duration_sec or duration_sec <= 0:
+        return []
+    kbps = max(500, int(_TARGET_VIDEO_SIZE_MB * 8 * 1024 / duration_sec - _AUDIO_KBPS))
+    return ["-maxrate", f"{kbps}k", "-bufsize", f"{kbps * 2}k"]
+
+
 def _transcode_to_h264(file_path: str, duration_sec: float = 0.0, shrink: bool = False) -> bool:
     """H.264+AACにインプレース変換する（元ファイルを上書き）。成功したらTrueを返す。
 
     shrink=True(容量が上限を超えているとき)は、動画の長さから逆算したビットレート(目標_TARGET_VIDEO_SIZE_MB)で
     変換する。以前は一律 crf 23 だったため、元が高ビットレート(例: 1080p60・25Mbps)だと変換後も約500MBのままで
-    Threads側の動画処理エラーになり、投稿のたびに再変換して画質も劣化していた。"""
+    Threads側の動画処理エラーになり、投稿のたびに再変換して画質も劣化していた。
+    shrink=Falseでも、動画の長さが分かるときは crf 23 にビットレートの上限(size_cap_args)を付ける
+    (元が小さいAV1などをH.264へ変換したときに、数倍に膨れるのを防ぐ)。"""
     import subprocess
     if not os.path.exists(_FFMPEG_EXE):
         logger.error("ffmpeg が見つかりません: %s", _FFMPEG_EXE)
@@ -135,7 +149,9 @@ def _transcode_to_h264(file_path: str, duration_sec: float = 0.0, shrink: bool =
                         "-bufsize", f"{video_kbps * 2}k"]
         logger.info("容量超過のためビットレート指定で変換: 目標%dMB / %.0f秒 → 映像%dkbps", _TARGET_VIDEO_SIZE_MB, duration_sec, video_kbps)
     else:
-        quality_args = ["-crf", "23"]
+        quality_args = ["-crf", "23", *size_cap_args(duration_sec)]
+        if duration_sec > 0:
+            logger.info("容量の上限つきでcrf変換: 目標%dMB / %.0f秒 → 映像上限%s", _TARGET_VIDEO_SIZE_MB, duration_sec, quality_args[3])
     cmd = [
         _FFMPEG_EXE, "-y", "-i", file_path,
         "-vcodec", "libx264", *quality_args, "-preset", "fast",

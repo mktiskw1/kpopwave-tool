@@ -3285,8 +3285,12 @@ def _ffmpeg_trim_clip(source_path: str, dest_path: str, start: float, end: float
     cmd = [ffmpeg_exe, "-y", "-ss", str(start), "-i", source_path]
     if end is not None:
         cmd += ["-t", str(end - start)]
+    # 切り出す長さから、出力が85MBを大きく超えないビットレートの上限を付ける(crfはそのまま)。
+    # 4K元・60fpsの動画は上限が無いと350MB級になり、投稿時にもう一度変換される(二重の再エンコード)
+    clip_sec = (end - start) if end is not None else (_probe_duration(source_path) or 0) - start
+    from video_collector import size_cap_args
     cmd += [
-        "-c:v", "libx264", "-crf", "23", "-preset", "veryfast",
+        "-c:v", "libx264", "-crf", "23", *size_cap_args(clip_sec), "-preset", "veryfast",
         "-c:a", "aac", "-b:a", "128k",
         "-avoid_negative_ts", "make_zero",
         "-movflags", "+faststart",
