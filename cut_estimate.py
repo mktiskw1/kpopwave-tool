@@ -42,6 +42,13 @@ MOTION_SMOOTH_SEC = 5.0
 MOTION_FPS = 2.0
 
 CARD_MIN_SEC = 3.0           # これ以上続く末尾の静止・動き小を、エンドカードとみなす
+# エンドカードの「切り替わり」の検出(画面の細かい模様の量の急な落ち込み)。M2 のカードは、舞台からワイプで切り替わったあと
+# ロゴが約2.5秒アニメーションしてから静止するため、静止だけで探すと開始が約3秒遅れ、カードの冒頭が動画に残っていた(2026-11-16)
+TEXTURE_LOW = 6.5            # カードの画面の模様の量(舞台は10以上。160x90のグレー画像の勾配の平均)
+TEXTURE_STAGE_MIN = 7.0 
+TEXTURE_DROP_RATIO = 0.4     # 直前のフレームの4割以下に急に落ちる
+TEXTURE_AFTER_RATIO = 0.6    # カードのあとの映像の模様が、舞台の6割未満なら、舞台には戻っていない
+TEXTURE_WIPE_LEAD_SEC = 0.6  # 落ち込みの前に、ワイプの切り替わりが始まっている分を戻す
 STATIC_DIFF = 1.5            # 画面の変化が小さい(静止)とみなすフレーム間の平均差(0〜255)
 CUT_SPIKE = 80.0             # 急な場面転換とみなすフレーム間の差
 LOWMOTION_DIFF = 20.0        # 場面転換のあと、これ以下の動きしか無ければエンドカード
@@ -145,7 +152,7 @@ def _runs(mask, gap):
     return merged
 
 
-def _song_run(db, path=None, duration=None):
+def _song_run(db, path=None, duration=None, limit=None):
     """演奏している一番長い連続区間(開始秒, 終了秒)。決められなければNone。
     音声: 基準の音量から14dB以内。映像: 音声が無い区間でも動きがあれば(消音など)演奏中とみなす。
     開始は音が鳴り始めた位置、終了は音も動きも止まった位置。"""
@@ -161,17 +168,28 @@ def _song_run(db, path=None, duration=None):
     per = int(step / HOP)
     for k in range(n):
         grid[k] = bool(audio_active[k * per:(k + 1) * per].any())
+    if limit is not None:
+        # エンドカードの開始より後の音(カードのジングルなど)は、演奏とみなさない
+        cut = int(max(0.0, limit) / step)
+        grid[cut:] = False
     union = grid.copy()
     if path:
         try:
             union = grid | _motion_grid(path, grid, step, duration if duration else n * step)
+            if limit is not None:
+                union[int(max(0.0, limit) / step):] = False
         except Exception as exc:
             logger.warning("映像の動きの取得に失敗(音声だけで続行): %s", exc)
     runs = _runs(union, int(MERGE_GAP_SEC / step))
     if not runs:
         return None
     best = max(runs, key=lambda r: r[1] - r[0])
-    run_start, run_end = best[0] * step, best[1] * step
+    run_start = best[0] * step
+    # 終了: 演奏区間の中で、最後に音が鳴っていた位置。音声が途切れる区間(消音)の「あと」にまた音がある動画は、
+    # その最後まで続ける。一方、音が止まったあとに映像だけが動いている(お辞儀・MC・エンドカードへの切り替え)部分は含めない
+    # (誠さんのルール2「歌い終わって曲が止まったあとに続いている部分をカット」)
+    last_audio = max((k for k in range(best[0], best[1]) if grid[k]), default=best[1] - 1)
+    run_end = (last_audio + 1) * step
     # 開始: 演奏区間の中で一番長く続く音の区間の始まり(曲の前の話し声・歓声の短い音は無視する)
     inner = [r for r in _runs(grid, int(MERGE_GAP_SEC / step)) if r[0] >= best[0] - 1 and r[1] <= best[1] + 1]
     start = max(inner, key=lambda r: r[1] - r[0])[0] * step if inner else run_start
@@ -205,7 +223,35 @@ def _card_start_from_video(path, duration):
         if (len(d) - k - 1) / fps >= CARD_MIN_SEC and (len(after) == 0 or float(after.max()) <= LOWMOTION_DIFF):
             cand.append(ss + (k + 1) / fps)
             break
+    # (3) 画面の模様の量の急な落ち込み(舞台→ロゴなどのカード)。末尾に最も近い、3秒以上低いままの落ち込み
+    tex_start = _texture_card_start(fr, ss, fps)
+    if tex_start is not None:
+        cand.append(tex_start)
     return min(cand) if cand else None
+
+
+def _texture_card_start(fr, ss, fps):
+    """フレーム列(N x 14400 のグレー画像、160x90)から、舞台からカードへの切り替わりの開始秒を返す。無ければNone。"""
+    n = len(fr)
+    if n < int(fps * 6):
+        return None
+    img = fr.reshape(n, 90, 160)
+    tex = np.abs(np.diff(img, axis=2)).mean(axis=(1, 2)) + np.abs(np.diff(img, axis=1)).mean(axis=(1, 2))
+    low = tex < TEXTURE_LOW
+    min_run = int(CARD_MIN_SEC * fps)
+    for i in range(n - min_run, 0, -1):          # 末尾に近い方から探す
+        if not low[i] or low[i - 1]:
+            continue
+        if tex[i - 1] < TEXTURE_STAGE_MIN or tex[i] > TEXTURE_DROP_RATIO * tex[i - 1]:
+            continue
+        if not low[i:i + min_run].all():
+            continue
+        stage = float(np.mean(tex[max(0, i - int(10 * fps)):i]))
+        after = float(np.mean(tex[i:]))
+        if after >= TEXTURE_AFTER_RATIO * stage:
+            continue                              # 一時的な暗転などで、舞台に戻っている
+        return ss + i / fps - TEXTURE_WIPE_LEAD_SEC
+    return None
 
 
 def estimate(path):
@@ -223,18 +269,18 @@ def estimate(path):
             out["notes"].append("長い動画(15分超)は推定しません")
             return out
         db = _levels_db(_load_audio(path))
-        run = _song_run(db, path, duration)
+        card = None
+        try:
+            card = _card_start_from_video(path, duration)
+        except Exception as exc:
+            logger.warning("エンドカードの検出に失敗(続行): %s", exc)
+        run = _song_run(db, path, duration, limit=card)
         if run is None:
             out["notes"].append("音声から曲の区間を決められませんでした")
             return out
         song_start, song_end = run
         out["song_start"], out["song_end"] = round(song_start, 1), round(song_end, 1)
         limit = duration
-        card = None
-        try:
-            card = _card_start_from_video(path, duration)
-        except Exception as exc:
-            logger.warning("エンドカードの検出に失敗(続行): %s", exc)
         # 末尾の無音(音声が最後まで無い)も、曲の終わりの上限にする
         idx = np.where(db > SILENCE_DB)[0]
         sound_end = (idx[-1] + 1) * HOP + WIN if len(idx) else duration
