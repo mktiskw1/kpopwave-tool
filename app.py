@@ -17,6 +17,7 @@ from flask import Flask, flash as _flask_flash, jsonify, redirect, render_templa
 from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
 
+import autocut
 import caption_prefetch
 import group_balance
 import yt_queue
@@ -217,6 +218,9 @@ def _migrate_db():
         ("cut_est_end", "FLOAT"),
         ("cut_start", "FLOAT"),
         ("cut_end", "FLOAT"),
+        ("auto_cut_status", "VARCHAR(12)"),
+        ("auto_cut_note", "VARCHAR(300)"),
+        ("original_video_path", "VARCHAR(500)"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -228,9 +232,9 @@ def _migrate_db():
     # video_trim_jobs: 画面が出した推定の開始・終了(秒)を残す(実際の値との差を分析する)
     existing_trim = {c["name"] for c in inspect(db.engine).get_columns("video_trim_jobs")}
     with db.engine.connect() as conn:
-        for col in ("est_start", "est_end"):
+        for col, typedef in (("est_start", "FLOAT"), ("est_end", "FLOAT"), ("mode", "VARCHAR(10)")):
             if col not in existing_trim:
-                conn.execute(text(f"ALTER TABLE video_trim_jobs ADD COLUMN {col} FLOAT"))
+                conn.execute(text(f"ALTER TABLE video_trim_jobs ADD COLUMN {col} {typedef}"))
                 conn.commit()
                 logger.info("DB migration: video_trim_jobs.%s added", col)
 
@@ -508,6 +512,7 @@ def _init_default_settings():
         "kpop_seed_accounts": "",
         "test_mode": "false",
         "early_advance_enabled": "true",
+        "autocut_enabled": "true",
         "threads_user_id": os.getenv("THREADS_USER_ID", ""),
         "threads_access_token": os.getenv("THREADS_ACCESS_TOKEN", ""),
         "anthropic_api_key": os.getenv("ANTHROPIC_API_KEY", ""),
@@ -1293,6 +1298,9 @@ def approve_article(id):
         flash(msg, "danger")
         return redirect(url_for("pending"))
 
+    if article.auto_cut_status == "processing":
+        return _reject("自動カットの処理中です。完了してから承認してください(数十秒〜数分)")
+
     tag_data = request.get_json(silent=True) or {}
     group_name = (tag_data.get("group_name") or "").strip()
     member_name = (tag_data.get("member_name") or "").strip()
@@ -1469,7 +1477,7 @@ _ARTICLE_RESTORE_FIELDS = [
     "channel_id", "channel_name", "watched_channel_id", "priority_requested_at",
     "clip_method", "highlight_start", "highlight_end", "highlight_heatmap",
     "import_source", "orientation", "video_duration",
-    "cut_est_start", "cut_est_end", "cut_start", "cut_end",
+    "cut_est_start", "cut_est_end", "cut_start", "cut_end", "auto_cut_status", "auto_cut_note",
 ]
 _ARTICLE_DATETIME_FIELDS = {
     "published_at", "scheduled_at", "posted_at", "created_at", "engagement_fetched_at", "priority_requested_at",
@@ -3273,34 +3281,13 @@ def privacy():
 
 
 def _ffmpeg_trim_clip(source_path: str, dest_path: str, start: float, end: float | None, timeout: int = 600) -> None:
-    """ffmpegで source_path の [start, end) 区間を dest_path に切り出す。end が None なら start 以降を最後まで。
+    """ffmpegで source_path の [start, end) 区間を dest_path に切り出す(video_collector.ffmpeg_trim_clip)。
     失敗時は例外(メッセージにffmpegのstderr末尾500文字を含む)を送出する。"""
-    import subprocess as _sp
-
     ffmpeg_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin", "ffmpeg.exe")
-
-    # -ss を -i より前に置くキーフレームシークで高速化する。
-    # この場合 -to は使えない（シーク後の相対時刻ではなく元の絶対時刻のままになるため）ので、
-    # 代わりに相対時間指定の -t (end - start) を使う。
-    cmd = [ffmpeg_exe, "-y", "-ss", str(start), "-i", source_path]
-    if end is not None:
-        cmd += ["-t", str(end - start)]
-    # 切り出す長さから、出力が85MBを大きく超えないビットレートの上限を付ける(crfはそのまま)。
-    # 4K元・60fpsの動画は上限が無いと350MB級になり、投稿時にもう一度変換される(二重の再エンコード)
-    clip_sec = (end - start) if end is not None else (_probe_duration(source_path) or 0) - start
-    from video_collector import size_cap_args
-    cmd += [
-        "-c:v", "libx264", "-crf", "23", *size_cap_args(clip_sec), "-preset", "veryfast",
-        "-c:a", "aac", "-b:a", "128k",
-        "-avoid_negative_ts", "make_zero",
-        "-movflags", "+faststart",
-        dest_path,
-    ]
-
-    result = _sp.run(cmd, capture_output=True, timeout=timeout)
-    if result.returncode != 0:
-        err = result.stderr.decode("utf-8", errors="replace")[-500:]
-        raise RuntimeError(err)
+    if not os.path.exists(ffmpeg_exe):
+        raise RuntimeError("ffmpeg.exe が見つかりません")
+    from video_collector import ffmpeg_trim_clip
+    ffmpeg_trim_clip(source_path, dest_path, start, end, timeout)
 
 
 def _delete_source_after_trim(job, new_article_id, clip_rel_path, static_dir):
@@ -3549,6 +3536,162 @@ def cut_estimate_api(article_id):
                 _CUT_EST_CACHE.clear()
             _CUT_EST_CACHE[key] = res
     return jsonify({"ok": True, **res})
+
+
+def _run_recut_job(app, job_id):
+    """自動カットした動画を、元の動画から切り直して差し替える(同じ記事のまま。承認待ちの記事だけ)。"""
+    import time as _time
+    with app.app_context():
+        job = db.session.get(VideoTrimJob, job_id)
+        if not job:
+            return
+        dest = None
+        try:
+            article = db.session.get(Article, job.source_article_id)
+            static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+            if article is None or article.status != "pending" or not article.original_video_path:
+                raise RuntimeError("切り直せる状態ではありません(承認待ちではない、または元の動画がありません)")
+            src = os.path.join(static_dir, article.original_video_path)
+            if not os.path.isfile(src):
+                raise RuntimeError("元の動画のファイルが見つかりません")
+            base = os.path.splitext(os.path.basename(article.original_video_path))[0]
+            name = f"{base}_cut{int(_time.time())}.mp4"
+            dest = os.path.join(static_dir, "videos", name)
+            _ffmpeg_trim_clip(src, dest, job.start, job.end)
+            db.session.expire_all()
+            article = db.session.get(Article, job.source_article_id)
+            if article is None or article.status != "pending":
+                raise RuntimeError("処理中に記事が承認・削除されたため、切り直しを取りやめました")
+            old_rel = article.video_file_path
+            from video_collector import _probe_video, record_video_spec
+            article.video_file_path = f"videos/{name}"
+            article.clip_method = "manual"
+            article.auto_cut_status = "recut"
+            article.cut_start = job.start
+            article.cut_end = job.end if job.end is not None else (float(_probe_video(src).get("duration") or 0) or None)
+            article.orientation = article.video_duration = None
+            record_video_spec(article)
+
+            def _t(sec):
+                return "%d:%02d" % (int(sec // 60), int(sec % 60))
+            article.auto_cut_note = ("元の動画から切り直しました: %s〜%s" % (_t(job.start), _t(article.cut_end) if article.cut_end else "最後"))[:300]
+            job.status = "done"
+            job.result_article_id = article.id
+            db.session.commit()
+            dest = None
+            logger.info("切り直し完了: job_id=%d article_id=%d %.1f-%s", job_id, article.id, job.start, job.end)
+            if old_rel and old_rel != article.original_video_path:
+                try:
+                    from video_files import referenced_video_basenames
+                    _delete_video_files(old_rel, static_dir, referenced=referenced_video_basenames([]))
+                except Exception:
+                    logger.exception("切り直し前のクリップの削除に失敗(続行): %s", old_rel)
+        except Exception as exc:
+            logger.exception("切り直し失敗: job_id=%d", job_id)
+            db.session.rollback()
+            if dest and os.path.exists(dest):
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+            job.status = "failed"
+            job.error_message = str(exc)[:500]
+            db.session.commit()
+
+
+@app.route("/api/videos/<int:article_id>/recut", methods=["POST"])
+def recut_video(article_id):
+    """自動カットした動画を、元の動画(original_video_path)から切り直す。進行は /api/videos/trim-jobs/<job_id>。"""
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        start = round(float(data.get("start", 0) or 0) * 2) / 2
+        end_raw = data.get("end")
+        end = round(float(end_raw) * 2) / 2 if end_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "開始・終了の秒数が不正です"}), 400
+    if start < 0 or (end is not None and end <= start):
+        return jsonify({"ok": False, "error": "終了は開始より後にしてください"}), 400
+    article = db.session.get(Article, article_id)
+    if article is None or article.status != "pending" or not article.original_video_path:
+        return jsonify({"ok": False, "error": "この動画は切り直せません(承認待ちではない、または元の動画がありません)"}), 400
+    if not os.path.isfile(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", article.original_video_path)):
+        return jsonify({"ok": False, "error": "元の動画のファイルが見つかりません"}), 404
+    existing = VideoTrimJob.query.filter_by(source_article_id=article_id, status="processing").first()
+    if existing:
+        if _is_job_stale(existing):
+            existing.status = "failed"
+            existing.error_message = f"処理が{JOB_STALE_MINUTES}分以上完了しなかったためタイムアウトしました。"
+            db.session.commit()
+        else:
+            return jsonify({"ok": False, "error": "この動画は既に処理中です", "job_id": existing.id}), 409
+    job = VideoTrimJob(source_article_id=article_id, start=start, end=end, status="processing",
+                       est_start=article.cut_est_start, est_end=article.cut_est_end, mode="recut")
+    db.session.add(job)
+    db.session.commit()
+    threading.Thread(target=_run_recut_job, args=(app, job.id), daemon=True).start()
+    return jsonify({"ok": True, "job_id": job.id})
+
+
+@app.route("/api/videos/<int:article_id>/autocut", methods=["POST"])
+def autocut_video(article_id):
+    """承認待ちの未カットの動画を、画面から自動カットの順番待ちに入れる(自動カットがオフでも実行する)。"""
+    n = autocut.enqueue(app, [article_id], force=True)
+    if not n:
+        return jsonify({"ok": False, "error": "自動カットの対象ではありません(承認待ちの動画で、まだカットしていないものだけ)"}), 400
+    return jsonify({"ok": True})
+
+
+@app.route("/api/videos/<int:article_id>/autocut-status")
+def autocut_status(article_id):
+    a = db.session.get(Article, article_id)
+    if a is None:
+        return jsonify({"ok": False}), 404
+    return jsonify({"ok": True, "status": a.auto_cut_status, "note": a.auto_cut_note})
+
+
+@app.route("/api/cut-accuracy")
+def cut_accuracy():
+    """カットの推定の精度の集計。自動カット(承認・切り直しの結果)と、手動の切り取りで推定を初期値にした分を分けて返す。
+    秒の差は、推定値と最終値(実際にカットした値)の絶対値の差。"""
+    import statistics
+
+    def stats(rows):
+        if not rows:
+            return {"n": 0}
+        ds = [abs(a.cut_start - a.cut_est_start) for a in rows]
+        de = [abs(a.cut_end - a.cut_est_end) for a in rows]
+        return {
+            "n": len(rows),
+            "start_diff_median": round(statistics.median(ds), 2), "end_diff_median": round(statistics.median(de), 2),
+            "start_within_3s": round(sum(1 for x in ds if x <= 3) / len(rows), 3),
+            "end_within_3s": round(sum(1 for x in de if x <= 3) / len(rows), 3),
+            "both_within_3s": round(sum(1 for x, y in zip(ds, de) if x <= 3 and y <= 3) / len(rows), 3),
+        }
+
+    with_est = Article.query.filter(
+        Article.cut_est_start.isnot(None), Article.cut_est_end.isnot(None),
+        Article.cut_start.isnot(None), Article.cut_end.isnot(None)).all()
+    autos = Article.query.filter(Article.auto_cut_status.isnot(None)).all()
+    by_status = {}
+    for a in autos:
+        by_status[a.auto_cut_status] = by_status.get(a.auto_cut_status, 0) + 1
+    auto_cut = [a for a in autos if a.auto_cut_status == "auto"]
+    accepted = [a for a in auto_cut if a.status != "pending"]          # 自動カットのまま承認・投稿された(切り直さなかった)
+    recut = [a for a in with_est if a.auto_cut_status == "recut"]       # 切り直した(最終値は切り直した値)
+    manual_est = [a for a in with_est if not a.auto_cut_status]         # 手動の切り取りで、推定を初期値にした
+    decided = len(accepted) + len(recut)
+    return jsonify({
+        "ok": True,
+        "auto_cut_by_status": by_status,
+        "auto": {
+            "waiting_review": len([a for a in auto_cut if a.status == "pending"]),
+            "accepted_as_is": len(accepted), "recut": len(recut),
+            "accept_rate": round(len(accepted) / decided, 3) if decided else None,
+            "recut_vs_estimate": stats(recut),
+        },
+        "manual_with_estimate": stats(manual_est),
+        "note": "accept_rate = 切り直さずに承認された割合。recut_vs_estimate = 切り直した動画で、推定と最終値の差(秒)",
+    })
 
 
 @app.route("/api/videos/trim-jobs/<int:job_id>")
@@ -4169,6 +4312,7 @@ def _job_add_manual(payload):
 
     logger.info("動画手動追加: %s (%s)", title[:60], yt_url)
     _prefetch_captions([article.id])   # 人が操作した取り込み: 候補を裏で作っておく
+    autocut.enqueue(app, [article.id])   # 範囲指定なしなら、推定して自動でカットする(範囲指定は対象外)
     return jsonify({"ok": True, "title": title})
 
 
@@ -4314,6 +4458,7 @@ def add_video_social():
         added_titles.append(title)
         logger.info("X動画手動追加: %s (%s)", title[:60], article_url)
         _prefetch_captions([article.id])
+        autocut.enqueue(app, [article.id])
 
     if not added_titles:
         return jsonify({"ok": False, "error": last_error or "この投稿はすでに追加済みです"}), 400
@@ -5191,6 +5336,7 @@ if __name__ == "__main__":
     with app.app_context():
         _recover_orphaned_jobs()
     caption_prefetch.recover(app)   # 再起動で止まった候補の先読みを再開(承認・削除済みの分は消す)
+    autocut.recover(app)   # 再起動で止まった自動カットを再開
     yt_queue.start_worker(app)   # YouTubeの待ち行列(処理中のまま残ったジョブは待ちに戻す)
     setup_scheduler(app)
     app.run(debug=False, use_reloader=False, host="127.0.0.1", port=5000, threaded=True)

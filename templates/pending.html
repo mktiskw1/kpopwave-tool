@@ -222,6 +222,17 @@
           {% elif a.clip_method == 'chapter' %}
           <span class="badge bg-secondary-subtle text-secondary-emphasis" style="font-size:.72rem" title="チャプター分割で取り込みました">✂ チャプター</span>
           {% endif %}
+          {% if a.auto_cut_status == 'processing' %}
+          <span class="badge bg-warning-subtle text-warning-emphasis autocut-processing" data-id="{{ a.id }}" style="font-size:.72rem" title="音声・映像から開始と終了を推定して、カットしています(数十秒〜数分)">⏳ 自動カット処理中</span>
+          {% elif a.auto_cut_status == 'auto' %}
+          <span class="badge bg-success-subtle text-success-emphasis" style="font-size:.72rem" title="{{ a.auto_cut_note or '' }}">✂ 自動カット済み</span>
+          {% elif a.auto_cut_status == 'recut' %}
+          <span class="badge bg-secondary-subtle text-secondary-emphasis" style="font-size:.72rem" title="{{ a.auto_cut_note or '' }}">✂ 自動カット→切り直し済み</span>
+          {% elif a.auto_cut_status == 'full' %}
+          <span class="badge bg-success-subtle text-success-emphasis" style="font-size:.72rem" title="{{ a.auto_cut_note or '' }}">✂ 自動判定: カット不要</span>
+          {% elif a.auto_cut_status == 'skipped' %}
+          <span class="badge bg-warning-subtle text-warning-emphasis" style="font-size:.72rem" title="{{ a.auto_cut_note or '' }}">⚠ 自動カットできませんでした(カットなし)</span>
+          {% endif %}
           {% if a.watched_channel_id %}
           <span class="badge bg-primary-subtle text-primary-emphasis" style="font-size:.72rem" title="チャンネル監視で自動取り込みした動画">📡 監視：{{ a.channel_name or '' }}</span>
           {% endif %}
@@ -427,6 +438,40 @@
               移動
             </button>
           </div>
+          {% if a.auto_cut_status %}
+          <!-- 自動カットの結果と、元の動画からの切り直し -->
+          <div id="autocut-panel-{{ a.id }}" class="mb-2 p-2" data-status="{{ a.auto_cut_status }}"
+               data-orig-src="{{ url_for('static', filename=a.original_video_path) if a.original_video_path else '' }}"
+               data-clip-src="{{ url_for('static', filename=a.video_file_path) }}"
+               data-cut-start="{{ a.cut_start if a.cut_start is not none else '' }}" data-cut-end="{{ a.cut_end if a.cut_end is not none else '' }}"
+               style="border:1px dashed var(--border);border-radius:8px;font-size:.8rem">
+            <div style="font-weight:700">
+              {% if a.auto_cut_status == 'processing' %}⏳ 自動カット処理中…
+              {% elif a.auto_cut_status == 'auto' %}✂ 自動カット済み
+              {% elif a.auto_cut_status == 'recut' %}✂ 元の動画から切り直し済み
+              {% elif a.auto_cut_status == 'full' %}✂ 自動判定: カット不要
+              {% else %}⚠ 自動カットできませんでした(カットしていません){% endif %}
+            </div>
+            <div class="text-muted">{{ a.auto_cut_note or '' }}</div>
+            {% if a.original_video_path and a.auto_cut_status in ('auto', 'recut') %}
+            <div class="d-flex align-items-center gap-2 flex-wrap mt-1">
+              <button type="button" id="autocut-open-{{ a.id }}" onclick="autocutOpenOriginal({{ a.id }})"
+                      style="padding:2px 9px;border-radius:6px;border:1px solid var(--border);background:#fff;color:var(--text);font-size:.78rem;cursor:pointer"
+                      title="元の動画を再生して、開始・終了をやり直せます(元の動画は、投稿済み・却下になるまで残ります)">元の動画を開いて切り直す</button>
+              <button type="button" id="autocut-recut-{{ a.id }}" onclick="autocutRecut({{ a.id }}, this)" style="display:none;padding:2px 9px;border-radius:6px;border:1px solid var(--accent-light);background:var(--accent-soft);color:var(--accent);font-size:.78rem;cursor:pointer;font-weight:700">この範囲で元の動画から切り直す</button>
+              <button type="button" id="autocut-back-{{ a.id }}" onclick="autocutBackToClip({{ a.id }})" style="display:none;padding:2px 9px;border-radius:6px;border:1px solid var(--border);background:#fff;color:var(--text);font-size:.78rem;cursor:pointer">カット済みの動画に戻す</button>
+              <span id="autocut-msg-{{ a.id }}" class="text-muted"></span>
+            </div>
+            {% endif %}
+          </div>
+          {% elif (a.content_type or 'article') == 'video' and not a.clip_method %}
+          <div class="mb-2" style="font-size:.78rem;color:var(--text-muted)">
+            <button type="button" onclick="autocutRun({{ a.id }}, this)"
+                    style="padding:2px 9px;border-radius:6px;border:1px solid var(--border);background:#fff;color:var(--text);font-size:.78rem;cursor:pointer"
+                    title="音声・映像から開始と終了を推定して、自動でカットします(元の動画は残ります)">✂ 自動カットを実行</button>
+          </div>
+          {% endif %}
+          {% if not a.original_video_path and a.auto_cut_status != 'processing' %}
           <!-- 推定の開始・終了(ダウンロード済みの動画の音声・映像から。初期値として入る。誠さんが確認して直す) -->
           <div id="trim-est-{{ a.id }}" class="trim-est d-flex align-items-center gap-2 flex-wrap mb-2" data-id="{{ a.id }}"
                data-est-start="" data-est-end="" style="font-size:.78rem;color:var(--text-muted)">
@@ -438,6 +483,7 @@
               推定を入れ直す
             </button>
           </div>
+          {% endif %}
           <!-- 切り取りボタン -->
           <div class="d-flex align-items-center gap-2 flex-wrap">
           <button type="button" id="trim-btn-{{ a.id }}"
@@ -2267,6 +2313,111 @@ function enqueueCutEstimate(id) {
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
   else start();
+})();
+
+// ── 自動カット(元の動画からの切り直し) ──────────────────────────────────────
+function autocutPanel(id) { return document.getElementById('autocut-panel-' + id); }
+
+function autocutSetSource(id, url) {
+  var src = document.getElementById('vid-src-' + id);
+  var vid = document.getElementById('vid-' + id);
+  if (!src || !vid) return;
+  src.src = url;
+  vid.load();
+}
+
+function autocutToggleTrimButtons(id, show) {
+  ['trim-btn-', 'trim-del-btn-'].forEach(function(p) {
+    var el = document.getElementById(p + id);
+    if (el) el.style.display = show ? '' : 'none';
+  });
+}
+
+function autocutOpenOriginal(id) {
+  var panel = autocutPanel(id);
+  if (!panel || !panel.dataset.origSrc) return;
+  autocutSetSource(id, panel.dataset.origSrc);
+  var s = parseFloat(panel.dataset.cutStart);
+  var e = parseFloat(panel.dataset.cutEnd);
+  if (!isNaN(s)) setTrimValue('start', id, s);
+  if (!isNaN(e)) setTrimValue('end', id, e);
+  document.getElementById('autocut-open-' + id).style.display = 'none';
+  document.getElementById('autocut-recut-' + id).style.display = '';
+  document.getElementById('autocut-back-' + id).style.display = '';
+  autocutToggleTrimButtons(id, false);
+  document.getElementById('autocut-msg-' + id).textContent = '元の動画を表示中です。開始・終了を決めて「この範囲で元の動画から切り直す」を押してください';
+}
+
+function autocutBackToClip(id) {
+  var panel = autocutPanel(id);
+  if (!panel) return;
+  autocutSetSource(id, panel.dataset.clipSrc);
+  document.getElementById('autocut-open-' + id).style.display = '';
+  document.getElementById('autocut-recut-' + id).style.display = 'none';
+  document.getElementById('autocut-back-' + id).style.display = 'none';
+  autocutToggleTrimButtons(id, true);
+  document.getElementById('autocut-msg-' + id).textContent = '';
+}
+
+function autocutRecut(id, btn) {
+  var start = getTrimSeconds('start', id);
+  var end = getTrimSeconds('end', id);
+  if (start === null || isNaN(start) || isNaN(end) || (end !== null && end <= start)) {
+    alert('開始・終了の入力を確認してください(終了は開始より後にします)');
+    return;
+  }
+  var msg = document.getElementById('autocut-msg-' + id);
+  btn.disabled = true;
+  msg.textContent = '切り直しています…(数十秒〜数分)';
+  fetch('/api/videos/' + id + '/recut', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({start: start, end: end})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (!d.ok) { btn.disabled = false; msg.textContent = ''; alert('切り直し失敗: ' + (d.error || '不明なエラー')); return; }
+    var check = function() {
+      fetch('/api/videos/trim-jobs/' + d.job_id).then(function(r) { return r.json(); }).then(function(j) {
+        if (j.status === 'processing') { setTimeout(check, 3000); return; }
+        if (j.status === 'done') { location.reload(); return; }
+        btn.disabled = false; msg.textContent = '';
+        alert('切り直し失敗: ' + (j.error || '不明なエラー'));
+      }).catch(function() { setTimeout(check, 5000); });
+    };
+    check();
+  })
+  .catch(function() { btn.disabled = false; msg.textContent = ''; alert('通信エラーが発生しました'); });
+}
+
+function autocutRun(id, btn) {
+  btn.disabled = true;
+  fetch('/api/videos/' + id + '/autocut', {method: 'POST'})
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) { location.reload(); return; }
+      btn.disabled = false;
+      alert(d.error || '自動カットを開始できませんでした');
+    })
+    .catch(function() { btn.disabled = false; alert('通信エラーが発生しました'); });
+}
+
+// 自動カット処理中のカードは、終わったら一覧を読み込み直す
+(function() {
+  var pend = document.querySelectorAll('.autocut-processing');
+  if (!pend.length) return;
+  var ids = [];
+  pend.forEach(function(el) { ids.push(el.dataset.id); });
+  var tick = function() {
+    var left = ids.length;
+    ids.forEach(function(id) {
+      fetch('/api/videos/' + id + '/autocut-status').then(function(r) { return r.json(); }).then(function(d) {
+        if (d.ok && d.status !== 'processing') location.reload();
+      }).catch(function() {});
+    });
+    if (left) setTimeout(tick, 8000);
+  };
+  setTimeout(tick, 8000);
 })();
 
 // ── 動画切り取り（別投稿として追加） ────────────────────────────────────────

@@ -1176,6 +1176,8 @@ def _orphan_video_cleanup_job(app):
                .filter(ChapterJob.source_local_path.isnot(None)).all()]
             + [r[0] for r in db.session.query(ChapterClip.video_file_path)
                .filter(ChapterClip.video_file_path.isnot(None)).all()]
+            + [r[0] for r in db.session.query(Article.original_video_path)
+               .filter(Article.original_video_path.isnot(None)).all()]
         ):
             # DBは "videos/xxx.mp4" 形式で保持しているためベース名で正規化して突き合わせる
             referenced.add(os.path.basename(path))
@@ -1209,6 +1211,20 @@ def _orphan_video_cleanup_job(app):
         "孤立動画ファイル回収: %d件削除 (%.1f MB) / 参照中 %d件 / 残存mp4 %d件",
         deleted_count, deleted_bytes / 1024 / 1024, len(referenced), remaining,
     )
+
+
+@_logged_job("original_video_release")
+def _original_video_release_job(app):
+    """自動カット前の元の動画(original_video_path)を、投稿済み・却下になった記事から手放す(毎日)。
+    切り直しは承認待ちの間だけ使う。手放した元の動画は、どこからも参照されない孤立ファイルになり、
+    _orphan_video_cleanup_job が3日経過後に回収する(元の動画は数百MBになるのでディスクを圧迫しないため)。"""
+    with app.app_context():
+        rows = Article.query.filter(Article.original_video_path.isnot(None),
+                                    Article.status.in_(("posted", "rejected"))).all()
+        for a in rows:
+            a.original_video_path = None
+        db.session.commit()
+        logger.info("元の動画を手放しました: %d件", len(rows))
 
 
 _TOKEN_REFRESH_MIN_AGE_DAYS = 45   # Threads長期トークンは約60日寿命。失効15日前以内で更新開始
@@ -1356,6 +1372,15 @@ def setup_scheduler(app):
         CronTrigger(hour=2, minute=0, timezone="Asia/Tokyo"),
         args=[app],
         id="engagement_daily",
+        replace_existing=True,
+        misfire_grace_time=_DAILY_MISFIRE_GRACE,
+    )
+
+    scheduler.add_job(
+        _original_video_release_job,
+        CronTrigger(hour=4, minute=40, timezone="Asia/Tokyo"),
+        args=[app],
+        id="original_video_release",
         replace_existing=True,
         misfire_grace_time=_DAILY_MISFIRE_GRACE,
     )

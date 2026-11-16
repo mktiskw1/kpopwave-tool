@@ -180,6 +180,32 @@ def _transcode_to_h264(file_path: str, duration_sec: float = 0.0, shrink: bool =
         return False
 
 
+def ffmpeg_trim_clip(source_path: str, dest_path: str, start: float, end, timeout: int = 600) -> None:
+    """ffmpegで source_path の [start, end) 区間を dest_path に切り出す(再エンコード)。end が None なら start 以降を最後まで。
+    出力のビットレートには、長さから計算した上限(size_cap_args)を付ける。失敗時は例外(ffmpegのstderr末尾500文字入り)。
+    手動の切り取り(app.py)と自動カット(autocut.py)が共有する。"""
+    import subprocess
+    cmd = [_FFMPEG_EXE, "-y", "-ss", str(start), "-i", source_path]
+    if end is not None:
+        cmd += ["-t", str(end - start)]
+    # -ss を -i より前に置くキーフレームシークで高速化する。この場合 -to は使えない(シーク後の相対時刻ではなく
+    # 元の絶対時刻のままになる)ので、相対時間指定の -t を使う。
+    if end is not None:
+        clip_sec = end - start
+    else:
+        clip_sec = float(_probe_video(source_path).get("duration") or 0) - start
+    cmd += [
+        "-c:v", "libx264", "-crf", "23", *size_cap_args(clip_sec), "-preset", "veryfast",
+        "-c:a", "aac", "-b:a", "128k",
+        "-avoid_negative_ts", "make_zero",
+        "-movflags", "+faststart",
+        dest_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-500:])
+
+
 def _ensure_threads_compatible(file_path: str, channel_name: str = "") -> bool:
     """
     動画ファイルがThreads API要件を満たすか確認し、

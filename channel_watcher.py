@@ -622,6 +622,8 @@ def _import_one_candidate(app, cand_id: int, hl: dict = None) -> dict:
             # 人が「取り込む」を押した取り込みだけがここを通る(毎朝の自動取得は通らない)。投稿文の候補を裏で作っておく
             import caption_prefetch
             caption_prefetch.enqueue(app, [article.id])
+            import autocut   # 範囲指定なしの取り込みは、音声・映像から推定して自動でカットする(autocut.py)
+            autocut.enqueue(app, [article.id])
             return {"state": "done", "article_id": article.id}
     except Exception as exc:
         message = yt_queue.error_text(exc)[:1000] if str(exc).strip() else "不明なエラー"   # yt-dlpの元のエラー文

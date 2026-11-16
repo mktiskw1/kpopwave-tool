@@ -22,6 +22,10 @@ def referenced_video_basenames(exclude_article_ids=()) -> set:
     for aid, path in db.session.query(Article.id, Article.video_file_path).filter(Article.video_file_path.isnot(None)):
         if aid not in exclude:
             refs.add(os.path.basename(path))
+    # 自動カット前の元の動画(切り直し用)も参照されているファイル
+    for aid, path in db.session.query(Article.id, Article.original_video_path).filter(Article.original_video_path.isnot(None)):
+        if aid not in exclude:
+            refs.add(os.path.basename(path))
     for (path,) in db.session.query(ChapterClip.video_file_path).filter(ChapterClip.video_file_path.isnot(None)):
         refs.add(os.path.basename(path))
     for (path,) in db.session.query(ChapterJob.source_local_path).filter(ChapterJob.source_local_path.isnot(None)):

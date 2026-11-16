@@ -109,6 +109,12 @@ class Article(db.Model):
     cut_est_end = db.Column(db.Float, nullable=True)
     cut_start = db.Column(db.Float, nullable=True)
     cut_end = db.Column(db.Float, nullable=True)
+    # 自動カット(autocut.py): processing(処理中) / auto(自動カット済み) / full(カット不要と推定) /
+    # skipped(推定できず、カットしていない) / recut(自動カットを元の動画から切り直した)。手動の切り取りはNULL。
+    # original_video_path は自動カット前の元の動画(切り直し用)。投稿済み・却下になったら手放し、孤立ファイルとして回収する。
+    auto_cut_status = db.Column(db.String(12), nullable=True, index=True)
+    auto_cut_note = db.Column(db.String(300), nullable=True)
+    original_video_path = db.Column(db.String(500), nullable=True)
 
     def to_dict(self):
         return {
@@ -132,6 +138,7 @@ class VideoTrimJob(db.Model):
     end = db.Column(db.Float, nullable=True)
     est_start = db.Column(db.Float, nullable=True)   # 画面が出した推定(秒)。未使用ならNULL
     est_end = db.Column(db.Float, nullable=True)
+    mode = db.Column(db.String(10), nullable=True)   # NULL=別投稿として追加 / recut=自動カットを元の動画から切り直して差し替え
     status = db.Column(db.String(20), nullable=False, default="processing")
     result_article_id = db.Column(db.Integer, nullable=True)
     error_message = db.Column(db.Text, nullable=True)
