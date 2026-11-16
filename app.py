@@ -3394,6 +3394,22 @@ def _run_trim_job(app, job_id, delete_source=False):
                 cut_start=job.start,
                 cut_end=job.end,
             )
+            # 自動カットした動画(または、カット不要と判定した動画)から切り取ったときは、自動カットの推定値と、
+            # 元の動画での最終値を引き継ぐ(自動カットの記事を「元を削除」しても、精度の集計に残る)。元の動画も引き継ぐ
+            if article.auto_cut_status in ("auto", "recut", "full") and article.cut_est_start is not None                     and article.cut_est_end is not None:
+                base = article.cut_start or 0.0     # この動画の0秒が、元の動画の何秒か
+                new_article.cut_est_start = article.cut_est_start
+                new_article.cut_est_end = article.cut_est_end
+                new_article.cut_start = base + job.start
+                if job.end is not None:
+                    new_article.cut_end = base + job.end
+                else:
+                    new_article.cut_end = article.cut_end
+                new_article.auto_cut_status = "recut"
+                new_article.original_video_path = article.original_video_path
+                new_article.auto_cut_note = "自動カットした動画から切り取りました(元の動画での範囲: %d:%02d〜%s)" % (
+                    int(new_article.cut_start // 60), int(new_article.cut_start % 60),
+                    ("%d:%02d" % (int(new_article.cut_end // 60), int(new_article.cut_end % 60))) if new_article.cut_end else "最後")
             db.session.add(new_article)
             db.session.flush()  # new_article.id を確定させる（コミット前は未割当のため）
             job.status = "done"
