@@ -71,6 +71,7 @@
       <!-- 記事情報 -->
       <div style="min-width:0;flex:1">
         <div class="mb-1">
+          <span class="me-1" title="記事ID" style="font-size:.7rem;color:var(--text-muted);font-family:monospace">#{{ a.id }}</span>
           <span class="badge bg-secondary me-1" style="font-size:.72rem">{{ a.feed_source }}</span>
           {% if a.scheduled_at %}
           <span class="badge badge-queued" style="font-size:.72rem">
@@ -238,7 +239,7 @@
   <div class="card-body border-bottom" style="border-color:var(--border)!important">
     <div class="d-flex justify-content-between align-items-center">
       <div>
-        <div style="font-size:.85rem">{{ a.title[:60] }}{% if a.title|length > 60 %}…{% endif %}</div>
+        <div style="font-size:.85rem"><span class="article-id" title="記事ID" style="font-size:.7rem;color:var(--text-muted);font-family:monospace">#{{ a.id }}</span> {{ a.title[:60] }}{% if a.title|length > 60 %}…{% endif %}</div>
         {% if a.error_message %}
         <div style="font-size:.75rem;color:var(--accent);margin-top:.2rem">
           <i class="bi bi-exclamation-circle"></i> {{ a.error_message[:120] }}
@@ -270,6 +271,7 @@
     <div class="d-flex justify-content-between align-items-center gap-2">
       <div style="min-width:0;flex:1">
         <span style="font-size:.82rem">
+          <span class="article-id" title="記事ID" style="font-size:.7rem;color:var(--text-muted);font-family:monospace">#{{ a.id }}</span>
           {% if (a.content_type or 'article') == 'text' %}
           <span style="color:var(--text-muted)">{{ a.title[:65] }}{% if a.title|length > 65 %}…{% endif %}</span>
           {% else %}

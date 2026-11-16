@@ -212,6 +212,7 @@
           <input type="checkbox" name="ids" value="{{ a.id }}"
                  class="form-check-input article-cb mt-0 flex-shrink-0"
                  onchange="updateSelection()">
+          <span class="article-id" title="記事ID" style="font-size:.7rem;color:var(--text-muted);font-family:monospace">#{{ a.id }}</span>
           <span class="badge bg-secondary" style="font-size:.72rem">{{ a.feed_source }}</span>
           {% if a.clip_method == 'heatmap' %}
           <span class="badge bg-info-subtle text-info-emphasis" style="font-size:.72rem" title="YouTubeのよく再生されている部分から自動で切り出しました">✂ 見どころ(自動・再生)</span>
