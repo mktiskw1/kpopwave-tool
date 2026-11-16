@@ -11,6 +11,7 @@
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -28,7 +29,10 @@ RECENT_GENERATED_KEEP = 60       # 保存しておく数
 EXEMPLAR_LIMIT = 10              # お手本(いいねが多かった投稿文)の数
 EXEMPLAR_PER_GROUP = 2           # お手本に同じグループを入れる上限
 CANDIDATE_COUNT = 6              # 画面に出す案の数
-DRAFT_COUNT = 12                 # 1回の呼び出しで作らせる案の数
+DRAFT_PER_SLOT = 2               # 型ごとに作らせる案の数(その中から良い方を1案選ぶ)
+DRAFT_COUNT = CANDIDATE_COUNT * DRAFT_PER_SLOT   # 1回の呼び出しで作らせる案の数(12)
+MAX_QUESTION_SLOTS = 2           # 6案のうち、質問形にする案の上限(1〜2案)
+MAX_TEXT_CHARS = 70              # 改行を除いた本文の上限(「50字前後」の指示に対する余裕つきの上限)
 MAX_EXTRA_ROUNDS = 2             # 足りないときの追加生成の回数
 
 SETTING_MODEL = "caption_model"
@@ -36,13 +40,63 @@ SETTING_RECENT_GENERATED = "caption_recent_generated"
 DEFAULT_MODEL = "opus"
 MODEL_CHOICES = ("opus", "sonnet", "haiku")
 
+# 投稿文の「型」(フック)。案ごとに1つ割り当てて作らせ、どの型を使ったかを記録する(型ごとの成績の集計用)。
+# 質問形は6案のうち1〜2案まで。残りは質問にしない型で、6案が同じ型にならないようにする。
+QUESTION_TYPES = {
+    "二択型": "「〇〇派？△△派？」のように、二つから選ばせる問いかけ",
+    "参加型": "「この曲で一番好きなパート、どこ？」のように、答えやすい問いかけ",
+    "記憶型": "「〇〇に沼った曲、覚えてる？」のように、思い出を尋ねる問いかけ",
+    "仲間探し型": "「〇〇推しの人、いる？」のように、仲間に呼びかける問いかけ",
+}
+STATEMENT_TYPES = {
+    "言い切り型": "好みや評価を言い切る。「正直これが一番好き」のように。",
+    "余韻型": "見終わったあとの余韻や静かな感情を書く。「見終わっても、サビが頭から離れない」のように。",
+    "ビジュアル描写型": "動画から分かる範囲の見た目(表情・目線・動き・雰囲気)を、印象で描写する。「目線ひとつで空気が変わる」のように。衣装・会場・小道具など、書かれていない事実は書かない。",
+    "沼落ち型": "沼に落ちていく自分の行動や気持ちを告白する。「気づいたら、また最初から再生してた」のように。",
+    "視点指定型": "見る場所を指定する。「今日は目線だけ追ってみて」のように。",
+    "保存宣言型": "見返したい気持ちを宣言する。「これは保存して何度も見るやつ」のように。",
+}
+ALL_TYPES = tuple(QUESTION_TYPES) + tuple(STATEMENT_TYPES)
+
+
+def is_question_text(text: str) -> bool:
+    """疑問の形か(「？」「?」を含む、または疑問の言い回しで終わる)。"""
+    t = (text or "").strip()
+    if "？" in t or "?" in t:
+        return True
+    last = [ln for ln in t.splitlines() if ln.strip()][-1].strip() if t else ""
+    return bool(re.search(r"(でしょうか|ですか|ませんか|ますか|かな|かも？)[。.!！]?$", last))
+
+
+def assign_slots(n: int = CANDIDATE_COUNT, rng=None) -> list:
+    """n案分の型を割り当てる: 質問形は1〜2案(1案が6割・2案が4割)、残りは質問にしない型を重ならないように選ぶ。
+    戻り値は型の名前のリスト(順番はシャッフル済み)。"""
+    rng = rng or random
+    q_count = 1 if rng.random() < 0.6 else MAX_QUESTION_SLOTS
+    q_count = max(0, min(q_count, n, len(QUESTION_TYPES)))
+    slots = rng.sample(list(QUESTION_TYPES), q_count) + rng.sample(list(STATEMENT_TYPES), min(n - q_count, len(STATEMENT_TYPES)))
+    while len(slots) < n:   # 型が足りないときだけ重ねる(通常は起きない)
+        slots.append(rng.choice(list(STATEMENT_TYPES)))
+    rng.shuffle(slots)
+    return slots
+
+
+def caption_kind(article) -> str:
+    """成績の集計用の分類: 生成時の型 / 手入力 / 自動組み立て(従来の決定的な組み立て)。"""
+    if getattr(article, "caption_type", None):
+        return article.caption_type
+    return "手入力・手直し" if getattr(article, "summary_is_manual", False) else "自動組み立て"
+
+
 # 生成ルールの初期値(設定画面で編集できる。Setting "caption_rules")
 DEFAULT_CAPTION_RULES = """\
 あなたはKPOP動画をThreadsに投稿するときの、短い投稿文を考える編集者です。
 
 【構成】
-- 2段構成にする。1行目＝止める一文(スクロールを止める)、2行目＝返信させる一文(コメントしたくなる問いかけ)。
-- 案同士で、止める一文の型・返信させる一文の型・書き出しが重ならないようにする。
+- 投稿文は、全体で50字前後(改行を除いて60字以内)。1行で言い切ってもよいし、2行にしてもよい。
+- 案ごとに「型」が指定される。指定された型の通りに書く。6案が同じ型・同じ書き出し・同じ言い回しにならないようにする。
+- 質問形の型は、問いかけを置く(「？」で終える)。それ以外の型は、「？」「ですか」「ませんか」「かな」など疑問の形にしない。
+- 2行にするときは、1行目で心をつかみ、2行目で余韻や補足を足す。質問形の型だけ、2行目を問いかけにしてよい。
 - 各行は短く、読み上げて自然な日本語にする。
 - グループ名と曲名は、指示された範囲で自然に入れる(メンバー動画はメンバー名も入れる)。
   「〇〇の△△の□□」のように「の」を重ねない。不自然なら1行目と2行目に分けてよい。
@@ -57,19 +111,19 @@ DEFAULT_CAPTION_RULES = """\
 下の例文は「雰囲気の参考」です。そのまま使わない。毎回、動画に合わせて新しい言い回しを作る。
 例文と同じ言い回しが入った案は、システムが自動で除外します。
 
-【止める一文の型】
-- 好奇心ギャップ型: 「ラスト5秒に全部ある」「2回目で気づくやつ」。時間指定は使わない。
-- ナゾ型: 「この子だけ時間の流れ方が違う」。「音を消して見てほしい」は使わない。
-- 途中から始まる型: 「…いや、〇〇の△△はずるい」。
-- 視点指定型: 「今日は目線だけ追ってみて」。
-- バンドワゴン型: 「〇〇ペンなら全員保存してる△△」。
-- 断言・逆張り型: 「正直これが一番好き」。
+【質問にしない型】
+- 言い切り型: 好みや評価を言い切る。「正直これが一番好き」。
+- 余韻型: 見終わったあとの余韻や静かな感情を書く。「見終わっても、サビが頭から離れない」。
+- ビジュアル描写型: 動画から分かる範囲の見た目(表情・目線・動き・雰囲気)を、印象で描写する。「目線ひとつで空気が変わる」。衣装・会場・小道具など書かれていない事実は書かない。
+- 沼落ち型: 沼に落ちていく自分の行動や気持ちを告白する。「気づいたら、また最初から再生してた」。
+- 視点指定型: 見る場所を指定する。「今日は目線だけ追ってみて」。
+- 保存宣言型: 見返したい気持ちを宣言する。「これは保存して何度も見るやつ」。
 
-【返信させる一文の型】
-- 二択型: 「〇〇派？△△派？」
-- 参加型: 「この曲で一番好きなパート、どこ？」
-- 記憶型: 「〇〇に沼った曲、覚えてる？」
-- 仲間探し型: 「〇〇推しの人、いる？」
+【質問形の型(6案のうち1〜2案だけ)】
+- 二択型: 二つから選ばせる。「〇〇派？△△派？」。
+- 参加型: 答えやすい問いかけ。「この曲で一番好きなパート、どこ？」。
+- 記憶型: 思い出を尋ねる。「〇〇に沼った曲、覚えてる？」。
+- 仲間探し型: 仲間に呼びかける。「〇〇推しの人、いる？」。
 
 【直近の投稿文】
 ユーザーが直近の投稿文と、直近に生成した案を渡す。同じ書き出し・同じ言い回し・同じ型の組み合わせを避ける。
@@ -86,30 +140,33 @@ _FIXED_INSTRUCTIONS = """
   不自然なら1行目と2行目に分けてよい。曲名の前に The などの余計な語を付けない。
 - タイトル・説明文・選ばれたグループ／メンバー／曲名に書かれていない事実(会場、アンコール、衣装、日付、出来事など)は書かない。
   分からないことは、見た印象や感情の言葉で表す。
-- 1回の依頼で12案を作り、その中から指定された数だけ、次の基準で良い案を選んで返す:
-  スクロールを止める力があるか / 自然な日本語か / 返信したくなるか / 他の案や直近の投稿と被っていないか。
+- 案ごとに指定される型の通りに作る。指定された型以外の型にしない。質問にしない型は、疑問の形にしない。
+- 全体で50字前後。改行を除いて60字以内にする。
+- 型ごとに2案ずつ作り、各型で良い方を1案選んで返す。選ぶ基準:
+  スクロールを止める力があるか / 自然な日本語か / 見返したくなる・反応したくなるか / 他の案や直近の投稿と被っていないか。
 """
 
 
-def build_schema(select_n: int) -> dict:
+def build_schema(slot_count: int) -> dict:
+    """slot_count 個の型それぞれについて DRAFT_PER_SLOT 案(案1・案2=1つ目の型、案3・案4=2つ目の型…)と、
+    各型で選んだ案の番号を返させる。"""
+    n_drafts = slot_count * DRAFT_PER_SLOT
     item = {
         "type": "object",
         "properties": {
-            "stop_type": {"type": "string", "description": "止める一文の型の名前"},
-            "reply_type": {"type": "string", "description": "返信させる一文の型の名前"},
-            "stop": {"type": "string", "description": "1行目: 止める一文"},
-            "reply": {"type": "string", "description": "2行目: 返信させる一文"},
+            "stop": {"type": "string", "description": "1行目"},
+            "reply": {"type": "string", "description": "2行目。1行で言い切るときは空文字"},
         },
-        "required": ["stop_type", "reply_type", "stop", "reply"],
+        "required": ["stop", "reply"],
     }
     return {
         "type": "object",
         "properties": {
-            "drafts": {"type": "array", "minItems": DRAFT_COUNT, "maxItems": DRAFT_COUNT, "items": item,
-                       "description": "作った12案(番号は1から)"},
-            "selected": {"type": "array", "minItems": select_n, "maxItems": select_n,
-                         "items": {"type": "integer", "minimum": 1, "maximum": DRAFT_COUNT},
-                         "description": f"drafts から選んだ良い{select_n}案の番号(1始まり)。良い順"},
+            "drafts": {"type": "array", "minItems": n_drafts, "maxItems": n_drafts, "items": item,
+                       "description": f"作った{n_drafts}案(番号は1から。{DRAFT_PER_SLOT}案ずつ、指定された型の順)"},
+            "selected": {"type": "array", "minItems": slot_count, "maxItems": slot_count,
+                         "items": {"type": "integer", "minimum": 1, "maximum": n_drafts},
+                         "description": f"各型で選んだ案の番号(1始まり)。型の順に{slot_count}個"},
         },
         "required": ["drafts", "selected"],
     }
@@ -269,10 +326,17 @@ def _prepare_song(song_title: str) -> tuple:
 def build_user_prompt(*, group_name: str, member_name: str, song_title: str, video_title: str,
                       recent_texts: list, group_mode: str, song_mode: str,
                       exemplars: list = (), generated: list = (), accepted: list = (), shown: list = (),
-                      select_n: int = CANDIDATE_COUNT) -> str:
+                      slots: list = ()) -> str:
     """group_mode: 'named'(グループ名あり) / 'none'(書かない)。 song_mode: 'named'(曲名あり) / 'none'(書かない)。"""
-    lines = [f"次の動画の投稿文を{DRAFT_COUNT}案作り、その中から良い{select_n}案を選んでください。", "",
-             "【動画の情報】", f"- YouTubeのタイトル: {video_title}"]
+    slots = list(slots) or assign_slots()
+    lines = [f"次の動画の投稿文を、型ごとに{DRAFT_PER_SLOT}案ずつ({len(slots) * DRAFT_PER_SLOT}案)作り、各型で良い方を1案選んでください。", "",
+             "【作る案と型(drafts の番号と型の対応。この通りに作る)】"]
+    for k, name in enumerate(slots):
+        first = k * DRAFT_PER_SLOT + 1
+        kind = "質問形(問いかけで終える)" if name in QUESTION_TYPES else "質問にしない(疑問の形にしない)"
+        desc = QUESTION_TYPES.get(name) or STATEMENT_TYPES.get(name) or ""
+        lines.append(f"- 案{first}〜案{first + DRAFT_PER_SLOT - 1} = {name}【{kind}】{desc}")
+    lines += ["", "【動画の情報】", f"- YouTubeのタイトル: {video_title}"]
     if group_mode == "named":
         lines.append(f"- グループ名: {group_name}(自然に入れる)")
     else:
@@ -332,7 +396,7 @@ def _explain_failure(message: str) -> str:
     return message
 
 
-def run_claude(system_prompt: str, user_prompt: str, model: str = DEFAULT_MODEL, select_n: int = CANDIDATE_COUNT) -> tuple:
+def run_claude(system_prompt: str, user_prompt: str, model: str = DEFAULT_MODEL, slot_count: int = CANDIDATE_COUNT) -> tuple:
     """claude -p を1回呼ぶ。(drafts, selected番号のリスト, total_cost_usd, 所要秒) を返す。失敗時は CaptionError。"""
     exe = find_claude_exe()
     if not exe:
@@ -340,7 +404,7 @@ def run_claude(system_prompt: str, user_prompt: str, model: str = DEFAULT_MODEL,
     cmd = [
         exe, "-p",
         "--output-format", "json",
-        "--json-schema", json.dumps(build_schema(select_n), ensure_ascii=False),
+        "--json-schema", json.dumps(build_schema(slot_count), ensure_ascii=False),
         "--system-prompt", system_prompt,
         "--tools", "",
         "--model", model,
@@ -427,14 +491,26 @@ def _name_alternatives(group_name: str, member_name: str) -> list:
 
 
 def evaluate_candidate(it: dict, *, group_name: str, member_name: str, group_mode: str, song_title: str,
-                       song_mode: str, forbidden: list, avoid_heads: set, seen: set) -> tuple:
-    """1案の違反を全部数える。(本文, 違反の理由のリスト) を返す。リストが空なら合格。"""
+                       song_mode: str, forbidden: list, avoid_heads: set, seen: set, slot_type: str = None) -> tuple:
+    """1案の違反を全部数える。(本文, 違反の理由のリスト) を返す。リストが空なら合格。
+    slot_type(割り当てられた型)があるときは、1行で言い切ってよく(2行目は空でよい)、質問形か否かが型と合っているかも確かめる。"""
     stop = str(it.get("stop") or "").strip()
     reply = str(it.get("reply") or "").strip()
-    text = stop + "\n" + reply
+    text = (stop + "\n" + reply) if reply else stop
     reasons = []
-    if not stop or not reply:
-        reasons.append("1行目か2行目が空")
+    if slot_type is None:
+        if not stop or not reply:
+            reasons.append("1行目か2行目が空")
+    else:
+        if not stop:
+            reasons.append("1行目か2行目が空")
+        if len(text.replace("\n", "")) > MAX_TEXT_CHARS:
+            reasons.append(f"長すぎる({MAX_TEXT_CHARS}字超)")
+        q = is_question_text(text)
+        if slot_type in QUESTION_TYPES and not q:
+            reasons.append("質問形の型なのに質問になっていない")
+        elif slot_type not in QUESTION_TYPES and q:
+            reasons.append("質問にしない型なのに質問になっている")
     if _HANGUL_RE.search(text) or _URL_RE.search(text) or "#" in text or "＃" in text or _EMOJI_RE.search(text):
         reasons.append("韓国語・URL・タグ・絵文字を含む")
     ntext = _norm(text)
@@ -492,19 +568,22 @@ def filter_candidates(items: list, *, group_name: str, group_mode: str, song_tit
 
 
 def pick_least_violating(pool: list, limit: int = CANDIDATE_COUNT) -> list:
+    """pool は [(本文, 違反の理由のリスト)] か [(本文, 違反の理由のリスト, 型)]。"""
     """全部の案が除外されたときの救済。違反の少ない順に最大 limit 案を、注意(warnings)つきで返す。
     韓国語・URL・タグ・絵文字・空行を含む案は、他に選べる案があるかぎり後回しにする。"""
     seen, uniq = set(), []
-    for text, reasons in pool:
+    for entry in pool:
+        text, reasons = entry[0], entry[1]
+        hook = entry[2] if len(entry) > 2 else ""
         k = _norm(text)
         if k in seen:
             continue
         seen.add(k)
         hard = sum(1 for r in reasons if _reason_key(r) in _HARD_REASONS)
-        uniq.append((hard, len(reasons), text, reasons))
+        uniq.append((hard, len(reasons), text, reasons, hook))
     uniq.sort(key=lambda x: (x[0] > 0, x[1], x[0]))
-    return [{"text": t, "stop_type": "", "reply_type": "", "warnings": [_reason_key(r) for r in rs]}
-            for _, _, t, rs in uniq[:limit]]
+    return [{"text": t, "stop_type": "", "reply_type": "", "hook_type": h, "warnings": [_reason_key(r) for r in rs]}
+            for _, _, t, rs, h in uniq[:limit]]
 
 
 # ───────────── 生成の本体・ジョブ(ポーリング用) ─────────────
@@ -513,33 +592,38 @@ def _reason_key(reason: str) -> str:
     return re.sub(r"\(.*\)$", "", reason)
 
 
-def generate_candidates(rules: str, model: str, ctx: dict, on_progress=None) -> dict:
+def generate_candidates(rules: str, model: str, ctx: dict, on_progress=None, slots: list = None) -> dict:
     """生成の本体(スレッド/テストの両方から呼ぶ)。
+    6案それぞれに型を割り当て(質問形は1〜2案、残りは質問にしない別々の型)、型ごとに2案ずつ作らせて、各型で良い方を採用する。
+    足りない型は、その型だけ追加で生成する(最大 MAX_EXTRA_ROUNDS 回)。
     ctx: group_name, member_name, song_title, video_title, recent_texts, group_mode, song_mode, exemplars, generated。
-    戻り値: {candidates, shortfall, cost, seconds, rounds, dropped}。1回目に失敗したら CaptionError。"""
+    戻り値: {candidates[{text, hook_type, stop_type, reply_type}], shortfall, cost, seconds, rounds, dropped, slots}。
+    1回目に失敗したら CaptionError。"""
     system_prompt = build_system_prompt(rules)
     forbidden = example_phrases_from_rules(rules)
     avoid = list(ctx.get("recent_texts") or []) + list(ctx.get("generated") or []) + list(ctx.get("shown") or [])
-    accepted: list = []
-    pool: list = []          # 除外された案(違反の理由つき)。全部落ちたときの救済に使う
+    avoid_heads = {_norm(x.split("\n")[0])[:7] for x in avoid if x}
+    avoid_heads.discard("")
+    slots = list(slots) if slots else assign_slots(CANDIDATE_COUNT)
+    got: dict = {}           # スロット番号 -> 採用した案
+    pool: list = []          # 除外された案(違反の理由・型つき)。全部落ちたときの救済に使う
     total_cost, total_secs, rounds = 0.0, 0.0, 0
     drop_counts: dict = {}
     for rnd in range(1 + MAX_EXTRA_ROUNDS):
-        need = CANDIDATE_COUNT - len(accepted)
-        if need <= 0:
+        missing = [i for i in range(len(slots)) if i not in got]
+        if not missing:
             break
         rounds += 1
         if on_progress:
             on_progress("生成中…" if rnd == 0 else f"足りない案を追加で生成中…({rnd}/{MAX_EXTRA_ROUNDS})")
-        select_n = need if rnd == 0 else min(DRAFT_COUNT, need + 2)
+        want = [slots[i] for i in missing]
         prompt = build_user_prompt(
             group_name=ctx["group_name"], member_name=ctx["member_name"], song_title=ctx["song_title"],
             video_title=ctx["video_title"], recent_texts=ctx["recent_texts"], group_mode=ctx["group_mode"],
             song_mode=ctx["song_mode"], exemplars=ctx.get("exemplars") or [], generated=ctx.get("generated") or [],
-            shown=ctx.get("shown") or [],
-            accepted=[c["text"] for c in accepted], select_n=select_n)
+            shown=ctx.get("shown") or [], accepted=[c["text"] for c in got.values()], slots=want)
         try:
-            drafts, selected, cost, secs = run_claude(system_prompt, prompt, model, select_n)
+            drafts, selected, cost, secs = run_claude(system_prompt, prompt, model, len(want))
         except CaptionError:
             if rnd == 0:
                 raise
@@ -547,29 +631,34 @@ def generate_candidates(rules: str, model: str, ctx: dict, on_progress=None) -> 
             break
         total_cost += float(cost or 0)
         total_secs += secs
-        picked, seen_idx = [], set()
-        for n in selected:
-            if 1 <= n <= len(drafts) and n not in seen_idx:
-                seen_idx.add(n)
-                picked.append(drafts[n - 1])
-        if not picked:
-            picked = drafts[:select_n]
-        kept, dropped = filter_candidates(
-            picked, group_name=ctx["group_name"], group_mode=ctx["group_mode"], song_title=ctx["song_title"],
-            song_mode=ctx["song_mode"], forbidden=forbidden, avoid_texts=avoid, accepted=[c["text"] for c in accepted],
-            member_name=ctx.get("member_name") or "")
-        accepted = (accepted + kept)[:CANDIDATE_COUNT]
         round_counts: dict = {}
-        for _, text, reasons in dropped:
-            pool.append((text, reasons))
-            for reason in reasons:
-                k = _reason_key(reason)
-                round_counts[k] = round_counts.get(k, 0) + 1
-                drop_counts[k] = drop_counts.get(k, 0) + 1
-        logger.info("caption_ai: round=%d 選定=%d 採用=%d 除外=%d %s", rnd + 1, len(picked), len(kept), len(dropped),
+        for k, slot_idx in enumerate(missing):
+            lo = k * DRAFT_PER_SLOT
+            pair = list(range(lo, min(lo + DRAFT_PER_SLOT, len(drafts))))
+            chosen = [s - 1 for s in selected if (s - 1) in pair]
+            order = chosen[:1] + [i for i in pair if i not in chosen[:1]]
+            for di in order:
+                it = drafts[di]
+                if not isinstance(it, dict):
+                    continue
+                text, reasons = evaluate_candidate(
+                    it, group_name=ctx["group_name"], member_name=ctx.get("member_name") or "",
+                    group_mode=ctx["group_mode"], song_title=ctx["song_title"], song_mode=ctx["song_mode"],
+                    forbidden=forbidden, avoid_heads=avoid_heads,
+                    seen={_norm(c["text"]) for c in got.values()}, slot_type=slots[slot_idx])
+                if reasons:
+                    pool.append((text, reasons, slots[slot_idx]))
+                    for reason in reasons:
+                        key = _reason_key(reason)
+                        round_counts[key] = round_counts.get(key, 0) + 1
+                        drop_counts[key] = drop_counts.get(key, 0) + 1
+                    _debug_dump([f"[round {rnd + 1}] {slots[slot_idx]} 除外 {' + '.join(reasons)}: " + text.replace("\n", " / ")])
+                    continue
+                got[slot_idx] = {"text": text, "hook_type": slots[slot_idx], "stop_type": "", "reply_type": ""}
+                break
+        logger.info("caption_ai: round=%d 型=%s 採用=%d/%d 除外=%s", rnd + 1, ",".join(want), len(got), len(slots),
                     json.dumps(round_counts, ensure_ascii=False))
-        _debug_dump([f"[round {rnd + 1}] 除外 {' + '.join(reasons)}: " + text.replace("\n", " / ")
-                     for _, text, reasons in dropped])
+    accepted = [got[i] for i in sorted(got)]
     shortfall = None
     if not accepted:
         # 0案では終わらせない: 違反の一番少ない案を、注意つきで最大6案まで出す(手直しできる)
@@ -579,12 +668,12 @@ def generate_candidates(rules: str, model: str, ctx: dict, on_progress=None) -> 
         shortfall = "ルールに合わない部分があります。各案の注意を見て、手直ししてください"
         logger.warning("caption_ai: 全案が除外されたため、違反の少ない%d案を注意つきで表示", len(accepted))
         return {"candidates": accepted, "shortfall": shortfall, "cost": round(total_cost, 4),
-                "seconds": round(total_secs, 1), "rounds": rounds, "dropped": drop_counts, "fallback": True}
+                "seconds": round(total_secs, 1), "rounds": rounds, "dropped": drop_counts, "fallback": True, "slots": slots}
     if len(accepted) < CANDIDATE_COUNT:
         shortfall = f"{len(accepted)}案しか作れませんでした"
         logger.warning("caption_ai: %s (追加生成%d回後)", shortfall, rounds - 1)
     return {"candidates": accepted, "shortfall": shortfall, "cost": round(total_cost, 4),
-            "seconds": round(total_secs, 1), "rounds": rounds, "dropped": drop_counts}
+            "seconds": round(total_secs, 1), "rounds": rounds, "dropped": drop_counts, "slots": slots}
 
 
 _JOBS: dict = {}

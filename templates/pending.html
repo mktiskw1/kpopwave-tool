@@ -1605,6 +1605,7 @@ function editTag(id, btn) {
 // ── 投稿文の候補生成(Claude Code CLI。ボタンを押したときだけ動く) ───────────────────
 var captionPollTimer = null;
 var captionRunId = 0;
+var chosenCaption = null;   // 選んだ候補 {type, text}。承認のときに型を記録する
 var shownCaptionTexts = [];   // いま画面に出している案(「もう一度生成」で、これらと違う案を作らせる)
 
 function resetCaptionUi() {
@@ -1615,6 +1616,7 @@ function resetCaptionUi() {
   var t = document.getElementById('tag-caption-text'); if (t) t.value = '';
   var l = document.getElementById('tag-caption-list'); if (l) l.innerHTML = '';
   shownCaptionTexts = [];
+  chosenCaption = null;
   var s = document.getElementById('tag-caption-song-input'); if (s) s.value = '';
   var st = document.getElementById('tag-caption-status'); if (st) st.textContent = '';
   var b = document.getElementById('tag-caption-btn'); if (b) { b.disabled = false; b.textContent = '✨ 候補を生成'; }
@@ -1709,6 +1711,7 @@ function renderCaptionCandidates(cands, seconds, shortfall) {
   var ta = document.getElementById('tag-caption-text');
   var btn = document.getElementById('tag-caption-btn');
   list.innerHTML = '';
+  chosenCaption = null;
   shownCaptionTexts = cands.map(function(c) { return c.text; });
   cands.forEach(function(c) {
     var label = document.createElement('label');
@@ -1717,12 +1720,19 @@ function renderCaptionCandidates(cands, seconds, shortfall) {
     var radio = document.createElement('input');
     radio.type = 'radio'; radio.name = 'tag-caption-choice'; radio.className = 'form-check-input me-2';
     radio.addEventListener('change', function() {
+      chosenCaption = {type: c.hook_type || '', text: c.text};
       ta.value = c.text;
       ta.classList.remove('d-none');
       document.getElementById('tag-caption-note').classList.remove('d-none');
     });
     label.appendChild(radio);
     label.appendChild(document.createTextNode(c.text));
+    if (c.hook_type) {
+      var tag = document.createElement('div');
+      tag.style.cssText = 'font-size:.7rem;color:#777;margin-top:2px';
+      tag.textContent = '型: ' + c.hook_type;
+      label.appendChild(tag);
+    }
     if (c.warnings && c.warnings.length) {
       var warn = document.createElement('div');
       warn.style.cssText = 'font-size:.72rem;color:#c62828;margin-top:2px';
@@ -1858,7 +1868,8 @@ function confirmTagModal(withPriority) {
     var captionEl = document.getElementById('tag-caption-text');
     var chosenSummary = captionEl && !captionEl.classList.contains('d-none') ? captionEl.value.trim() : '';
     doApprove(pendingApproveId, pendingApproveBtn, groupName, memberName, isComeback, replyText, replyUrl,
-              noGroup, !!withPriority, chosenSummary);
+              noGroup, !!withPriority, chosenSummary,
+              chosenSummary && chosenCaption ? chosenCaption.type : '', chosenSummary && chosenCaption ? chosenCaption.text : '');
   }
   // doApprove/doSaveTagへは値渡し済みなので、ここでグローバル変数をリセットしても
   // 実行中の処理には影響しない。リセットし忘れると、モーダルを閉じずに終えた場合に
@@ -2028,7 +2039,7 @@ function applyBulkGuess() {
   next();
 }
 
-function doApprove(id, btn, groupName, memberName, isComeback, replyText, replyUrl, noGroup, priority, chosenSummary) {
+function doApprove(id, btn, groupName, memberName, isComeback, replyText, replyUrl, noGroup, priority, chosenSummary, captionType, captionOriginal) {
   btn.disabled = true;
   const orig = btn.innerHTML;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
@@ -2042,6 +2053,8 @@ function doApprove(id, btn, groupName, memberName, isComeback, replyText, replyU
       thread_reply_text: replyText || '',
       thread_reply_url: replyUrl || '',
       summary: chosenSummary || '',
+      caption_type: captionType || '',
+      caption_original: captionOriginal || '',
     })
   })
   .then(function(r) { return r.json(); })

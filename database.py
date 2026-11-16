@@ -112,6 +112,10 @@ class Article(db.Model):
     # 自動カット(autocut.py): processing(処理中) / auto(自動カット済み) / full(カット不要と推定) /
     # skipped(推定できず、カットしていない) / recut(自動カットを元の動画から切り直した)。手動の切り取りはNULL。
     # original_video_path は自動カット前の元の動画(切り直し用)。投稿済み・却下になったら手放し、孤立ファイルとして回収する。
+    # 承認時に選んだ投稿文の候補の型(caption_ai.ALL_TYPES)。手入力のときは「手入力」。候補を使わなかった(従来の自動組み立て)ときはNULL。
+    # caption_edited は、選んだ候補を手直ししたか(手直ししたら型の成績とは言い切れない)。
+    caption_type = db.Column(db.String(20), nullable=True, index=True)
+    caption_edited = db.Column(db.Boolean, nullable=True)
     auto_cut_status = db.Column(db.String(12), nullable=True, index=True)
     auto_cut_note = db.Column(db.String(300), nullable=True)
     original_video_path = db.Column(db.String(500), nullable=True)
@@ -417,6 +421,8 @@ class DeletedPostLog(db.Model):
     orientation = db.Column(db.String(10), nullable=True)
     video_duration = db.Column(db.Float, nullable=True)
     clip_method = db.Column(db.String(20), nullable=True)
+    caption_type = db.Column(db.String(20), nullable=True)      # 投稿文の型(Article.caption_type と同じ。分類は caption_ai.caption_kind)
+    caption_question = db.Column(db.Boolean, nullable=True)     # 投稿文が質問形か
 
 
 def _was_posted(article) -> bool:
@@ -425,6 +431,15 @@ def _was_posted(article) -> bool:
     if article.status == "posted":
         return True
     return article.status == "queued" and article.posted_at is not None
+
+
+def _caption_log_fields(article) -> dict:
+    """削除ログに残す投稿文の分類(型・質問形か)。失敗しても削除は続ける。"""
+    try:
+        from caption_ai import caption_kind, is_question_text
+        return {"caption_type": caption_kind(article)[:20], "caption_question": bool(is_question_text(article.summary or ""))}
+    except Exception:
+        return {}
 
 
 def record_deleted_post(article, reason: str) -> bool:
@@ -493,6 +508,7 @@ def record_deleted_post(article, reason: str) -> bool:
             orientation=article.orientation,
             video_duration=article.video_duration,
             clip_method=article.clip_method,
+            **_caption_log_fields(article),
         ))
         return True
     except Exception:

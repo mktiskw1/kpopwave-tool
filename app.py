@@ -221,6 +221,8 @@ def _migrate_db():
         ("auto_cut_status", "VARCHAR(12)"),
         ("auto_cut_note", "VARCHAR(300)"),
         ("original_video_path", "VARCHAR(500)"),
+        ("caption_type", "VARCHAR(20)"),
+        ("caption_edited", "BOOLEAN"),
     ]
     with db.engine.connect() as conn:
         for col, typedef in article_cols:
@@ -242,7 +244,8 @@ def _migrate_db():
     existing_dpl = {c["name"] for c in inspect(db.engine).get_columns("deleted_post_log")}
     with db.engine.connect() as conn:
         for col, typedef in (("import_source", "VARCHAR(20)"), ("orientation", "VARCHAR(10)"),
-                             ("video_duration", "FLOAT"), ("clip_method", "VARCHAR(20)")):
+                             ("video_duration", "FLOAT"), ("clip_method", "VARCHAR(20)"),
+                             ("caption_type", "VARCHAR(20)"), ("caption_question", "BOOLEAN")):
             if col not in existing_dpl:
                 conn.execute(text(f"ALTER TABLE deleted_post_log ADD COLUMN {col} {typedef}"))
                 conn.commit()
@@ -1334,6 +1337,16 @@ def approve_article(id):
         article.summary = chosen_summary
         article.summary_is_manual = True
         article.error_message = None
+        # 選んだ候補の型を記録する(型ごとの成績の集計用)。候補を選ばずに入力した文は「手入力」。手直ししたかも残す
+        cap_type = (tag_data.get("caption_type") or "").strip()
+        cap_orig = (tag_data.get("caption_original") or "").strip()
+        import caption_ai as _cai
+        if cap_type in _cai.ALL_TYPES and cap_orig:
+            article.caption_type = cap_type
+            article.caption_edited = (cap_orig != chosen_summary)
+        else:
+            article.caption_type = "手入力"
+            article.caption_edited = None
 
     if group_name:
         group_id, member_id = _resolve_group_and_member(group_name, member_name)
@@ -1478,6 +1491,7 @@ _ARTICLE_RESTORE_FIELDS = [
     "clip_method", "highlight_start", "highlight_end", "highlight_heatmap",
     "import_source", "orientation", "video_duration",
     "cut_est_start", "cut_est_end", "cut_start", "cut_end", "auto_cut_status", "auto_cut_note",
+    "caption_type", "caption_edited",
 ]
 _ARTICLE_DATETIME_FIELDS = {
     "published_at", "scheduled_at", "posted_at", "created_at", "engagement_fetched_at", "priority_requested_at",
@@ -3663,6 +3677,53 @@ def autocut_status(article_id):
     if a is None:
         return jsonify({"ok": False}), 404
     return jsonify({"ok": True, "status": a.auto_cut_status, "note": a.auto_cut_note})
+
+
+@app.route("/api/caption-stats")
+def caption_stats():
+    """投稿文の型ごと・質問形か否かごとの成績の集計。7日時点の値(最新の投稿サイクル)を使う。削除した投稿は、削除ログに
+    残した最終値を使う(型を記録し始めた分から)。型の記録がない過去の投稿は「自動組み立て」(従来の決定的な組み立て)や
+    「手入力・手直し」に分類し、質問形かどうかは本文から判定する。"""
+    import statistics
+    from caption_ai import caption_kind, is_question_text
+    from database import DeletedPostLog, PostStat
+
+    threshold = int(Setting.get("buzz_threshold_likes", "200") or "200")
+    rows = []   # (分類, 質問形か, いいね, 閲覧, 由来)
+    in_flight = 0
+    for a in Article.query.filter(Article.status == "posted", Article.content_type == "video",
+                                  Article.summary.isnot(None), Article.summary != "").all():
+        fin = (PostStat.query.filter_by(article_id=a.id, is_final=True, day_index=7)
+               .order_by(PostStat.fetched_at.asc()).all())
+        if not fin or (a.posted_at and fin[-1].fetched_at - timedelta(days=7) < a.posted_at - timedelta(days=1)):
+            in_flight += 1     # 最新の投稿サイクルの7日値がまだ無い
+            continue
+        last = fin[-1]
+        rows.append((caption_kind(a), is_question_text(a.summary), last.likes or 0, last.views or 0, "残っている投稿"))
+    for lg in DeletedPostLog.query.filter(DeletedPostLog.caption_type.isnot(None), DeletedPostLog.final_likes.isnot(None)).all():
+        rows.append((lg.caption_type, bool(lg.caption_question), lg.final_likes or 0, lg.final_views or 0, "削除した投稿"))
+
+    def summarize(items):
+        if not items:
+            return {"n": 0}
+        likes = [r[2] for r in items]
+        views = [r[3] for r in items]
+        return {"n": len(items), "likes_median": int(statistics.median(likes)), "views_median": int(statistics.median(views)),
+                "buzz_rate": round(sum(1 for x in likes if x >= threshold) / len(items), 3)}
+
+    by_type, by_q = {}, {}
+    for r in rows:
+        by_type.setdefault(r[0], []).append(r)
+        by_q.setdefault("質問で終わる" if r[1] else "質問以外", []).append(r)
+    return jsonify({
+        "ok": True,
+        "by_type": {k: summarize(v) for k, v in sorted(by_type.items(), key=lambda kv: -len(kv[1]))},
+        "by_question": {k: summarize(v) for k, v in by_q.items()},
+        "in_flight_not_yet_7days": in_flight,
+        "buzz_threshold_likes": threshold,
+        "note": "n が小さい間は参考値。削除した投稿の型は、記録を始めてからの分だけ入る(それ以前に削除した投稿の文面は残っていない)ので、"
+                "「残っている投稿」の成績は良い方に偏る。買いかぶらないこと。",
+    })
 
 
 @app.route("/api/cut-accuracy")
