@@ -3660,8 +3660,15 @@ def cut_accuracy():
             return {"n": 0}
         ds = [abs(a.cut_start - a.cut_est_start) for a in rows]
         de = [abs(a.cut_end - a.cut_est_end) for a in rows]
+        # 向きつきの差(最終値 - 推定値)。開始が正なら「推定より後ろで切り始めた(推定が早すぎ)」、
+        # 終了が正なら「推定より後ろで切り終えた(推定が早く切りすぎ)」、負ならその逆(推定が遅すぎ)
+        sd = [a.cut_start - a.cut_est_start for a in rows]
+        ed = [a.cut_end - a.cut_est_end for a in rows]
         return {
             "n": len(rows),
+            "start_signed_median": round(statistics.median(sd), 2), "end_signed_median": round(statistics.median(ed), 2),
+            "start_final_later": sum(1 for x in sd if x > 1), "start_final_earlier": sum(1 for x in sd if x < -1),
+            "end_final_later": sum(1 for x in ed if x > 1), "end_final_earlier": sum(1 for x in ed if x < -1),
             "start_diff_median": round(statistics.median(ds), 2), "end_diff_median": round(statistics.median(de), 2),
             "start_within_3s": round(sum(1 for x in ds if x <= 3) / len(rows), 3),
             "end_within_3s": round(sum(1 for x in de if x <= 3) / len(rows), 3),
@@ -3690,7 +3697,15 @@ def cut_accuracy():
             "recut_vs_estimate": stats(recut),
         },
         "manual_with_estimate": stats(manual_est),
-        "note": "accept_rate = 切り直さずに承認された割合。recut_vs_estimate = 切り直した動画で、推定と最終値の差(秒)",
+        "recut_items": [{
+            "article_id": a.id, "title": (a.title or "")[:60],
+            "group": (db.session.get(Group, a.group_id).name if a.group_id and db.session.get(Group, a.group_id) else None),
+            "member": (db.session.get(Member, a.member_id).name if a.member_id and db.session.get(Member, a.member_id) else None),
+            "est_start": a.cut_est_start, "est_end": a.cut_est_end, "final_start": a.cut_start, "final_end": a.cut_end,
+            "start_diff": round(a.cut_start - a.cut_est_start, 1), "end_diff": round(a.cut_end - a.cut_est_end, 1),
+            "channel": a.channel_name,
+        } for a in recut],
+        "note": "accept_rate = 切り直さずに承認された割合。recut_vs_estimate = 切り直した動画で、推定と最終値の差(秒)。*_signed_median = 最終値 - 推定値の中央値(正=推定より後ろ、負=推定より前)",
     })
 
 
