@@ -2247,7 +2247,7 @@ def quick_setting():
     data = request.get_json(silent=True) or {}
     key = data.get("key", "")
     value = str(data.get("value", ""))
-    _allowed = {"auto_like_comments"}
+    _allowed = {"auto_like_comments", "autocut_enabled"}   # autocut_enabled=false で、新しい取り込みの自動カットを止める
     if key not in _allowed:
         return jsonify({"ok": False, "error": "invalid key"}), 400
     Setting.set(key, value)
