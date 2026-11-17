@@ -34,6 +34,25 @@ def run_tool():
         messagebox.showerror("エラー", f"起動に失敗しました:\n{e}")
 
 
+PARTNER_DIR = os.path.join(os.path.dirname(PROJECT_DIR), "partner")
+
+
+def run_jin():
+    """ジン(事業パートナーAI)の画面を起動する: partner フォルダで Claude Code(claude コマンド)を新しいコンソールで開く"""
+    if not os.path.isdir(PARTNER_DIR):
+        messagebox.showerror("エラー", f"partner フォルダが見つかりません:\n{PARTNER_DIR}")
+        return
+    try:
+        subprocess.Popen(
+            'cmd.exe /k claude',
+            cwd=PARTNER_DIR,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+        set_status("ジンの画面を起動しました")
+    except Exception as e:
+        messagebox.showerror("エラー", f"起動に失敗しました:\n{e}")
+
+
 CHROME_PATHS = [
     os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -404,6 +423,7 @@ BUTTONS = [
     ("④ 管理画面を開く",    "🌐  Chrome で localhost:5000 を開く",     open_admin, "#2d1b69"),
     ("⑤ GitHub 保存",      "⬆  add → commit → push",                 git_push,   "#1a472a"),
     ("⑥ GitHub 取得",      "⬇  git pull",                            git_pull,   "#1a472a"),
+    ("⑦ ジン起動",          "💬  partner フォルダで Claude Code を開く", run_jin,    "#5a2d0c"),
 ]
 
 frame = tk.Frame(root, bg=BG, padx=20, pady=15)
