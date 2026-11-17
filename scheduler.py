@@ -1349,14 +1349,15 @@ def setup_scheduler(app):
         misfire_grace_time=_INTERVAL_MISFIRE_GRACE,
     )
 
-    scheduler.add_job(
-        _collect_comments_job,
-        IntervalTrigger(minutes=30),
-        args=[app],
-        id="collect_comments",
-        replace_existing=True,
-        misfire_grace_time=_INTERVAL_MISFIRE_GRACE,
-    )
+    # コメントの定期取得は停止(2026-11-17、コメント管理は使わないため)。再開するときは下のコメントを外す。
+    # scheduler.add_job(
+    #     _collect_comments_job,
+    #     IntervalTrigger(minutes=30),
+    #     args=[app],
+    #     id="collect_comments",
+    #     replace_existing=True,
+    #     misfire_grace_time=_INTERVAL_MISFIRE_GRACE,
+    # )
 
     scheduler.add_job(
         _early_engagement_job,
