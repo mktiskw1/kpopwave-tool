@@ -34,21 +34,42 @@ def run_tool():
         messagebox.showerror("エラー", f"起動に失敗しました:\n{e}")
 
 
-PARTNER_DIR = os.path.join(os.path.dirname(PROJECT_DIR), "partner")
+JIN_CHAT_DIR = os.path.join(os.path.dirname(PROJECT_DIR), "jin-chat")
+JIN_CHAT_URL = "http://127.0.0.1:5050"
+
+
+def _jin_chat_running():
+    """ジン画面のサーバー(ポート5050)がすでに動いているか"""
+    try:
+        with urllib.request.urlopen(JIN_CHAT_URL, timeout=2):
+            return True
+    except Exception:
+        return False
 
 
 def run_jin():
-    """ジン(事業パートナーAI)の画面を起動する: partner フォルダで Claude Code(claude コマンド)を新しいコンソールで開く"""
-    if not os.path.isdir(PARTNER_DIR):
-        messagebox.showerror("エラー", f"partner フォルダが見つかりません:\n{PARTNER_DIR}")
+    """ジン(事業パートナーAI)の画面を起動する。すでに動いていればブラウザで開くだけ。
+    止まっていれば jin-chat の start_jin_chat.bat を新しいコンソールで起動する(ブラウザはbatが開く)。
+    黒い画面を閉じるとサーバーが止まる。"""
+    if _jin_chat_running():
+        chrome = next((p for p in CHROME_PATHS if os.path.exists(p)), None)
+        if chrome:
+            subprocess.Popen([chrome, JIN_CHAT_URL])
+        else:
+            webbrowser.open(JIN_CHAT_URL)
+        set_status("ジンの画面はすでに動いています(ブラウザで開きました)")
+        return
+    bat_path = os.path.join(JIN_CHAT_DIR, "start_jin_chat.bat")
+    if not os.path.exists(bat_path):
+        messagebox.showerror("エラー", f"start_jin_chat.bat が見つかりません:\n{bat_path}")
         return
     try:
         subprocess.Popen(
-            'cmd.exe /k claude',
-            cwd=PARTNER_DIR,
+            f'cmd.exe /c "{bat_path}"',
+            cwd=JIN_CHAT_DIR,
             creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
-        set_status("ジンの画面を起動しました")
+        set_status("ジンの画面を起動しました(黒い画面は閉じないでください)")
     except Exception as e:
         messagebox.showerror("エラー", f"起動に失敗しました:\n{e}")
 
@@ -423,7 +444,7 @@ BUTTONS = [
     ("④ 管理画面を開く",    "🌐  Chrome で localhost:5000 を開く",     open_admin, "#2d1b69"),
     ("⑤ GitHub 保存",      "⬆  add → commit → push",                 git_push,   "#1a472a"),
     ("⑥ GitHub 取得",      "⬇  git pull",                            git_pull,   "#1a472a"),
-    ("⑦ ジン起動",          "💬  partner フォルダで Claude Code を開く", run_jin,    "#5a2d0c"),
+    ("⑦ ジン起動",          "💬  ジンの画面(localhost:5050)を起動して開く", run_jin,    "#5a2d0c"),
 ]
 
 frame = tk.Frame(root, bg=BG, padx=20, pady=15)
