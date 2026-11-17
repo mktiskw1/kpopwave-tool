@@ -556,9 +556,6 @@
   <a href="{{ url_for('text_post') }}" class="{% if request.endpoint=='text_post' %}active{% endif %}">
     <i class="bi bi-pencil-square"></i> テキスト投稿
   </a>
-  <a href="{{ url_for('comments_page') }}" class="{% if request.endpoint=='comments_page' %}active{% endif %}">
-    <i class="bi bi-chat-dots-fill"></i> コメント{% if unread_comments_count > 0 %} <span class="badge badge-pending" style="font-size:.65rem;vertical-align:middle">{{ unread_comments_count }}</span>{% endif %}
-  </a>
   <a href="{{ url_for('follow_candidates') }}" class="{% if request.endpoint=='follow_candidates' %}active{% endif %}">
     <i class="bi bi-person-plus-fill"></i> フォロー
   </a>
@@ -636,14 +633,6 @@
         <li class="nav-item">
           <a class="nav-link {% if request.endpoint=='text_post' %}active{% endif %}" href="{{ url_for('text_post') }}">
             <i class="bi bi-pencil-square"></i> テキスト投稿
-          </a>
-        </li>
-        <li class="nav-item">
-          <a class="nav-link {% if request.endpoint=='comments_page' %}active{% endif %}" href="{{ url_for('comments_page') }}">
-            <i class="bi bi-chat-dots-fill"></i> コメント管理
-            {% if unread_comments_count > 0 %}
-            <span class="badge badge-pending ms-1">{{ unread_comments_count }}</span>
-            {% endif %}
           </a>
         </li>
         <li class="nav-item">
