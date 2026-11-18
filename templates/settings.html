@@ -293,6 +293,14 @@
           </div>
           <div class="d-flex gap-3 flex-wrap">
             <div>
+              <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">グループの点数のつけ方</label>
+              <select class="form-select" name="group_score_metric" style="max-width:260px">
+                <option value="buzz_rate" {{ 'selected' if settings.group_score_metric == 'buzz_rate' }}>バズ率（7日でバズ判定いいね数以上の割合）</option>
+                <option value="views" {{ 'selected' if settings.group_score_metric == 'views' }}>閲覧数の中央値（従来）</option>
+              </select>
+              <div class="form-text" style="font-size:.7rem">バズ率にすると、いいねが付くグループに多く枠が配られます</div>
+            </div>
+            <div>
               <label class="form-label" style="font-size:.78rem;color:var(--text-muted)">評価に使う日数</label>
               <input type="number" class="form-control" name="group_score_lookback_days" min="1" max="365"
                      value="{{ settings.group_score_lookback_days }}" style="max-width:110px">

@@ -2111,6 +2111,7 @@ def settings():
         for _key, _val in _gb_values.items():
             Setting.set(_key, _val)
         Setting.set("group_balance_enabled", "true" if request.form.get("group_balance_enabled") else "false")
+        Setting.set("group_score_metric", "views" if request.form.get("group_score_metric") == "views" else "buzz_rate")
 
         Setting.set("caption_rules", (request.form.get("caption_rules") or "").strip())
         import caption_ai as _cai
@@ -2204,6 +2205,7 @@ def settings():
         "buzz_threshold_likes": Setting.get("buzz_threshold_likes", "200"),
         "buzz_repost_kill_likes": Setting.get("buzz_repost_kill_likes", "50"),
         "group_balance_enabled": group_balance.get_config()["enabled"],
+        "group_score_metric": group_balance.get_config()["metric"],
         "group_score_lookback_days": Setting.get("group_score_lookback_days", group_balance.DEFAULTS["group_score_lookback_days"]),
         "group_score_smoothing": Setting.get("group_score_smoothing", group_balance.DEFAULTS["group_score_smoothing"]),
         "group_score_cap_ratio": Setting.get("group_score_cap_ratio", group_balance.DEFAULTS["group_score_cap_ratio"]),

@@ -1,8 +1,10 @@
 """キューの投稿順をグループごとに自動調整する(偏り防止＋閲覧数に応じた頻度調整)と、グループ別のストック計画。
 
-- 評価値: 直近N日に初回投稿した動画の閲覧数の中央値。本数が少ないグループは全体の中央値に寄せる(平滑化)。
-- 配分の重み: 評価値の平方根(差を弱めに反映)。目標の割合 = 重み×手動補正×カムバック補正 を合計で割り、
-  手動補正が0でないグループには最低割合を保証する。
+- 評価値(設定 group_score_metric): 既定は buzz_rate = 直近N日に初回投稿した動画のうち、7日時点のいいねが
+  バズ判定(buzz_threshold_likes)以上になった割合。views にすると従来の「閲覧数の中央値」。
+  本数が少ないグループは全体に寄せる(平滑化)。
+- 配分の重み: buzz_rate は平滑化したバズ率そのもの(全体のバズ率の下限〜上限倍率に収める)。views は評価値の平方根。
+  目標の割合 = 重み×手動補正×カムバック補正 を合計で割り、手動補正が0でないグループには最低割合を保証する。
 - 選び方(投稿ジョブが次の記事を決めるとき): 優先 → バズ再投稿(従来どおり) → 直近14日の実際の割合が
   目標より最も足りないグループの、キューで最も古い記事。直近のグループ連続は避ける。
 - 動画以外(テキスト投稿など)・動画以外のアカウント(田中アカウント等)は対象外で、従来どおりの順番で投稿する。
@@ -26,13 +28,16 @@ NONE_LABEL = "グループなし"
 CATCHALL_NAME = "その他"          # 名簿の受け皿グループ。「グループなし」と同様に評価値の重み付けの対象外(最低割合で固定)
 ACTUAL_WINDOW_DAYS = 14          # 「実際の割合」を数える期間
 FINAL_DAYS = 7                   # 閲覧数が確定するまでの日数
+BUZZ_FLOOR_RATIO = 0.1           # バズ率の重みの下限 = 全体のバズ率 × この値(0%のグループの重みが0にならないように)
 
 # 設定キーと既定値(文字列で保存する)
 DEFAULTS = {
     "group_balance_enabled": "true",
     "group_score_lookback_days": "60",
     "group_score_smoothing": "5",
-    "group_score_cap_ratio": "3",      # 評価値の上限 = 全体の中央値 × この倍率
+    "group_score_cap_ratio": "3",      # 評価値の上限 = 全体(の中央値/バズ率) × この倍率
+    "group_score_metric": "buzz_rate", # buzz_rate(バズ率)か views(閲覧数の中央値)
+    "buzz_threshold_likes": "200",     # バズ判定のいいね数(自動削除と同じ設定)
     "group_min_share": "5",            # パーセント
     "group_spacing": "2",
     "comeback_boost_factor": "1.5",
@@ -72,6 +77,8 @@ def get_config() -> dict:
         "lookback_days": _num("group_score_lookback_days", int, 1, 365),
         "smoothing": _num("group_score_smoothing", float, 0.0, 1000.0),
         "cap_ratio": _num("group_score_cap_ratio", float, 1.0, 100.0),
+        "metric": "views" if (Setting.get("group_score_metric", DEFAULTS["group_score_metric"]) or "").strip() == "views" else "buzz_rate",
+        "buzz_threshold": _num("buzz_threshold_likes", int, 1),
         "min_share": _num("group_min_share", float, 0.0, 50.0) / 100.0,
         "spacing": _num("group_spacing", int, 0, 10),
         "boost_factor": _num("comeback_boost_factor", float, 1.0, 10.0),
@@ -99,7 +106,7 @@ def _account_filter(query, account_id):
 # ───────────── 評価値 ─────────────
 
 def _initial_cycle_samples(account_id: int, now: datetime, lookback_days: int, name_to_id: dict) -> dict:
-    """グループごとの「初回投稿サイクルの閲覧数(確定値)」のリスト。再投稿のサイクルは使わない。
+    """グループごとの「初回投稿サイクルの(閲覧数, いいね数)(確定値)」のリスト(いいねが不明なら None)。再投稿のサイクルは使わない。
     - 残っている記事: 最初の確定値(post_stats is_final)。再投稿済みの記事も、再投稿より前に確定した
       初回サイクルの値だけを使う。
     - 削除された記事(deleted_post_log): buzz_repost_count=1 の記録(手動削除で7日未満のものは除外)。"""
@@ -111,12 +118,12 @@ def _initial_cycle_samples(account_id: int, now: datetime, lookback_days: int, n
     first_final = {}
     if arts:
         rows = (
-            db.session.query(PostStat.article_id, PostStat.fetched_at, PostStat.day_index, PostStat.views)
+            db.session.query(PostStat.article_id, PostStat.fetched_at, PostStat.day_index, PostStat.views, PostStat.likes)
             .filter(PostStat.is_final.is_(True), PostStat.article_id.in_(list(arts)))
             .order_by(PostStat.fetched_at.asc()).all()
         )
-        for aid, fetched_at, day_index, views in rows:
-            first_final.setdefault(aid, (fetched_at, day_index or FINAL_DAYS, views))
+        for aid, fetched_at, day_index, views, likes in rows:
+            first_final.setdefault(aid, (fetched_at, day_index or FINAL_DAYS, views, likes))
 
     for aid, art in arts.items():
         repost = art.buzz_repost_count or 1
@@ -125,12 +132,12 @@ def _initial_cycle_samples(account_id: int, now: datetime, lookback_days: int, n
             if art.posted_at is None or art.posted_at < cutoff:
                 continue
             if ff is not None and ff[2] is not None:
-                views = ff[2]
+                views, likes = ff[2], ff[3]
             elif art.view_count is not None and art.posted_at <= now - timedelta(days=FINAL_DAYS):
-                views = art.view_count
+                views, likes = art.view_count, art.like_count
             else:
                 continue                              # まだ確定していない
-            out[art.group_id].append(int(views))
+            out[art.group_id].append((int(views), None if likes is None else int(likes)))
         else:
             if ff is None or ff[2] is None or art.posted_at is None:
                 continue
@@ -138,7 +145,7 @@ def _initial_cycle_samples(account_id: int, now: datetime, lookback_days: int, n
                 continue                              # 確定値が現在(再投稿後)のサイクルのもの
             initial_posted = ff[0] - timedelta(days=ff[1])
             if initial_posted >= cutoff:
-                out[art.group_id].append(int(ff[2]))
+                out[art.group_id].append((int(ff[2]), None if ff[3] is None else int(ff[3])))
 
     logs = DeletedPostLog.query.filter(
         DeletedPostLog.youtube_video_id.isnot(None),
@@ -154,7 +161,8 @@ def _initial_cycle_samples(account_id: int, now: datetime, lookback_days: int, n
             continue
         if (lg.delete_reason or "").startswith("manual") and lg.deleted_at and lg.deleted_at - lg.posted_at < timedelta(days=FINAL_DAYS):
             continue
-        out[name_to_id.get(lg.group_name) if lg.group_name else None].append(int(lg.final_views))
+        out[name_to_id.get(lg.group_name) if lg.group_name else None].append(
+            (int(lg.final_views), None if lg.final_likes is None else int(lg.final_likes)))
     return out
 
 
@@ -230,22 +238,36 @@ def compute_state(account_id: int, now: datetime = None) -> dict:
         name_to_id.setdefault(g.name, -1)
 
     samples = _initial_cycle_samples(account_id, now, cfg["lookback_days"], name_to_id)
-    all_vals = [v for vs in samples.values() for v in vs]
-    overall = float(statistics.median(all_vals)) if all_vals else 0.0
+    use_buzz = cfg["metric"] == "buzz_rate"
+    all_vals = [v for vs in samples.values() for v, _ in vs]
     k = cfg["smoothing"]
+    # バズ率: 7日時点のいいね >= しきい値の割合(いいねが不明な記事は数えない)
+    thr = cfg["buzz_threshold"]
+    all_likes = [l for vs in samples.values() for _, l in vs if l is not None]
+    overall_rate = (sum(1 for l in all_likes if l >= thr) / len(all_likes)) if all_likes else 0.0
+    overall = overall_rate if use_buzz else (float(statistics.median(all_vals)) if all_vals else 0.0)
 
     plan_settings = {s.group_id: s for s in GroupPlanSetting.query.all()}
     rows = []
     for gid, name in roster:
-        vals = samples.get(gid, [])
+        pairs = samples.get(gid, [])
+        vals = [v for v, _ in pairs]
         n = len(vals)
         med = float(statistics.median(vals)) if vals else None
-        if n + k > 0:
+        likes = [l for _, l in pairs if l is not None]
+        buzz_n = sum(1 for l in likes if l >= thr)
+        buzz_rate = (buzz_n / len(likes)) if likes else None
+        if use_buzz:
+            m = len(likes)
+            score = ((m * buzz_rate if m else 0.0) + k * overall) / (m + k) if m + k > 0 else overall
+        elif n + k > 0:
             score = ((n * med if n else 0.0) + k * overall) / (n + k)
         else:
             score = med if med is not None else overall
-        # 少数のバズ動画に引っ張られないよう、評価値は「全体の中央値×上限倍率」までに抑えてから平方根をとる
+        # 少数のバズ動画に引っ張られないよう、評価値は「全体×上限倍率」までに抑える(閲覧数のときは、さらに平方根をとる)
         capped = min(score, overall * cfg["cap_ratio"]) if overall > 0 else score
+        if use_buzz:
+            capped = max(capped, overall * BUZZ_FLOOR_RATIO)   # 0%のグループの重みが0にならないように
         ps = plan_settings.get(gid)
         manual = float(ps.manual_factor) if ps is not None and ps.manual_factor is not None else 1.0
         manual = max(0.0, min(3.0, manual))
@@ -253,8 +275,9 @@ def compute_state(account_id: int, now: datetime = None) -> dict:
         boosted = bool(until and until > now)
         rows.append({
             "key": gid, "id": key_to_str(gid), "name": name, "n": n, "median": med, "score": score,
+            "buzz_rate": buzz_rate, "buzz_n": buzz_n,
             "score_capped": capped, "fixed": gid is None or name == CATCHALL_NAME,
-            "weight": math.sqrt(capped) if capped > 0 else 0.0, "manual": manual,
+            "weight": (capped if use_buzz else math.sqrt(capped)) if capped > 0 else 0.0, "manual": manual,
             "comeback_active": boosted, "comeback_until": until if boosted else None,
             "comeback_factor": cfg["boost_factor"] if boosted else 1.0,
         })
@@ -277,7 +300,8 @@ def compute_state(account_id: int, now: datetime = None) -> dict:
         r["target"] = targets.get(r["key"], 0.0)
         r["actual_count"] = counts.get(r["key"], 0)
         r["actual"] = (counts.get(r["key"], 0) / total_recent) if total_recent else 0.0
-    return {"cfg": cfg, "rows": rows, "overall_median": overall, "sample_total": len(all_vals),
+    return {"cfg": cfg, "rows": rows, "overall_median": overall, "overall_buzz_rate": overall_rate,
+            "sample_total": len(all_vals),
             "recent_total": total_recent, "name_to_id": name_to_id}
 
 
@@ -462,7 +486,10 @@ def compute_stock_plan(app, account_id: int, now: datetime = None) -> dict:
         rows.append({
             "id": r["id"], "name": r["name"],
             "turns": round(turns, 2), "repost": repost, "needed": needed, "stock": have, "balance": balance,
-            "score": round(r["score_capped"]), "score_raw": round(r["score"]), "fixed": r["fixed"], "median": None if r["median"] is None else round(r["median"]),
+            "score": round(r["score_capped"], 4) if cfg["metric"] == "buzz_rate" else round(r["score_capped"]),
+            "score_raw": round(r["score"], 4) if cfg["metric"] == "buzz_rate" else round(r["score"]),
+            "buzz_rate": r["buzz_rate"], "buzz_n": r["buzz_n"],
+            "fixed": r["fixed"], "median": None if r["median"] is None else round(r["median"]),
             "n": r["n"], "target": r["target"], "actual": r["actual"], "actual_count": r["actual_count"],
             "manual": r["manual"], "comeback_active": r["comeback_active"],
             "comeback_until": (r["comeback_until"] + timedelta(hours=9)).strftime("%m/%d") if r["comeback_until"] else None,
@@ -472,7 +499,10 @@ def compute_stock_plan(app, account_id: int, now: datetime = None) -> dict:
     totals = {"needed": sum(x["needed"] for x in rows), "stock": sum(x["stock"] for x in rows),
               "balance": sum(x["balance"] for x in rows)}
     return {"posts_per_day": cfg["posts_per_day"], "days": cfg["plan_days"], "slots": slots,
-            "enabled": cfg["enabled"], "overall_median": round(state["overall_median"]), "cap_ratio": cfg["cap_ratio"],
+            "enabled": cfg["enabled"], "metric": cfg["metric"],
+            "overall_median": round(state["overall_median"]) if cfg["metric"] == "views" else None,
+            "overall_buzz_rate": state["overall_buzz_rate"], "buzz_threshold": cfg["buzz_threshold"],
+            "cap_ratio": cfg["cap_ratio"],
             "min_share": cfg["min_share"],
             "sample_total": state["sample_total"], "recent_total": state["recent_total"],
             "lookback_days": cfg["lookback_days"], "rows": rows, "totals": totals}
